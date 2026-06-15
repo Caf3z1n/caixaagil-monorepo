@@ -1,0 +1,25 @@
+{
+  "name": "caixaagil-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Novo monorepo do Caixa Agil para a plataforma web, backend e futuros apps operacionais.",
+  "workspaces": [
+    "api",
+    "web",
+    "pdv",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:all": "npm --prefix pdv exec concurrently -- -k -n API,WEB,PDV -c cyan,green,magenta \"npm --prefix api run dev\" \"npm --prefix web run dev\" \"npm --prefix pdv run dev\"",
+    "dev:api": "npm --prefix api run dev",
+    "start:api": "npm --prefix api run start",
+    "build:api": "npm --prefix api run build",
+    "db:migrate:api": "npm --prefix api run migrate",
+    "dev:web": "npm --prefix web run dev",
+    "build:web": "npm --prefix web run build",
+    "typecheck:web": "npm --prefix web run typecheck",
+    "dev:pdv": "npm --prefix pdv run dev",
+    "build:pdv": "npm --prefix pdv run build",
+    "typecheck:pdv": "npm --prefix pdv run typecheck"
+  }
+}

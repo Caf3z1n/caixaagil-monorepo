@@ -1,0 +1,44 @@
+# dependencies
+node_modules/
+
+# next
+.next/
+out/
+
+# production
+dist/
+build/
+
+# local env
+.env
+.env.*
+!.env.example
+
+# vercel/local tooling
+.vercel/
+
+# local agent/test artifacts
+.ai/
+.codex/
+.impeccable/
+.playwright-cli/
+.playwright-artifacts/
+.playwright-mcp/
+.tmp-onboarding-frames/
+output/
+
+# cache and logs
+*.log
+.turbo/
+tmp/
+api/storage/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# os/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

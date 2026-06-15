@@ -1,0 +1,35 @@
+{
+  "name": "caixaagil-pdv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:next\" \"npm run dev:electron\"",
+    "dev:next": "next dev --webpack -p 3030",
+    "dev:electron": "wait-on http://localhost:3030 && electron electron/main.cjs",
+    "build": "next build",
+    "start": "electron electron/main.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "caixaagil-monorepo": "file:..",
+    "lucide-react": "^1.7.0",
+    "next": "16.2.6",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "sql.js": "^1.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "electron": "^39.2.6",
+    "typescript": "^5",
+    "wait-on": "^9.0.3"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  }
+}
