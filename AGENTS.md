@@ -19,6 +19,12 @@ npm run typecheck:web
 npm run build:web
 ```
 
+## Commits
+
+- Mensagens de commit devem ser escritas em pt-BR.
+- Use uma frase curta, objetiva e no imperativo ou presente, por exemplo: `Ajusta fluxo de convênios no PDV`.
+- Evite mensagens genéricas como `update`, `fix` ou `changes`; descreva a mudança principal feita no projeto.
+
 ## Direção de produto
 
 - Este monorepo é a v2 do Caixa Ágil.
