@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { Arquivo } = require('../models');
 const {
-  getArquivoTipo,
+  getArquivoTipoByFile,
   removePhysicalFile,
   toAbsolutePath,
   toRelativePath,
@@ -75,12 +75,22 @@ module.exports = {
     }
 
     try {
-      const tipo = getArquivoTipo(req.file.mimetype);
+      const tipo = getArquivoTipoByFile(req.file);
       const requestedVisibility = req.body?.visibilidade === 'publico' ? 'publico' : 'privado';
       const visibilidade = requestedVisibility === 'publico' && tipo === 'imagem'
         ? 'publico'
         : 'privado';
       const contexto = normalizeText(req.body?.contexto, 60) || null;
+
+      if (contexto === 'certificado_fiscal' && req.user.tipo_conta !== 'usuario') {
+        removePhysicalFile(req.file.path);
+
+        return res.status(403).json({
+          code: 'MAIN_ACCOUNT_REQUIRED',
+          message: 'O certificado fiscal exige acesso pela conta principal.',
+        });
+      }
+
       const caminhoRelativo = toRelativePath(req.file.path);
       const extensao = path.extname(req.file.filename).replace('.', '').toLowerCase() || 'bin';
 

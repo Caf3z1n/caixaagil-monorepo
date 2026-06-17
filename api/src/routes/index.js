@@ -14,6 +14,7 @@ const estoqueRoutes = require('./estoqueRoutes');
 const caixaRoutes = require('./caixaRoutes');
 const configuracaoRoutes = require('./configuracaoRoutes');
 const convenioRoutes = require('./convenioRoutes');
+const nfRoutes = require('./nfRoutes');
 const healthController = require('../app/controllers/healthController');
 
 const router = Router();
@@ -34,6 +35,7 @@ router.use('/estoques', estoqueRoutes);
 router.use('/caixa', caixaRoutes);
 router.use('/configuracoes', configuracaoRoutes);
 router.use('/convenios', convenioRoutes);
+router.use('/nf', nfRoutes);
 router.get('/health', healthController.show);
 
 module.exports = router;

@@ -12,6 +12,8 @@ const SaldoEstoqueProduto = require('./SaldoEstoqueProduto');
 const MovimentacaoEstoque = require('./MovimentacaoEstoque');
 const Caixa = require('./Caixa');
 const Venda = require('./Venda');
+const Nf = require('./Nf');
+const NfEvento = require('./NfEvento');
 const ClienteConvenio = require('./ClienteConvenio');
 const DespesaCaixa = require('./DespesaCaixa');
 const ConferenciaCaixa = require('./ConferenciaCaixa');
@@ -278,6 +280,106 @@ Venda.belongsTo(Caixa, {
   as: 'caixa_recebimento',
 });
 
+Usuario.hasMany(Nf, {
+  foreignKey: 'usuario_id',
+  as: 'notas_fiscais',
+});
+
+Nf.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
+Venda.hasMany(Nf, {
+  foreignKey: 'venda_id',
+  as: 'notas_fiscais',
+});
+
+Nf.belongsTo(Venda, {
+  foreignKey: 'venda_id',
+  as: 'venda',
+});
+
+Pdv.hasMany(Nf, {
+  foreignKey: 'pdv_id',
+  as: 'notas_fiscais',
+});
+
+Nf.belongsTo(Pdv, {
+  foreignKey: 'pdv_id',
+  as: 'pdv',
+});
+
+Caixa.hasMany(Nf, {
+  foreignKey: 'caixa_id',
+  as: 'notas_fiscais',
+});
+
+Nf.belongsTo(Caixa, {
+  foreignKey: 'caixa_id',
+  as: 'caixa',
+});
+
+Arquivo.hasMany(Nf, {
+  foreignKey: 'xml_enviado_arquivo_id',
+  as: 'notas_xml_enviado',
+});
+
+Nf.belongsTo(Arquivo, {
+  foreignKey: 'xml_enviado_arquivo_id',
+  as: 'xml_enviado',
+});
+
+Arquivo.hasMany(Nf, {
+  foreignKey: 'xml_autorizado_arquivo_id',
+  as: 'notas_xml_autorizado',
+});
+
+Nf.belongsTo(Arquivo, {
+  foreignKey: 'xml_autorizado_arquivo_id',
+  as: 'xml_autorizado',
+});
+
+Arquivo.hasMany(Nf, {
+  foreignKey: 'danfe_pdf_arquivo_id',
+  as: 'notas_danfe_pdf',
+});
+
+Nf.belongsTo(Arquivo, {
+  foreignKey: 'danfe_pdf_arquivo_id',
+  as: 'danfe_pdf',
+});
+
+Nf.hasMany(NfEvento, {
+  foreignKey: 'nf_id',
+  as: 'historico',
+});
+
+NfEvento.belongsTo(Nf, {
+  foreignKey: 'nf_id',
+  as: 'nota_fiscal',
+});
+
+Usuario.hasMany(NfEvento, {
+  foreignKey: 'usuario_id',
+  as: 'eventos_notas_fiscais',
+});
+
+NfEvento.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
+Arquivo.hasMany(NfEvento, {
+  foreignKey: 'arquivo_xml_id',
+  as: 'eventos_notas_xml',
+});
+
+NfEvento.belongsTo(Arquivo, {
+  foreignKey: 'arquivo_xml_id',
+  as: 'arquivo_xml',
+});
+
 Usuario.hasMany(ClienteConvenio, {
   foreignKey: 'usuario_id',
   as: 'clientes_convenio',
@@ -391,6 +493,8 @@ module.exports = {
   EventoPdv,
   GrupoFiscal,
   MovimentacaoEstoque,
+  Nf,
+  NfEvento,
   PagamentoAssinatura,
   Pdv,
   Produto,

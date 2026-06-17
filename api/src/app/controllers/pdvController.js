@@ -1,13 +1,18 @@
 ﻿const { createHash, randomBytes, randomInt, randomUUID } = require('crypto');
 const { Op } = require('sequelize');
+const fs = require('fs');
+const path = require('path');
 const sequelize = require('../../database');
 const {
+  Arquivo,
   Caixa,
   ClienteConvenio,
   DespesaCaixa,
   Estoque,
   EventoPdv,
   MovimentacaoEstoque,
+  Nf,
+  NfEvento,
   Pdv,
   Produto,
   SaldoEstoqueProduto,
@@ -16,6 +21,7 @@ const {
 } = require('../models');
 const produtoController = require('./produtoController');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
+const { toAbsolutePath } = require('../services/fileStorageService');
 
 const pairingTtlMinutes = 30;
 
@@ -970,6 +976,399 @@ async function processDesktopSyncEvent(pdv, rawEvent) {
   }
 }
 
+function asObject(value) {
+  if (!value) {
+    return {};
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  return typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function normalizeFiscalInteger(value, fallback = null, { min = 1, max = 999999999 } = {}) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.floor(parsed), min), max);
+}
+
+function normalizeFiscalModelo(value) {
+  const modelo = normalizeText(value, 2);
+  return modelo === '55' ? '55' : '65';
+}
+
+function normalizeFiscalAmbiente(value) {
+  const ambiente = normalizeText(value, 20);
+  return ambiente === 'producao' ? 'producao' : 'homologacao';
+}
+
+function getFiscalCode(value) {
+  const code = normalizeText(value, 20);
+  return code || null;
+}
+
+function normalizeFiscalStatus(document, rawResult, data) {
+  const status = normalizeText(document.status || rawResult.status, 32);
+  const cStat = getFiscalCode(document.codigo_retorno_sefaz || rawResult.codigoRetornoSefaz || data.cStat || data.codigoRetornoSefaz);
+  const success = Boolean(rawResult.success);
+  const normalized = `${status} ${data.xMotivo || ''} ${rawResult.friendlyMessage || ''}`.toLowerCase();
+
+  if (success && (status === 'autorizada' || cStat === '100')) {
+    return 'autorizada';
+  }
+
+  if (status.includes('cancel')) {
+    return 'cancelada';
+  }
+
+  if (status.includes('inutil')) {
+    return 'inutilizada';
+  }
+
+  if (normalized.includes('contingencia') || normalized.includes('contingência')) {
+    return 'contingencia';
+  }
+
+  if (cStat === '204' || cStat === '539' || normalized.includes('duplicidade')) {
+    return 'rejeitada';
+  }
+
+  if (status.includes('rejeitada') || status.includes('denegada')) {
+    return status.includes('denegada') ? 'denegada' : 'rejeitada';
+  }
+
+  if (status.includes('pendente') || status.includes('transmitindo')) {
+    return status.includes('transmitindo') ? 'transmitindo' : 'pendente';
+  }
+
+  if (status.includes('configuracao') || status.includes('worker') || status.includes('erro') || rawResult.success === false) {
+    return 'erro_tecnico';
+  }
+
+  return 'pendente';
+}
+
+function resolveFiscalTipoEmissao(document, rawResult, data, status) {
+  const value = normalizeText(document.tipo_emissao || data.tpEmis || data.tipoEmissao || rawResult.tipo_emissao, 24);
+  const normalized = `${value} ${status} ${rawResult.status || ''}`.toLowerCase();
+
+  if (value === '9' || normalized.includes('contingencia') || normalized.includes('contingência')) {
+    return 'contingencia';
+  }
+
+  return 'normal';
+}
+
+function resolveFiscalTotalCentavos(document, rawResult) {
+  const payload = asObject(rawResult.payload || document.payload);
+  const sale = asObject(payload.sale || payload.venda);
+
+  return sanitizeCents(
+    document.total_centavos ??
+      document.totalCents ??
+      sale.totalCents ??
+      sale.total_centavos ??
+      payload.totalCents ??
+      payload.total_centavos
+  );
+}
+
+function getFiscalDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function buildFiscalReturnPayload(document, rawResult, data) {
+  return {
+    origem: 'pdv',
+    documento_local_id: normalizeText(document.id, 64),
+    status_local: normalizeText(document.status || rawResult.status, 64) || null,
+    codigo_retorno_sefaz: getFiscalCode(document.codigo_retorno_sefaz || rawResult.codigoRetornoSefaz || data.cStat || data.codigoRetornoSefaz),
+    mensagem_sefaz: normalizeText(document.mensagem_sefaz || rawResult.mensagemSefaz || data.xMotivo, 500) || null,
+    mensagem_operador: normalizeText(document.mensagem_operador || data.mensagemOperador || rawResult.friendlyMessage, 500) || null,
+    mensagem_tecnica: document.mensagem_tecnica || rawResult.technicalMessage || null,
+    protocolo: normalizeText(document.protocolo || data.protocolo || data.nProt, 80) || null,
+    chave: normalizeText(document.chave || data.chave, 44) || null,
+    caminhos: {
+      xml_enviado_path: document.xml_enviado_path || data.xmlEnviadoPath || null,
+      xml_autorizado_path: document.xml_autorizado_path || data.xmlAutorizadoPath || null,
+      pdf_path: document.pdf_path || data.pdfPath || null,
+      log_path: document.log_path || rawResult.logPath || null,
+    },
+    resposta: rawResult,
+  };
+}
+
+function buildFiscalEventSummary(eventData) {
+  return {
+    tipo: eventData.tipo,
+    status: eventData.status,
+    codigo_retorno_sefaz: eventData.codigo_retorno_sefaz || null,
+    mensagem: eventData.mensagem || null,
+    ocorrido_em: eventData.ocorrido_em.toISOString(),
+  };
+}
+
+async function appendFiscalEvent(nf, eventData, transaction) {
+  const eventos = Array.isArray(nf.eventos) ? nf.eventos : [];
+  const lastEvent = eventos.at(-1);
+
+  if (
+    lastEvent &&
+    lastEvent.tipo === eventData.tipo &&
+    lastEvent.status === eventData.status &&
+    String(lastEvent.codigo_retorno_sefaz || '') === String(eventData.codigo_retorno_sefaz || '') &&
+    String(lastEvent.mensagem || '') === String(eventData.mensagem || '')
+  ) {
+    return false;
+  }
+
+  nf.eventos = [...eventos, buildFiscalEventSummary(eventData)].slice(-80);
+  await NfEvento.create(
+    {
+      nf_id: nf.id,
+      usuario_id: nf.usuario_id,
+      tipo: eventData.tipo,
+      status: eventData.status,
+      codigo_retorno_sefaz: eventData.codigo_retorno_sefaz || null,
+      mensagem: eventData.mensagem || null,
+      detalhes: eventData.detalhes && typeof eventData.detalhes === 'object' ? eventData.detalhes : {},
+      ocorrido_em: eventData.ocorrido_em,
+    },
+    { transaction }
+  );
+
+  return true;
+}
+
+async function findExistingFiscalDocument(pdv, values, transaction) {
+  const baseWhere = { usuario_id: pdv.usuario_id };
+  const id = normalizeText(values.id, 64);
+  const chave = normalizeText(values.chave_acesso, 44);
+
+  if (id) {
+    const byId = await Nf.findOne({
+      where: { ...baseWhere, id },
+      transaction,
+    });
+
+    if (byId) {
+      return byId;
+    }
+  }
+
+  if (chave) {
+    const byKey = await Nf.findOne({
+      where: { ...baseWhere, chave_acesso: chave },
+      transaction,
+    });
+
+    if (byKey) {
+      return byKey;
+    }
+  }
+
+  return Nf.findOne({
+    where: {
+      ...baseWhere,
+      ambiente: values.ambiente,
+      modelo: values.modelo,
+      serie: values.serie,
+      numero: values.numero,
+    },
+    transaction,
+  });
+}
+
+async function processDesktopFiscalDocument(pdv, rawDocument) {
+  const document = asObject(rawDocument);
+  const rawResult = asObject(document.raw_result || document.rawResult);
+  const data = asObject(rawResult.data);
+  const payload = asObject(rawResult.payload || document.payload);
+  const documentId = normalizeText(document.id || data.documentId, 64);
+  const ambiente = normalizeFiscalAmbiente(document.ambiente || data.ambiente || payload.ambiente);
+  const modelo = normalizeFiscalModelo(document.modelo || data.modelo || payload.modelo);
+  const serie = normalizeFiscalInteger(document.serie ?? data.serie ?? payload.serie, null, { min: 1, max: 999 });
+  const numero = normalizeFiscalInteger(document.numero ?? data.numero ?? payload.numero, null);
+
+  if (!documentId || !serie || !numero) {
+    return {
+      id: documentId || null,
+      status: 'erro',
+      message: 'Documento fiscal local incompleto.',
+    };
+  }
+
+  const status = normalizeFiscalStatus(document, rawResult, data);
+  const vendaId = normalizeText(document.venda_id || document.vendaId || payload.vendaId || payload.venda_id, 64) || null;
+  const caixaCandidateId = normalizeText(document.caixa_id || document.caixaId || payload.caixaId || payload.caixa_id || asObject(payload.session).id, 64) || null;
+  const codigoRetorno = getFiscalCode(document.codigo_retorno_sefaz || rawResult.codigoRetornoSefaz || data.cStat || data.codigoRetornoSefaz);
+  const mensagemRetorno = normalizeText(document.mensagem_sefaz || rawResult.mensagemSefaz || data.xMotivo || rawResult.friendlyMessage, 1000) || null;
+  const retornoSefaz = buildFiscalReturnPayload(document, rawResult, data);
+  const now = new Date();
+  const emittedAt = getFiscalDate(document.created_at || document.createdAt || payload.createdAt) || now;
+  const authorizedAt = status === 'autorizada'
+    ? getFiscalDate(data.autorizadaEm || data.autorizada_em || document.updated_at || document.updatedAt) || now
+    : null;
+  const transaction = await sequelize.transaction();
+
+  try {
+    let caixaId = null;
+
+    if (vendaId) {
+      const venda = await Venda.findOne({
+        where: {
+          id: vendaId,
+          usuario_id: pdv.usuario_id,
+        },
+        transaction,
+      });
+
+      if (!venda) {
+        await transaction.rollback();
+        return {
+          id: documentId,
+          status: 'erro',
+          message: 'Venda ainda não sincronizada na API.',
+        };
+      }
+    }
+
+    if (caixaCandidateId) {
+      const caixa = await Caixa.findOne({
+        where: {
+          id: caixaCandidateId,
+          usuario_id: pdv.usuario_id,
+        },
+        transaction,
+      });
+
+      caixaId = caixa?.id || null;
+    }
+
+    const values = {
+      id: documentId,
+      usuario_id: pdv.usuario_id,
+      venda_id: vendaId,
+      pdv_id: pdv.id,
+      caixa_id: caixaId,
+      ambiente,
+      modelo,
+      serie,
+      numero,
+      chave_acesso: normalizeText(document.chave || data.chave, 44) || null,
+      status,
+      tipo_emissao: resolveFiscalTipoEmissao(document, rawResult, data, status),
+      finalidade: 'normal',
+      natureza_operacao: normalizeText(document.natureza_operacao || payload.naturezaOperacao || payload.natureza_operacao, 120) || 'Venda',
+      total_centavos: resolveFiscalTotalCentavos(document, rawResult),
+      protocolo_autorizacao: normalizeText(document.protocolo || data.protocolo || data.nProt, 80) || null,
+      codigo_retorno_sefaz: codigoRetorno,
+      mensagem_retorno_sefaz: mensagemRetorno,
+      ultimo_erro_tecnico: document.mensagem_tecnica || rawResult.technicalMessage || null,
+      payload: {
+        origem: 'pdv',
+        pdv: {
+          id: pdv.id,
+          dispositivo_id: pdv.dispositivo_id,
+        },
+        documento: {
+          id: documentId,
+          command: normalizeText(document.command, 64) || null,
+          venda_id: vendaId,
+          caixa_id: caixaId,
+          log_path: document.log_path || null,
+        },
+        venda: payload.sale || payload.venda || null,
+        itens: Array.isArray(payload.itens) ? payload.itens : [],
+      },
+      retorno_sefaz: retornoSefaz,
+      emitida_em: emittedAt,
+      autorizada_em: authorizedAt,
+      cancelada_em: status === 'cancelada' ? getFiscalDate(document.updated_at || document.updatedAt) || now : null,
+    };
+    const eventData = {
+      tipo: normalizeText(document.command, 32) || 'sync_pdv',
+      status,
+      codigo_retorno_sefaz: codigoRetorno,
+      mensagem: mensagemRetorno || values.ultimo_erro_tecnico || null,
+      detalhes: retornoSefaz,
+      ocorrido_em: now,
+    };
+    const existing = await findExistingFiscalDocument(pdv, values, transaction);
+    let nf = existing;
+
+    if (nf) {
+      Object.assign(nf, {
+        ...values,
+        id: nf.id,
+      });
+      await appendFiscalEvent(nf, eventData, transaction);
+      await nf.save({ transaction });
+    } else {
+      nf = await Nf.create(
+        {
+          ...values,
+          eventos: [buildFiscalEventSummary(eventData)],
+        },
+        { transaction }
+      );
+      await NfEvento.create(
+        {
+          nf_id: nf.id,
+          usuario_id: nf.usuario_id,
+          tipo: eventData.tipo,
+          status: eventData.status,
+          codigo_retorno_sefaz: eventData.codigo_retorno_sefaz,
+          mensagem: eventData.mensagem,
+          detalhes: eventData.detalhes,
+          ocorrido_em: eventData.ocorrido_em,
+        },
+        { transaction }
+      );
+    }
+
+    await transaction.commit();
+
+    return {
+      id: documentId,
+      api_nf_id: nf.id,
+      status: existing ? 'atualizado' : 'processado',
+    };
+  } catch (error) {
+    await transaction.rollback();
+
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return {
+        id: documentId,
+        status: 'erro',
+        message: 'NF já sincronizada com a mesma combinação fiscal.',
+      };
+    }
+
+    return {
+      id: documentId,
+      status: 'erro',
+      message: error.message || 'Erro ao sincronizar documento fiscal.',
+    };
+  }
+}
+
 async function findUserPdv(usuarioId, pdvId) {
   const id = Number(pdvId);
 
@@ -1263,6 +1662,50 @@ module.exports = {
     }
   },
 
+  async downloadDesktopFiscalCertificate(req, res) {
+    try {
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
+
+      if (!pdv) {
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const arquivoId = Number(req.body?.arquivo_id || req.body?.arquivoId);
+
+      if (!Number.isInteger(arquivoId) || arquivoId <= 0) {
+        return res.status(400).json({ message: 'Informe o certificado fiscal.' });
+      }
+
+      const arquivo = await Arquivo.findOne({
+        where: {
+          id: arquivoId,
+          usuario_id: pdv.usuario_id,
+          tipo: 'certificado',
+        },
+      });
+
+      if (!arquivo) {
+        return res.status(404).json({ message: 'Certificado fiscal não encontrado.' });
+      }
+
+      const absolutePath = toAbsolutePath(arquivo.caminho_relativo);
+
+      if (!absolutePath || !fs.existsSync(absolutePath)) {
+        return res.status(404).json({ message: 'Arquivo do certificado fiscal não encontrado.' });
+      }
+
+      return res.json({
+        id: arquivo.id,
+        nome_original: arquivo.nome_original,
+        extensao: path.extname(arquivo.nome_original || arquivo.nome_armazenado || '').replace('.', '').toLowerCase() || 'pfx',
+        tamanho_bytes: Number(arquivo.tamanho_bytes || 0),
+        conteudo_base64: fs.readFileSync(absolutePath).toString('base64'),
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao baixar certificado fiscal.', detail: error.message });
+    }
+  },
+
   async syncDesktopEvents(req, res) {
     try {
       const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
@@ -1304,6 +1747,49 @@ module.exports = {
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao sincronizar eventos do PDV.', detail: error.message });
+    }
+  },
+
+  async syncDesktopFiscalDocuments(req, res) {
+    try {
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
+
+      if (!pdv) {
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const documentos = Array.isArray(req.body?.documentos)
+        ? req.body.documentos
+        : Array.isArray(req.body?.documents)
+          ? req.body.documents
+          : [];
+
+      if (documentos.length === 0) {
+        return res.status(400).json({ message: 'Nenhum documento fiscal informado.' });
+      }
+
+      const results = [];
+
+      for (const documento of documentos.slice(0, 100)) {
+        results.push(await processDesktopFiscalDocument(pdv, documento));
+      }
+
+      const now = new Date();
+      pdv.status = 'online';
+      pdv.ultimo_acesso_em = now;
+      pdv.ultima_sincronizacao_em = now;
+      pdv.sincronizacao_pendente = results.some(result => result.status === 'erro');
+      pdv.ultima_fila_offline_em = pdv.sincronizacao_pendente ? now : null;
+      await pdv.save();
+
+      return res.json({
+        sincronizado_em: now.toISOString(),
+        processados: results.filter(result => ['processado', 'atualizado', 'duplicado'].includes(result.status)).length,
+        erros: results.filter(result => result.status === 'erro').length,
+        documentos: results,
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao sincronizar documentos fiscais do PDV.', detail: error.message });
     }
   },
 

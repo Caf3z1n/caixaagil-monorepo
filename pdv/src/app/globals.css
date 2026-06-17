@@ -320,8 +320,11 @@ button {
 }
 
 .pdv-system-page {
+  height: 100svh;
   min-height: 100svh;
   overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   background: var(--orange);
   color: var(--ink);
 }
@@ -1032,6 +1035,17 @@ button {
   align-content: center;
 }
 
+.pdv-cashier-shell-scroll {
+  align-content: start;
+  min-height: auto;
+  padding-top: 30px;
+  padding-bottom: 84px;
+}
+
+.pdv-cashier-shell-wide.pdv-cashier-shell-scroll {
+  align-content: start;
+}
+
 .pdv-session-strip,
 .pdv-cashier-runtime {
   display: flex;
@@ -1168,7 +1182,7 @@ button {
 .pdv-history-line {
   position: relative;
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 148px 126px;
+  grid-template-columns: 48px minmax(0, 1fr) 150px 148px 126px;
   gap: 16px;
   align-items: center;
   width: 100%;
@@ -1306,18 +1320,82 @@ button {
 
 .pdv-command-line-total,
 .pdv-command-line-actions,
+.pdv-history-fiscal,
 .pdv-history-line-total,
 .pdv-history-line-action {
   display: grid;
   align-content: center;
-  justify-items: end;
   min-width: 0;
+}
+
+.pdv-command-line-total,
+.pdv-command-line-actions,
+.pdv-history-line-total,
+.pdv-history-line-action {
+  justify-items: end;
   text-align: right;
 }
 
 .pdv-command-line-total,
+.pdv-history-fiscal,
 .pdv-history-line-total {
   gap: 3px;
+}
+
+.pdv-history-fiscal {
+  justify-items: start;
+  text-align: left;
+}
+
+.pdv-history-fiscal strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 0.82rem;
+  font-weight: 950;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-history-fiscal em {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.pdv-history-fiscal-success em {
+  border-color: oklch(0.8 0.09 154);
+  background: oklch(0.96 0.035 154);
+  color: var(--success);
+}
+
+.pdv-history-fiscal-warning em {
+  border-color: oklch(0.86 0.11 73);
+  background: oklch(0.975 0.04 73);
+  color: oklch(0.48 0.12 66);
+}
+
+.pdv-history-fiscal-error em {
+  border-color: oklch(0.84 0.07 29);
+  background: oklch(0.982 0.018 29);
+  color: var(--danger);
+}
+
+.pdv-history-fiscal-neutral em {
+  border-color: var(--line-cool);
+  background: oklch(0.965 0.005 76);
+  color: var(--muted);
 }
 
 .pdv-command-line-total em,
@@ -2777,6 +2855,310 @@ button {
   white-space: nowrap;
 }
 
+.pdv-sale-fiscal-summary {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 2px 0 4px;
+}
+
+.pdv-sale-fiscal-summary > svg {
+  color: var(--orange);
+}
+
+.pdv-sale-fiscal-summary div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pdv-sale-fiscal-summary strong {
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 950;
+  line-height: 1.1;
+}
+
+.pdv-sale-fiscal-summary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.pdv-sale-fiscal-summary button {
+  border: 0;
+  background: transparent;
+  color: var(--orange);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.pdv-sale-fiscal-summary button:hover:not(:disabled) {
+  color: var(--orange-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.pdv-sale-fiscal-summary button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.pdv-sale-fiscal-summary-success span,
+.pdv-fiscal-details-summary-success span {
+  border-color: oklch(0.8 0.09 154);
+  background: oklch(0.96 0.035 154);
+  color: var(--success);
+}
+
+.pdv-sale-fiscal-summary-warning span,
+.pdv-fiscal-details-summary-warning span {
+  border-color: oklch(0.86 0.11 73);
+  background: oklch(0.975 0.04 73);
+  color: oklch(0.48 0.12 66);
+}
+
+.pdv-sale-fiscal-summary-error span,
+.pdv-fiscal-details-summary-error span {
+  border-color: oklch(0.84 0.07 29);
+  background: oklch(0.982 0.018 29);
+  color: var(--danger);
+}
+
+.pdv-sale-fiscal-summary-neutral span,
+.pdv-fiscal-details-summary-neutral span {
+  border-color: var(--line-cool);
+  background: oklch(0.965 0.005 76);
+  color: var(--muted);
+}
+
+.pdv-fiscal-details-flow {
+  display: grid;
+  gap: 18px;
+}
+
+.pdv-fiscal-details-summary {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.pdv-fiscal-details-summary > svg {
+  color: var(--orange);
+}
+
+.pdv-fiscal-details-summary div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pdv-fiscal-details-summary strong {
+  color: var(--ink-deep);
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+.pdv-fiscal-details-summary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 950;
+}
+
+.pdv-fiscal-events {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.pdv-fiscal-events-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pdv-fiscal-events-head strong {
+  color: var(--ink-deep);
+  font-size: 0.92rem;
+  font-weight: 950;
+}
+
+.pdv-fiscal-events-head span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.pdv-fiscal-history-list {
+  display: grid;
+  gap: 8px;
+}
+
+.pdv-fiscal-history-item {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid oklch(0.88 0.007 75);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.pdv-fiscal-history-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.pdv-fiscal-history-main strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-fiscal-history-main em {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.pdv-fiscal-history-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.72rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.pdv-fiscal-history-success {
+  border-color: oklch(0.8 0.09 154);
+  background: oklch(0.96 0.035 154);
+  color: var(--success);
+}
+
+.pdv-fiscal-history-warning,
+.pdv-fiscal-history-pending {
+  border-color: oklch(0.86 0.11 73);
+  background: oklch(0.975 0.04 73);
+  color: oklch(0.48 0.12 66);
+}
+
+.pdv-fiscal-history-error {
+  border-color: oklch(0.84 0.07 29);
+  background: oklch(0.982 0.018 29);
+  color: var(--danger);
+}
+
+.pdv-fiscal-history-neutral {
+  border-color: var(--line-cool);
+  background: oklch(0.96 0.004 76);
+  color: var(--muted);
+}
+
+.pdv-fiscal-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pdv-fiscal-history-meta span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: oklch(0.965 0.005 76);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-fiscal-history-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pdv-fiscal-reprint-action {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.pdv-fiscal-history-item p {
+  margin: 0;
+  color: var(--ink-deep);
+  font-size: 0.82rem;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.pdv-fiscal-history-empty {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: oklch(0.965 0.005 76);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.pdv-fiscal-history-empty svg {
+  color: var(--orange);
+}
+
+.pdv-fiscal-history-skeleton {
+  display: grid;
+  gap: 8px;
+}
+
+.pdv-fiscal-history-skeleton span {
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, oklch(0.94 0.006 76), oklch(0.985 0.004 76), oklch(0.94 0.006 76));
+  background-size: 180% 100%;
+  animation: pdv-skeleton-sweep 1.1s ease-in-out infinite;
+}
+
 .pdv-cancel-sale-warning {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr);
@@ -3338,8 +3720,7 @@ button {
 
 .pdv-agreement-note-list {
   display: grid;
-  overflow: hidden auto;
-  max-height: 292px;
+  overflow: hidden;
   border: 1px solid var(--line-cool);
   border-radius: 14px;
   background: var(--surface);
@@ -3708,6 +4089,138 @@ button {
   white-space: nowrap;
 }
 
+.pdv-fiscal-dispatch,
+.pdv-fiscal-emission {
+  display: grid;
+  gap: 16px;
+}
+
+.pdv-fiscal-dispatch-total {
+  padding-bottom: 16px;
+}
+
+.pdv-fiscal-dispatch-icon {
+  border-color: oklch(0.86 0.09 55);
+  background: oklch(0.965 0.045 55);
+  color: var(--orange);
+}
+
+.pdv-fiscal-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pdv-fiscal-choice-grid > div {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 4px 10px;
+  min-height: 84px;
+  padding: 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.pdv-fiscal-choice-grid svg {
+  grid-row: span 2;
+  color: var(--orange);
+}
+
+.pdv-fiscal-choice-grid strong {
+  color: var(--ink-deep);
+  font-size: 0.92rem;
+  font-weight: 950;
+  line-height: 1.1;
+}
+
+.pdv-fiscal-choice-grid span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+  line-height: 1.35;
+}
+
+.pdv-fiscal-emission-main {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.pdv-fiscal-emission-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--orange);
+}
+
+.pdv-fiscal-emission-main div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.pdv-fiscal-emission-main span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 820;
+  line-height: 1.25;
+}
+
+.pdv-fiscal-emission-main strong {
+  color: var(--ink-deep);
+  font-size: 1rem;
+  font-weight: 930;
+  line-height: 1.28;
+}
+
+.pdv-fiscal-emission-success .pdv-fiscal-emission-icon {
+  border-color: oklch(0.78 0.08 151);
+  background: oklch(0.955 0.04 151);
+  color: oklch(0.52 0.16 151);
+}
+
+.pdv-fiscal-emission-error .pdv-fiscal-emission-icon {
+  border-color: oklch(0.78 0.13 29);
+  background: oklch(0.974 0.025 29);
+  color: var(--danger);
+}
+
+.pdv-fiscal-emission-queued .pdv-fiscal-emission-icon {
+  border-color: oklch(0.84 0.09 55);
+  background: oklch(0.968 0.04 55);
+  color: var(--orange);
+}
+
+.pdv-fiscal-emission-note,
+.pdv-fiscal-emission-key,
+.pdv-fiscal-emission-detail {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 760;
+  line-height: 1.45;
+}
+
+.pdv-fiscal-emission-detail {
+  color: var(--ink-deep);
+}
+
+.pdv-fiscal-emission-key {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pdv-close-panel {
   display: grid;
   gap: 18px;
@@ -3851,15 +4364,17 @@ button {
 
 .pdv-settings-list {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
 .pdv-settings-list div {
   display: grid;
   gap: 6px;
-  padding: 14px;
+  min-height: 72px;
+  padding: 12px 14px;
   border: 1px solid var(--line-cool);
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--surface);
 }
 
@@ -4000,6 +4515,137 @@ button {
   cursor: not-allowed;
 }
 
+.pdv-settings-printing {
+  margin-top: 2px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.pdv-printing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 104px 132px;
+  gap: 10px;
+  align-items: end;
+}
+
+.pdv-printing-grid > .pdv-printing-toggle {
+  grid-column: 1 / -1;
+}
+
+.pdv-printing-grid > .pdv-printing-path {
+  grid-column: 1 / -1;
+}
+
+.pdv-printing-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.pdv-printing-grid label span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+.pdv-printing-grid input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-deep);
+  font: inherit;
+  font-weight: 850;
+}
+
+.pdv-printing-grid input:disabled {
+  color: var(--muted);
+  background: var(--surface-muted);
+  cursor: not-allowed;
+}
+
+.pdv-printing-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.pdv-printing-toggle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pdv-printing-toggle strong,
+.pdv-printing-toggle small {
+  display: block;
+  line-height: 1.1;
+}
+
+.pdv-printing-toggle strong {
+  color: var(--ink-deep);
+  font-size: 0.84rem;
+  font-weight: 950;
+}
+
+.pdv-printing-toggle small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 780;
+}
+
+.pdv-printing-switch {
+  position: relative;
+  display: inline-flex;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: oklch(0.86 0.023 252);
+  transition: background 160ms ease;
+}
+
+.pdv-printing-switch > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 4px 10px oklch(0.22 0.04 250 / 0.18);
+  transition: transform 160ms ease;
+}
+
+.pdv-printing-toggle-active .pdv-printing-switch {
+  background: var(--orange);
+}
+
+.pdv-printing-toggle-active .pdv-printing-switch > span {
+  transform: translateX(20px);
+}
+
+.pdv-printing-save {
+  justify-self: end;
+  border-color: oklch(0.72 0.16 150);
+  background: oklch(0.54 0.16 150);
+  color: white;
+}
+
+.pdv-printing-save:hover:not(:disabled) {
+  background: oklch(0.49 0.16 150);
+}
+
 .pdv-sync-failure-list {
   display: grid;
   gap: 10px;
@@ -4100,8 +4746,6 @@ button {
 }
 
 .pdv-sync-failure-technical pre {
-  max-height: 220px;
-  overflow: auto;
   margin: 10px 0 0;
   padding: 12px;
   border-radius: 10px;
@@ -4312,6 +4956,12 @@ button {
     padding-top: 24px;
   }
 
+  .pdv-cashier-shell-scroll {
+    min-height: auto;
+    padding-top: 22px;
+    padding-bottom: 72px;
+  }
+
   .pdv-cashier-section-main {
     font-size: 2.14rem;
   }
@@ -4392,7 +5042,13 @@ button {
 
   .pdv-history-line-total {
     grid-column: 3;
-    grid-row: 1 / span 2;
+    grid-row: 1 / span 3;
+  }
+
+  .pdv-history-fiscal {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
   }
 
   .pdv-command-line-actions {
@@ -4403,9 +5059,33 @@ button {
 
   .pdv-history-line-action {
     grid-column: 2 / span 2;
-    grid-row: 2;
+    grid-row: 3;
     justify-items: start;
     text-align: left;
+  }
+
+  .pdv-sale-fiscal-summary {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .pdv-sale-fiscal-summary button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .pdv-fiscal-details-summary div,
+  .pdv-fiscal-events-head,
+  .pdv-fiscal-history-main {
+    align-items: flex-start;
+  }
+
+  .pdv-fiscal-details-summary div,
+  .pdv-fiscal-history-main {
+    flex-direction: column;
+  }
+
+  .pdv-fiscal-history-main em {
+    margin-left: 0;
   }
 
   .pdv-command-line-actions > span {
@@ -4573,12 +5253,33 @@ button {
     border-left: 0;
   }
 
+  .pdv-fiscal-choice-grid,
+  .pdv-fiscal-emission-main {
+    grid-template-columns: 1fr;
+  }
+
+  .pdv-fiscal-emission-main {
+    align-items: start;
+  }
+
   .pdv-sale-details-strip {
     grid-template-columns: 1fr;
   }
 
   .pdv-sync-grid {
     grid-template-columns: 1fr;
+  }
+
+  .pdv-settings-list {
+    grid-template-columns: 1fr;
+  }
+
+  .pdv-printing-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pdv-printing-save {
+    justify-self: stretch;
   }
 
   .pdv-sync-failure-row {

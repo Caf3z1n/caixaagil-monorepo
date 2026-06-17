@@ -8,6 +8,8 @@
     "dev": "concurrently -k \"npm run dev:next\" \"npm run dev:electron\"",
     "dev:next": "next dev --webpack -p 3030",
     "dev:electron": "wait-on http://localhost:3030 && electron electron/main.cjs",
+    "build:fiscal-worker": "dotnet build fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj",
+    "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -o electron/resources/fiscal-worker/win-x64",
     "build": "next build",
     "start": "electron electron/main.cjs",
     "typecheck": "tsc --noEmit"

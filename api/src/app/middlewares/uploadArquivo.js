@@ -1,9 +1,9 @@
 const multer = require('multer');
 const {
-  allowedMimeTypes,
   buildStorageDirectory,
   buildStoredFileName,
   ensureDirectory,
+  isAllowedUploadFile,
 } = require('../services/fileStorageService');
 
 const maxFileSizeMb = Number(process.env.ARQUIVOS_MAX_MB || 12);
@@ -24,7 +24,7 @@ const upload = multer({
     },
   }),
   fileFilter(_req, file, callback) {
-    if (!allowedMimeTypes.has(file.mimetype)) {
+    if (!isAllowedUploadFile(file)) {
       callback(new Error('Tipo de arquivo não permitido.'));
       return;
     }

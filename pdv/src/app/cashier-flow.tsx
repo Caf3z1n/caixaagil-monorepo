@@ -38,6 +38,7 @@ import {
   Package,
   Pill,
   Plus,
+  Printer,
   QrCode,
   ReceiptText,
   RefreshCw,
@@ -61,6 +62,7 @@ import type { LucideIcon } from "lucide-react";
 import { apiPost, getApiBaseUrl } from "@/lib/api-client";
 import {
   getLocalPdvStore,
+  type FiscalDocumentRecord,
   type LocalPdvStoreEventPayload,
   type LocalPdvStorePendingEvent,
   type LocalPdvStoreSummary
@@ -83,7 +85,10 @@ type Product = {
   categoryColor: string;
   categoryAccent?: string;
   imageUrl?: string | null;
+  fiscal?: ProductFiscal | null;
 };
+
+type ProductFiscal = Record<string, string | number | boolean | null>;
 
 type ProductCategory = {
   id: string;
@@ -107,10 +112,13 @@ type ApiCatalogProduct = {
   nome: string;
   categoria_id?: number | null;
   codigo_barras?: string | null;
+  ncm?: string | null;
   preco_custo_centavos?: number;
   preco_venda_centavos?: number;
   quantidade_estoque?: number | null;
   categoria?: ApiCatalogCategory | null;
+  grupo_fiscal?: Record<string, unknown> | null;
+  grupoFiscal?: Record<string, unknown> | null;
   imagem?: {
     url?: string | null;
   } | null;
@@ -126,6 +134,15 @@ type ApiCatalogResponse = {
 
 type ApiPdvSettings = {
   formas_pagamento?: Partial<Record<PaymentMethod, boolean>> | null;
+  fiscal?: Record<string, unknown> | null;
+};
+
+type ApiFiscalCertificateDownload = {
+  id: number;
+  nome_original: string;
+  extensao: string;
+  tamanho_bytes: number;
+  conteudo_base64: string;
 };
 
 type ApiAgreementClient = {
@@ -163,6 +180,18 @@ type SyncPushResponse = {
   }>;
 };
 
+type SyncFiscalResponse = {
+  sincronizado_em: string;
+  processados: number;
+  erros: number;
+  documentos: Array<{
+    id: string;
+    api_nf_id?: string | null;
+    status: "processado" | "atualizado" | "duplicado" | "erro" | string;
+    message?: string;
+  }>;
+};
+
 type ShiftPreviewResponse = {
   data_operacao_chave: string;
   data_operacao_rotulo: string;
@@ -191,6 +220,23 @@ type SaleRecord = {
   clientName?: string | null;
   status?: "completed" | "canceled";
   canceledAt?: string | null;
+};
+
+type FiscalEmissionModalTone = "pending" | "queued" | "success" | "error";
+
+type FiscalEmissionModalState = {
+  tone: FiscalEmissionModalTone;
+  title: string;
+  message: string;
+  detail?: string | null;
+  sale: SaleRecord;
+  documentId?: string | null;
+  fiscalNumber?: number | null;
+  fiscalStatus?: string | null;
+  fiscalProtocol?: string | null;
+  fiscalKey?: string | null;
+  xmlPath?: string | null;
+  logPath?: string | null;
 };
 
 type AgreementClient = {
@@ -370,6 +416,20 @@ const defaultPaymentSettings: PaymentSettings = {
   pix: true,
   cartao: true,
   convenio: false
+};
+
+type PdvFiscalPrintSettings = {
+  useDefaultPrinter: boolean;
+  printerName: string;
+  bobinaMm: number;
+  danfeExePath: string;
+};
+
+const defaultPdvFiscalPrintSettings: PdvFiscalPrintSettings = {
+  useDefaultPrinter: true,
+  printerName: "",
+  bobinaMm: 80,
+  danfeExePath: ""
 };
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
@@ -637,6 +697,40 @@ function mapCatalogCategory(category: ApiCatalogCategory): ProductCategory {
   };
 }
 
+function getFiscalString(source: Record<string, unknown> | null, key: string) {
+  const value = source?.[key];
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function getFiscalNumber(source: Record<string, unknown> | null, key: string) {
+  const value = Number(source?.[key]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function mapProductFiscal(product: ApiCatalogProduct): ProductFiscal | null {
+  const group = asRecord(product.grupo_fiscal) ?? asRecord(product.grupoFiscal);
+  const ncm = String(product.ncm ?? getFiscalString(group, "ncm")).trim();
+
+  if (!group && !ncm) {
+    return null;
+  }
+
+  return {
+    ncm,
+    cfop: getFiscalString(group, "cfop"),
+    regime_tributario: getFiscalString(group, "regime_tributario"),
+    cst_icms: getFiscalString(group, "cst_icms"),
+    csosn: getFiscalString(group, "csosn"),
+    aliquota_icms: getFiscalNumber(group, "aliquota_icms"),
+    reducao_icms: getFiscalNumber(group, "reducao_icms"),
+    base_icms_st: getFiscalNumber(group, "base_icms_st"),
+    cst_pis: getFiscalString(group, "cst_pis"),
+    aliquota_pis: getFiscalNumber(group, "aliquota_pis"),
+    cst_cofins: getFiscalString(group, "cst_cofins"),
+    aliquota_cofins: getFiscalNumber(group, "aliquota_cofins")
+  };
+}
+
 function mapCatalogProduct(product: ApiCatalogProduct): Product {
   const categoryName = product.categoria?.nome || "Sem categoria";
   const categoryTone = getCategoryTone(product.categoria?.cor);
@@ -652,7 +746,8 @@ function mapCatalogProduct(product: ApiCatalogProduct): Product {
     categoryIcon: product.categoria?.icone || "package",
     categoryColor: categoryTone.color,
     categoryAccent: categoryTone.accent,
-    imageUrl: resolveFileUrl(product.imagem?.url)
+    imageUrl: resolveFileUrl(product.imagem?.url),
+    fiscal: mapProductFiscal(product)
   };
 }
 
@@ -874,6 +969,353 @@ function normalizePaymentSettings(value?: Partial<Record<PaymentMethod, boolean>
   return settings;
 }
 
+function normalizePdvFiscalPrintSettings(value?: Record<string, unknown> | null): PdvFiscalPrintSettings {
+  const bobinaMm = Number(value?.bobinaMm ?? value?.larguraBobinaMm ?? value?.largura_bobina_mm);
+  const printerName = String(value?.printerName ?? value?.impressora ?? value?.nomeImpressora ?? "").trim();
+  const danfeExePath = String(
+    value?.danfeExePath ??
+      value?.unidanfeExePath ??
+      value?.uninfeDanfeExePath ??
+      value?.caminhoUnidanfe ??
+      value?.caminho_unidanfe ??
+      ""
+  ).trim();
+
+  return {
+    useDefaultPrinter: Boolean(
+      value?.useDefaultPrinter ??
+        value?.usarImpressoraPadrao ??
+        value?.usar_impressora_padrao ??
+        defaultPdvFiscalPrintSettings.useDefaultPrinter
+    ),
+    printerName,
+    danfeExePath,
+    bobinaMm: Number.isFinite(bobinaMm)
+      ? Math.min(Math.max(Math.floor(bobinaMm), 58), 210)
+      : defaultPdvFiscalPrintSettings.bobinaMm
+  };
+}
+
+function buildPdvFiscalPrintConfig(settings: PdvFiscalPrintSettings) {
+  return {
+    printing: {
+      useDefaultPrinter: settings.useDefaultPrinter,
+      printerName: settings.printerName,
+      bobinaMm: settings.bobinaMm,
+      danfeExePath: settings.danfeExePath
+    },
+    impressao: {
+      usar_impressora_padrao: settings.useDefaultPrinter,
+      impressora: settings.printerName,
+      largura_bobina_mm: settings.bobinaMm
+    },
+    danfe: {
+      exePath: settings.danfeExePath,
+      danfeExePath: settings.danfeExePath,
+      useNativeFallback: false
+    },
+    unidanfe: {
+      exePath: settings.danfeExePath
+    },
+    uninfeDanfeExePath: settings.danfeExePath,
+    danfeExePath: settings.danfeExePath
+  };
+}
+
+function getPdvFiscalPrintSettingsFromConfig(config?: Record<string, unknown> | null) {
+  const printing = asRecord(config?.printing);
+  const impressao = asRecord(config?.impressao);
+  const danfe = asRecord(config?.danfe);
+  const unidanfe = asRecord(config?.unidanfe);
+
+  return normalizePdvFiscalPrintSettings({
+    ...(impressao ?? {}),
+    ...(printing ?? {}),
+    danfeExePath:
+      printing?.danfeExePath ??
+      danfe?.exePath ??
+      danfe?.danfeExePath ??
+      unidanfe?.exePath ??
+      config?.uninfeDanfeExePath ??
+      config?.danfeExePath
+  });
+}
+
+function normalizePdvFiscalSeries(value: unknown, fallback = 1) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.floor(number), 1), 999);
+}
+
+function getPdvFiscalSeriesValue(config?: Record<string, unknown> | null) {
+  const ambientes = asRecord(config?.ambientes);
+  const ambiente = config?.ambiente === "producao" ? "producao" : "homologacao";
+  const environment = asRecord(ambientes?.[ambiente]);
+  const series = asRecord(config?.series);
+  const environmentSeries = asRecord(environment?.series);
+  const nfce = asRecord(config?.nfce);
+  const nfe = asRecord(config?.nfe);
+  const environmentNfce = asRecord(environment?.nfce);
+  const environmentNfe = asRecord(environment?.nfe);
+  const value =
+    config?.serie_fiscal ??
+    config?.serieFiscal ??
+    config?.serie ??
+    series?.fiscal ??
+    environment?.serie_fiscal ??
+    environment?.serieFiscal ??
+    environment?.serie ??
+    environmentSeries?.fiscal ??
+    environmentNfce?.serie ??
+    environmentNfe?.serie ??
+    nfce?.serie ??
+    nfe?.serie;
+  const number = Number(value);
+
+  return Number.isFinite(number) && number > 0 ? normalizePdvFiscalSeries(number) : null;
+}
+
+function applyPdvFiscalSeriesConfig(config: Record<string, unknown>, seriesValue: number) {
+  const serie = normalizePdvFiscalSeries(seriesValue);
+  const ambiente = config.ambiente === "producao" ? "producao" : "homologacao";
+  const ambientes = asRecord(config.ambientes) ?? {};
+  const environment = asRecord(ambientes[ambiente]) ?? {};
+  const nextConfig: Record<string, unknown> = {
+    ...config,
+    serie_fiscal: serie,
+    serie: serie,
+    series: {
+      ...(asRecord(config.series) ?? {}),
+      fiscal: serie
+    }
+  };
+  const nextEnvironment: Record<string, unknown> = {
+    ...environment,
+    serie_fiscal: serie,
+    serie: serie,
+    series: {
+      ...(asRecord(environment.series) ?? {}),
+      fiscal: serie
+    }
+  };
+
+  (["nfce", "nfe"] as const).forEach((modelKey) => {
+    const rootModel = asRecord(config[modelKey]) ?? {};
+    const environmentModel = asRecord(environment[modelKey]) ?? rootModel;
+
+    nextConfig[modelKey] = {
+      ...rootModel,
+      serie
+    };
+    nextEnvironment[modelKey] = {
+      ...environmentModel,
+      serie
+    };
+  });
+
+  return {
+    ...nextConfig,
+    ambientes: {
+      ...ambientes,
+      [ambiente]: nextEnvironment
+    }
+  };
+}
+
+function mergePdvFiscalLocalSettings(
+  config: Record<string, unknown> | null | undefined,
+  printingSettings: PdvFiscalPrintSettings,
+  seriesValue: number
+) {
+  return {
+    ...applyPdvFiscalSeriesConfig(asRecord(config) ?? {}, seriesValue),
+    ...buildPdvFiscalPrintConfig(printingSettings)
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function getActiveRemoteFiscalEnvironment(fiscal: Record<string, unknown>) {
+  const ambiente = fiscal.ambiente === "producao" ? "producao" : "homologacao";
+  const ambientes = asRecord(fiscal.ambientes);
+  const activeEnvironment = asRecord(ambientes?.[ambiente]) ?? fiscal;
+
+  return {
+    ambiente,
+    activeEnvironment
+  };
+}
+
+function buildLocalFiscalConfigFromRemote(
+  fiscal: Record<string, unknown>,
+  printingConfig: PdvFiscalPrintSettings,
+  pfxPath?: string
+) {
+  const { ambiente, activeEnvironment } = getActiveRemoteFiscalEnvironment(fiscal);
+  const certificado = asRecord(activeEnvironment.certificado) ?? asRecord(fiscal.certificado) ?? {};
+  const nfce = asRecord(activeEnvironment.nfce) ?? asRecord(fiscal.nfce) ?? {};
+  const nfe = asRecord(activeEnvironment.nfe) ?? asRecord(fiscal.nfe) ?? {};
+  const emitente = asRecord(fiscal.emitente) ?? {};
+  const endereco = asRecord(emitente.endereco) ?? {};
+  const senhaPfx = String(certificado.senha_pfx ?? certificado.senha ?? "");
+  const cscToken = String(nfce.csc_token ?? nfce.cscToken ?? "");
+  const serieFiscal = getPdvFiscalSeriesValue({
+    ...fiscal,
+    ...activeEnvironment,
+    nfce,
+    nfe
+  }) ?? 1;
+
+  return applyPdvFiscalSeriesConfig({
+    ...fiscal,
+    ...activeEnvironment,
+    ambiente,
+    serie_fiscal: serieFiscal,
+    uf: String(fiscal.uf ?? endereco.uf ?? ""),
+    emitente,
+    certificado: {
+      ...certificado,
+      senha: senhaPfx,
+      pfxPassword: senhaPfx,
+      ...(pfxPath ? { pfxPath } : {})
+    },
+    nfce: {
+      ...nfce,
+      serie: serieFiscal,
+      csc_token: cscToken,
+      cscToken
+    },
+    nfe: {
+      ...nfe,
+      serie: serieFiscal
+    },
+    ...buildPdvFiscalPrintConfig(printingConfig)
+  }, serieFiscal);
+}
+
+function getPositiveFiscalNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function getFiscalNumberSnapshot(
+  config: Record<string, unknown> | null | undefined,
+  ambiente: string,
+  modelKey: "nfce" | "nfe"
+) {
+  const top = asRecord(config?.[modelKey]);
+  const ambientes = asRecord(config?.ambientes);
+  const environment = asRecord(ambientes?.[ambiente]);
+  const environmentModel = asRecord(environment?.[modelKey]);
+
+  return {
+    ultimoNumero: Math.max(
+      getPositiveFiscalNumber(top?.ultimo_numero ?? top?.ultimoNumero),
+      getPositiveFiscalNumber(environmentModel?.ultimo_numero ?? environmentModel?.ultimoNumero)
+    ),
+    proximoNumero: Math.max(
+      getPositiveFiscalNumber(top?.proximo_numero ?? top?.proximoNumero),
+      getPositiveFiscalNumber(environmentModel?.proximo_numero ?? environmentModel?.proximoNumero)
+    )
+  };
+}
+
+function preserveLocalFiscalNumbering(
+  nextConfig: Record<string, unknown>,
+  currentConfig: Record<string, unknown> | null | undefined
+) {
+  const ambiente = nextConfig.ambiente === "producao" ? "producao" : "homologacao";
+  const nextAmbientes = asRecord(nextConfig.ambientes) ?? {};
+  const nextEnvironment = asRecord(nextAmbientes[ambiente]) ?? {};
+  const localSeries = getPdvFiscalSeriesValue(currentConfig);
+  const nextSeries = localSeries ?? getPdvFiscalSeriesValue(nextConfig) ?? 1;
+  const mergedConfig: Record<string, unknown> = { ...nextConfig };
+  const mergedEnvironment: Record<string, unknown> = { ...nextEnvironment };
+
+  (["nfce", "nfe"] as const).forEach((modelKey) => {
+    const nextSnapshot = getFiscalNumberSnapshot(nextConfig, ambiente, modelKey);
+    const currentSnapshot = getFiscalNumberSnapshot(currentConfig, ambiente, modelKey);
+    const proximoNumero = Math.max(nextSnapshot.proximoNumero, currentSnapshot.proximoNumero);
+    const ultimoNumero = Math.max(nextSnapshot.ultimoNumero, currentSnapshot.ultimoNumero);
+    const nextModel = asRecord(nextConfig[modelKey]) ?? {};
+    const nextEnvironmentModel = asRecord(nextEnvironment[modelKey]) ?? nextModel;
+    const numberPatch = {
+      ...(ultimoNumero > 0 ? { ultimo_numero: ultimoNumero } : {}),
+      ...(proximoNumero > 0 ? { proximo_numero: proximoNumero } : {})
+    };
+
+    mergedConfig[modelKey] = {
+      ...nextModel,
+      ...numberPatch
+    };
+    mergedEnvironment[modelKey] = {
+      ...nextEnvironmentModel,
+      ...numberPatch
+    };
+  });
+
+  return applyPdvFiscalSeriesConfig({
+    ...mergedConfig,
+    ambientes: {
+      ...nextAmbientes,
+      [ambiente]: mergedEnvironment
+    }
+  }, nextSeries);
+}
+
+function isMissingFiscalIpcHandlerError(error: unknown) {
+  return /No handler registered/i.test(error instanceof Error ? error.message : String(error || ""));
+}
+
+function getFiscalDocumentSyncState(document: FiscalDocumentRecord) {
+  return String(document.sync_status ?? "pending");
+}
+
+function isPendingContingencyTransmissionDocument(document: FiscalDocumentRecord) {
+  const status = String(document.status || "").toLowerCase();
+  const model = String(document.modelo || "");
+
+  if (model && model !== "65") {
+    return false;
+  }
+
+  if (document.protocolo) {
+    return false;
+  }
+
+  return status === "contingencia_emitida" ||
+    status === "contingencia_transmissao_pendente" ||
+    status === "erro_transmissao_contingencia";
+}
+
+function dedupeFiscalDocuments(documents: FiscalDocumentRecord[]) {
+  const uniqueDocuments = new Map<string, FiscalDocumentRecord>();
+
+  for (const document of documents) {
+    const key = [
+      document.modelo || "",
+      document.serie || "",
+      document.numero || "",
+      document.chave || "",
+      document.status || "",
+      document.codigo_retorno_sefaz || "",
+      document.mensagem_operador || document.mensagem_sefaz || ""
+    ].join("|");
+
+    if (!uniqueDocuments.has(key)) {
+      uniqueDocuments.set(key, document);
+    }
+  }
+
+  return [...uniqueDocuments.values()];
+}
+
 function getEnabledPaymentOptions(settings: PaymentSettings) {
   const enabledOptions = paymentOptions.filter((option) => settings[option.id]);
 
@@ -890,6 +1332,7 @@ function CashierModal({
   children,
   footer,
   onClose,
+  dismissible = true,
   size = "md"
 }: {
   title: string;
@@ -897,6 +1340,7 @@ function CashierModal({
   children: ReactNode;
   footer?: ReactNode;
   onClose: () => void;
+  dismissible?: boolean;
   size?: "sm" | "md" | "lg";
 }) {
   useEffect(() => {
@@ -907,7 +1351,7 @@ function CashierModal({
     document.body.style.overflow = "hidden";
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (dismissible && event.key === "Escape") {
         onClose();
       }
     };
@@ -919,14 +1363,16 @@ function CashierModal({
       document.body.style.overflow = previousBodyOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose]);
+  }, [dismissible, onClose]);
 
   return (
-    <div className="pdv-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && onClose()}>
+    <div className="pdv-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && dismissible && onClose()}>
       <section className={`pdv-modal-card pdv-modal-card-${size}`} aria-modal="true" role="dialog">
-        <button className="pdv-modal-close" type="button" onClick={onClose} aria-label="Fechar modal">
-          <X aria-hidden="true" size={19} />
-        </button>
+        {dismissible ? (
+          <button className="pdv-modal-close" type="button" onClick={onClose} aria-label="Fechar modal">
+            <X aria-hidden="true" size={19} />
+          </button>
+        ) : null}
         <header className="pdv-modal-head">
           <h2>{title}</h2>
           {description ? <p>{description}</p> : null}
@@ -975,7 +1421,14 @@ export function DesktopCashierFlow({
   const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const [selectedSale, setSelectedSale] = useState<SaleRecord | null>(null);
+  const [fiscalDocumentsBySaleId, setFiscalDocumentsBySaleId] = useState<Record<string, FiscalDocumentRecord[]>>({});
+  const [selectedSaleFiscalDocuments, setSelectedSaleFiscalDocuments] = useState<FiscalDocumentRecord[]>([]);
+  const [isSelectedSaleFiscalLoading, setIsSelectedSaleFiscalLoading] = useState(false);
+  const [reprintingFiscalDocumentId, setReprintingFiscalDocumentId] = useState<string | null>(null);
+  const [fiscalDocumentsRefreshToken, setFiscalDocumentsRefreshToken] = useState(0);
   const [completedSale, setCompletedSale] = useState<SaleRecord | null>(null);
+  const [fiscalEmissionModal, setFiscalEmissionModal] = useState<FiscalEmissionModalState | null>(null);
+  const [isFiscalPrinting, setIsFiscalPrinting] = useState(false);
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCashPaymentOpen, setIsCashPaymentOpen] = useState(false);
@@ -993,6 +1446,7 @@ export function DesktopCashierFlow({
     failed: 0
   });
   const [failedSyncEvents, setFailedSyncEvents] = useState<LocalPdvStorePendingEvent[]>([]);
+  const [failedFiscalDocuments, setFailedFiscalDocuments] = useState<FiscalDocumentRecord[]>([]);
   const [eventSyncError, setEventSyncError] = useState("");
   const [catalogSyncedAt, setCatalogSyncedAt] = useState<string | null>(null);
   const [catalogSyncError, setCatalogSyncError] = useState("");
@@ -1004,6 +1458,8 @@ export function DesktopCashierFlow({
     getPreviewDailyShiftNumber(new Date(), shiftSequenceScope)
   );
   const isSyncingRef = useRef(false);
+  const isFiscalSyncingRef = useRef(false);
+  const isContingencyTransmittingRef = useRef(false);
   const hasLoadedRemoteDataRef = useRef(false);
 
   const localStoreScope = useMemo(
@@ -1190,10 +1646,26 @@ export function DesktopCashierFlow({
       } else {
         setFailedSyncEvents([]);
       }
+
+      if (summary.failed > 0 && typeof store.getFailedFiscalDocuments === "function") {
+        try {
+          const documents = await store.getFailedFiscalDocuments({ scope: localStoreScope, limit: 8 });
+          setFailedFiscalDocuments(dedupeFiscalDocuments(documents));
+        } catch (error) {
+          if (!isMissingFiscalIpcHandlerError(error)) {
+            throw error;
+          }
+
+          setFailedFiscalDocuments([]);
+        }
+      } else {
+        setFailedFiscalDocuments([]);
+      }
     } catch {
       setPendingSyncCount(0);
       setSyncSummary({ total: 0, pending: 0, failed: 0 });
       setFailedSyncEvents([]);
+      setFailedFiscalDocuments([]);
     }
   }, [localStoreScope]);
 
@@ -1274,6 +1746,189 @@ export function DesktopCashierFlow({
     }
   }, [connectivity, deviceCredential, deviceId, localStoreScope, onSystemMessage, refreshSyncSummary]);
 
+  const syncPendingFiscalDocuments = useCallback(async (options: { showMessage?: boolean } = {}) => {
+    const store = getLocalPdvStore();
+
+    if (
+      !store?.getPendingFiscalDocuments ||
+      !store.markFiscalDocumentsSynced ||
+      !store.markFiscalDocumentsFailed ||
+      connectivity !== "online" ||
+      !deviceCredential ||
+      !deviceId ||
+      isFiscalSyncingRef.current
+    ) {
+      return false;
+    }
+
+    isFiscalSyncingRef.current = true;
+
+    try {
+      const pendingDocuments = dedupeFiscalDocuments(await store.getPendingFiscalDocuments({ scope: localStoreScope, limit: 100 }))
+        .filter((document) => getFiscalDocumentSyncState(document) === "pending");
+
+      if (pendingDocuments.length === 0) {
+        await refreshSyncSummary();
+        return true;
+      }
+
+      const response = await apiPost<SyncFiscalResponse>("/pdvs/sync/fiscal", {
+        credencial_dispositivo: deviceCredential,
+        dispositivo_id: deviceId,
+        documentos: pendingDocuments
+      });
+      const syncedDocuments = response.documentos
+        .filter((document) => ["processado", "atualizado", "duplicado"].includes(document.status))
+        .map((document) => ({
+          id: document.id,
+          api_nf_id: document.api_nf_id ?? null
+        }));
+      const failedDocuments = response.documentos.filter((document) => document.status === "erro");
+
+      if (syncedDocuments.length > 0) {
+        await store.markFiscalDocumentsSynced({
+          scope: localStoreScope,
+          documents: syncedDocuments
+        });
+      }
+
+      if (failedDocuments.length > 0) {
+        const message = failedDocuments[0]?.message ?? "Documento fiscal recusado pela sincronização.";
+        await store.markFiscalDocumentsFailed({
+          scope: localStoreScope,
+          documentIds: failedDocuments.map((document) => document.id).filter((id): id is string => Boolean(id)),
+          error: message
+        });
+        setEventSyncError(message);
+
+        if (options.showMessage) {
+          onSystemMessage(`Sincronização fiscal pendente: ${message}`);
+        }
+      }
+
+      await refreshSyncSummary();
+
+      if (failedDocuments.length === 0) {
+        setEventSyncError("");
+
+        if (syncedDocuments.length > 0 && options.showMessage) {
+          onSystemMessage("Notas fiscais sincronizadas com a API.");
+        }
+      }
+
+      return failedDocuments.length === 0;
+    } catch (error) {
+      if (isMissingFiscalIpcHandlerError(error)) {
+        await refreshSyncSummary();
+        return true;
+      }
+
+      const message = error instanceof Error ? error.message : "Não foi possível sincronizar notas fiscais com a API.";
+      setEventSyncError(message);
+      if (options.showMessage) {
+        onSystemMessage(`Não foi possível sincronizar as notas fiscais: ${message}`);
+      }
+      await refreshSyncSummary();
+      return false;
+    } finally {
+      isFiscalSyncingRef.current = false;
+    }
+  }, [connectivity, deviceCredential, deviceId, localStoreScope, onSystemMessage, refreshSyncSummary]);
+
+  const transmitPendingContingencyFiscalDocuments = useCallback(async (options: { showMessage?: boolean } = {}) => {
+    const store = getLocalPdvStore();
+
+    if (
+      !store?.listFiscalDocuments ||
+      !store.callFiscalWorker ||
+      connectivity !== "online" ||
+      isContingencyTransmittingRef.current
+    ) {
+      return false;
+    }
+
+    isContingencyTransmittingRef.current = true;
+
+    try {
+      const documents = dedupeFiscalDocuments(await store.listFiscalDocuments({ scope: localStoreScope, limit: 250 }))
+        .filter(isPendingContingencyTransmissionDocument)
+        .slice(0, 8);
+
+      if (documents.length === 0) {
+        await refreshSyncSummary();
+        return true;
+      }
+
+      let transmittedCount = 0;
+      let pendingCount = 0;
+      let failedCount = 0;
+      let firstError = "";
+
+      for (const document of documents) {
+        const xmlPath = getFiscalDocumentXmlPath(document);
+
+        if (!xmlPath) {
+          failedCount += 1;
+          firstError ||= "XML de contingência não encontrado.";
+          continue;
+        }
+
+        const response = await store.callFiscalWorker({
+          scope: localStoreScope,
+          command: "transmitir-nfce-contingencia",
+          documentId: document.id,
+          payload: {
+            documentId: document.id,
+            vendaId: document.venda_id,
+            xmlPath,
+            modelo: document.modelo || "65",
+            serie: document.serie,
+            numero: document.numero,
+            chave: document.chave
+          }
+        });
+
+        if (response.success && response.status === "autorizada") {
+          transmittedCount += 1;
+          continue;
+        }
+
+        if (response.status === "contingencia_transmissao_pendente") {
+          pendingCount += 1;
+        } else {
+          failedCount += 1;
+        }
+
+        firstError ||= response.friendlyMessage || response.mensagemSefaz || "Não foi possível transmitir a contingência.";
+      }
+
+      if (transmittedCount > 0 || pendingCount > 0 || failedCount > 0) {
+        setFiscalDocumentsRefreshToken((token) => token + 1);
+      }
+
+      await refreshSyncSummary();
+
+      if (transmittedCount > 0 && options.showMessage) {
+        onSystemMessage(`${transmittedCount} NFC-e em contingência ${transmittedCount === 1 ? "foi transmitida" : "foram transmitidas"}.`);
+      } else if (firstError && options.showMessage) {
+        onSystemMessage(firstError);
+      }
+
+      return failedCount === 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível transmitir as NFC-e em contingência.";
+
+      if (options.showMessage) {
+        onSystemMessage(message);
+      }
+
+      await refreshSyncSummary();
+      return false;
+    } finally {
+      isContingencyTransmittingRef.current = false;
+    }
+  }, [connectivity, localStoreScope, onSystemMessage, refreshSyncSummary]);
+
   function enqueueLocalEvent(
     eventType: string,
     aggregateType: string,
@@ -1308,7 +1963,11 @@ export function DesktopCashierFlow({
       })
       .then((result) => {
         setPendingSyncCount(result.pending);
-        void syncPendingEvents();
+        void syncPendingEvents().then((eventsSynced) => {
+          if (eventsSynced) {
+            void syncPendingFiscalDocuments();
+          }
+        });
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "Não foi possível registrar o evento local.";
@@ -1443,7 +2102,11 @@ export function DesktopCashierFlow({
 
         if (!shouldIgnore) {
           await refreshSyncSummary();
-          void syncPendingEvents();
+          void syncPendingEvents().then((eventsSynced) => {
+            if (eventsSynced) {
+              void syncPendingFiscalDocuments();
+            }
+          });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Não foi possível recuperar eventos locais.";
@@ -1467,8 +2130,140 @@ export function DesktopCashierFlow({
     sales,
     session,
     shiftSequenceScope,
-    syncPendingEvents
+    syncPendingEvents,
+    syncPendingFiscalDocuments
   ]);
+
+  const synchronizeRemoteFiscalConfig = useCallback(async (remoteFiscal?: Record<string, unknown> | null) => {
+    const fiscal = asRecord(remoteFiscal);
+    const store = getLocalPdvStore();
+
+    if (!fiscal || !store?.saveFiscalConfig) {
+      return;
+    }
+
+    const savedConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
+    const printingConfig = getPdvFiscalPrintSettingsFromConfig(asRecord(savedConfig));
+    const { activeEnvironment } = getActiveRemoteFiscalEnvironment(fiscal);
+    const certificado = asRecord(activeEnvironment.certificado) ?? asRecord(fiscal.certificado) ?? {};
+    const arquivoId = Number(certificado.arquivo_id ?? certificado.arquivoId);
+    let pfxPath = typeof certificado.pfxPath === "string" ? certificado.pfxPath : "";
+
+    if (arquivoId > 0 && deviceCredential && deviceId && store.saveFiscalCertificate) {
+      const certificateFile = await apiPost<ApiFiscalCertificateDownload>("/pdvs/certificado-fiscal", {
+        credencial_dispositivo: deviceCredential,
+        dispositivo_id: deviceId,
+        arquivo_id: arquivoId
+      });
+      const savedCertificate = await store.saveFiscalCertificate({
+        scope: localStoreScope,
+        fileName: `${certificateFile.id}-${certificateFile.nome_original || "certificado-a1.pfx"}`,
+        base64: certificateFile.conteudo_base64
+      });
+
+      pfxPath = savedCertificate.path;
+    }
+
+    const nextLocalFiscalConfig = buildLocalFiscalConfigFromRemote(fiscal, printingConfig, pfxPath || undefined);
+
+    await store.saveFiscalConfig({
+      scope: localStoreScope,
+      config: preserveLocalFiscalNumbering(nextLocalFiscalConfig, asRecord(savedConfig))
+    });
+  }, [deviceCredential, deviceId, localStoreScope]);
+
+  useEffect(() => {
+    let shouldIgnore = false;
+
+    async function loadFiscalDocumentsForSalesList() {
+      const store = getLocalPdvStore();
+
+      if (sales.length === 0 || !store?.listFiscalDocuments) {
+        setFiscalDocumentsBySaleId({});
+        return;
+      }
+
+      try {
+        const documents = dedupeFiscalDocuments(await store.listFiscalDocuments({
+          scope: localStoreScope,
+          limit: 250
+        }));
+        const saleIds = new Set(sales.map((sale) => sale.id));
+        const grouped = documents.reduce<Record<string, FiscalDocumentRecord[]>>((accumulator, document) => {
+          const saleId = document.venda_id;
+
+          if (!saleId || !saleIds.has(saleId)) {
+            return accumulator;
+          }
+
+          accumulator[saleId] = [...(accumulator[saleId] ?? []), document];
+          return accumulator;
+        }, {});
+
+        if (!shouldIgnore) {
+          setFiscalDocumentsBySaleId(grouped);
+        }
+      } catch {
+        if (!shouldIgnore) {
+          setFiscalDocumentsBySaleId({});
+        }
+      }
+    }
+
+    void loadFiscalDocumentsForSalesList();
+
+    return () => {
+      shouldIgnore = true;
+    };
+  }, [fiscalDocumentsRefreshToken, localStoreScope, sales]);
+
+  useEffect(() => {
+    let shouldIgnore = false;
+
+    async function loadSelectedSaleFiscalDocuments() {
+      if (!selectedSale) {
+        setSelectedSaleFiscalDocuments([]);
+        setIsSelectedSaleFiscalLoading(false);
+        return;
+      }
+
+      const store = getLocalPdvStore();
+
+      if (!store?.listFiscalDocuments) {
+        setSelectedSaleFiscalDocuments([]);
+        setIsSelectedSaleFiscalLoading(false);
+        return;
+      }
+
+      setIsSelectedSaleFiscalLoading(true);
+
+      try {
+        const documents = await store.listFiscalDocuments({
+          scope: localStoreScope,
+          vendaId: selectedSale.id,
+          limit: 12
+        });
+
+        if (!shouldIgnore) {
+          setSelectedSaleFiscalDocuments(dedupeFiscalDocuments(documents));
+        }
+      } catch {
+        if (!shouldIgnore) {
+          setSelectedSaleFiscalDocuments([]);
+        }
+      } finally {
+        if (!shouldIgnore) {
+          setIsSelectedSaleFiscalLoading(false);
+        }
+      }
+    }
+
+    void loadSelectedSaleFiscalDocuments();
+
+    return () => {
+      shouldIgnore = true;
+    };
+  }, [fiscalDocumentsRefreshToken, localStoreScope, selectedSale]);
 
   const refreshRemoteData = useCallback(async (options: { silent?: boolean; showMessage?: boolean } = {}) => {
     if (!deviceCredential || !deviceId) {
@@ -1501,6 +2296,13 @@ export function DesktopCashierFlow({
       const nextAgreementReceipts = (response.recebimentos_convenio ?? []).map(mapAgreementReceipt);
       const nextPaymentSettings = normalizePaymentSettings(response.configuracoes?.formas_pagamento);
       const syncedAt = new Date().toISOString();
+      let fiscalSyncMessage = "";
+
+      try {
+        await synchronizeRemoteFiscalConfig(response.configuracoes?.fiscal);
+      } catch (error) {
+        fiscalSyncMessage = error instanceof Error ? error.message : "Não foi possível sincronizar o certificado fiscal.";
+      }
 
       setCatalogCategories(nextCategories);
       setCatalogProducts(nextProducts);
@@ -1524,11 +2326,11 @@ export function DesktopCashierFlow({
       );
       setCatalogSyncedAt(syncedAt);
       setCatalogError("");
-      setCatalogSyncError("");
+      setCatalogSyncError(fiscalSyncMessage);
       hasLoadedRemoteDataRef.current = true;
 
       if (options.showMessage) {
-        onSystemMessage("Dados do PDV atualizados pela API.");
+        onSystemMessage(fiscalSyncMessage || "Dados do PDV atualizados pela API.");
       }
 
       return true;
@@ -1549,7 +2351,7 @@ export function DesktopCashierFlow({
         setIsCatalogLoading(false);
       }
     }
-  }, [connectivity, deviceCredential, deviceId, onSystemMessage]);
+  }, [connectivity, deviceCredential, deviceId, onSystemMessage, synchronizeRemoteFiscalConfig]);
 
   const openProductPicker = useCallback((nextSearchQuery = "") => {
     setSearchQuery(nextSearchQuery);
@@ -1596,14 +2398,16 @@ export function DesktopCashierFlow({
         await refreshSyncSummary();
       }
 
-      const [eventsSynced, dataSynced] = await Promise.all([
-        syncPendingEvents({ showMessage: false }),
+      await transmitPendingContingencyFiscalDocuments({ showMessage: false });
+      const eventsSynced = await syncPendingEvents({ showMessage: false });
+      const [fiscalSynced, dataSynced] = await Promise.all([
+        eventsSynced ? syncPendingFiscalDocuments({ showMessage: false }) : Promise.resolve(false),
         refreshRemoteData({ silent: true, showMessage: false })
       ]);
 
       await refreshSyncSummary();
 
-      if (eventsSynced || dataSynced) {
+      if (eventsSynced || fiscalSynced || dataSynced) {
         onSystemMessage("Sincronização concluída.");
       } else if (connectivity !== "online") {
         onSystemMessage("Sem conexão com a API. A fila continua salva neste computador.");
@@ -1923,6 +2727,350 @@ export function DesktopCashierFlow({
     finalizeCommand(updatedCommand);
   }
 
+  async function openFiscalDispatchForSale(sale: SaleRecord, activeSession: CashierSession) {
+    const store = getLocalPdvStore();
+    const fiscalConfig = await store?.getFiscalConfig?.({ scope: localStoreScope });
+    const config = asRecord(fiscalConfig);
+
+    if (!config || config.ativo !== true) {
+      return;
+    }
+
+    setCompletedSale(null);
+    await emitFiscalDocumentForSale(sale, activeSession);
+  }
+
+  function buildFiscalDocumentPayload(sale: SaleRecord, activeSession: CashierSession, config: Record<string, unknown>) {
+    const nfce = asRecord(config.nfce) ?? {};
+    const serieFiscal = getPdvFiscalSeriesValue(config) ?? (Number(nfce.serie) || null);
+    const fiscalIssuedAt = new Date().toISOString();
+    const itens = sale.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      quantity: item.quantity,
+      priceCents: item.priceCents,
+      totalPriceCents: item.priceCents * item.quantity,
+      barcode: item.barcode,
+      fiscal: item.fiscal ?? null
+    }));
+
+    return {
+      vendaId: sale.id,
+      modelo: "65",
+      serie: serieFiscal,
+      numero: Number(nfce.proximo_numero ?? nfce.ultimoNumero ?? nfce.ultimo_numero) || null,
+      paymentMethod: sale.paymentMethod,
+      totalCents: sale.totalCents,
+      createdAt: fiscalIssuedAt,
+      issuedAt: fiscalIssuedAt,
+      emittedAt: fiscalIssuedAt,
+      dhEmi: fiscalIssuedAt,
+      itens,
+      session: activeSession,
+      sale: {
+        ...sale,
+        items: itens
+      }
+    };
+  }
+
+  function showFiscalEmissionResult(
+    sale: SaleRecord,
+    response: {
+      success?: boolean;
+      status?: string;
+      friendlyMessage?: string;
+      technicalMessage?: string | null;
+      data?: unknown;
+      logPath?: string;
+    }
+  ) {
+    const status = String(response.status || "");
+    const data = asRecord(response.data) ?? {};
+    const documentId = typeof data.documentId === "string" ? data.documentId : null;
+    const operatorMessage = typeof data.mensagemOperador === "string" && data.mensagemOperador.trim()
+      ? data.mensagemOperador
+      : response.friendlyMessage;
+    const fiscalNumber = Number(data.numero);
+    const fiscalStatus = typeof data.xMotivo === "string" ? data.xMotivo : typeof data.cStat === "number" ? String(data.cStat) : status;
+    const fiscalCode = Number(data.cStat);
+    const fiscalProtocol = typeof data.protocolo === "string" ? data.protocolo : null;
+    const fiscalKey = typeof data.chave === "string" ? data.chave : null;
+    const xmlPath = typeof data.xmlAutorizadoPath === "string"
+      ? data.xmlAutorizadoPath
+      : typeof data.xmlPath === "string"
+        ? data.xmlPath
+        : null;
+    const approvedXmlPath = response.success ? xmlPath : null;
+    const isContingencyEmission = status === "contingencia_emitida" ||
+      data.contingencia === true ||
+      data.tpEmis === "9";
+    const isDuplicateFiscalNumber = fiscalCode === 204 ||
+      fiscalCode === 539 ||
+      status.includes("duplicidade") ||
+      /duplicidade\s+de\s+nf-e/i.test(`${operatorMessage || ""} ${fiscalStatus || ""}`);
+
+    if (status === "pendente") {
+      setFiscalEmissionModal({
+        tone: "queued",
+        title: "NFC-e pendente",
+        message: "Emissão pendente.",
+        detail: operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+        sale,
+        documentId,
+        fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
+        fiscalStatus,
+        fiscalProtocol,
+        fiscalKey,
+        xmlPath: null,
+        logPath: response.logPath ?? null
+      });
+      return;
+    }
+
+    if (response.success) {
+      if (isContingencyEmission) {
+        setFiscalEmissionModal({
+          tone: "queued",
+          title: "NFC-e em contingência",
+          message: "Emitida em contingência offline.",
+          detail: "XML salvo para transmissão posterior.",
+          sale,
+          documentId,
+          fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
+          fiscalStatus: "contingencia_emitida",
+          fiscalProtocol: null,
+          fiscalKey,
+          xmlPath: approvedXmlPath,
+          logPath: response.logPath ?? null
+        });
+        return;
+      }
+
+      setFiscalEmissionModal({
+        tone: "success",
+        title: "NFC-e autorizada",
+        message: approvedXmlPath ? "Autorizada pela SEFAZ." : "Autorizada, mas sem XML para impressão.",
+        detail: null,
+        sale,
+        documentId,
+        fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
+        fiscalStatus,
+        fiscalProtocol,
+        fiscalKey,
+        xmlPath: approvedXmlPath,
+        logPath: response.logPath ?? null
+      });
+      return;
+    }
+
+    if (status.includes("pendente") || status.includes("adapter")) {
+      setFiscalEmissionModal({
+        tone: "queued",
+        title: "Emissão fiscal pendente",
+        message: response.friendlyMessage || "A venda foi concluída, mas a transmissão fiscal ainda não foi autorizada.",
+        detail: operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+        sale,
+        documentId,
+        fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
+        fiscalStatus,
+        fiscalProtocol,
+        fiscalKey,
+        xmlPath: null,
+        logPath: response.logPath ?? null
+      });
+      return;
+    }
+
+    setFiscalEmissionModal({
+      tone: "error",
+      title: "Falha na emissão fiscal",
+      message: isDuplicateFiscalNumber
+        ? "Numeração já utilizada na SEFAZ."
+        : operatorMessage || "Não foi possível emitir a NFC-e.",
+      detail: isDuplicateFiscalNumber
+        ? "A próxima numeração foi ajustada automaticamente. Tente novamente pelos detalhes da venda."
+        : fiscalStatus && fiscalStatus !== status && fiscalStatus !== operatorMessage
+          ? fiscalStatus
+          : "Abra os detalhes da venda para tentar novamente.",
+      sale,
+      documentId,
+      fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
+      fiscalStatus,
+      fiscalProtocol,
+      fiscalKey,
+      xmlPath: null,
+      logPath: response.logPath ?? null
+    });
+  }
+
+  async function emitFiscalDocumentForSale(sale: SaleRecord, activeSession: CashierSession) {
+    const store = getLocalPdvStore();
+
+    if (!store?.getFiscalConfig || !store.callFiscalWorker) {
+      return;
+    }
+
+    setFiscalEmissionModal({
+      tone: "pending",
+      title: connectivity === "online" ? "Emitindo NFC-e" : "Emitindo NFC-e em contingência",
+      message: connectivity === "online" ? "Aguardando autorização da SEFAZ." : "Gerando XML para impressão offline.",
+      detail: null,
+      sale,
+      documentId: null,
+      fiscalNumber: null,
+      fiscalStatus: null,
+      fiscalProtocol: null,
+      fiscalKey: null,
+      xmlPath: null,
+      logPath: null
+    });
+
+    try {
+      const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
+      const config = asRecord(fiscalConfig);
+
+      if (!config || config.ativo !== true) {
+        setFiscalEmissionModal({
+          tone: "error",
+          title: "Emissão fiscal desativada",
+          message: "A venda foi concluída, mas a configuração fiscal local não está ativa neste PDV.",
+          detail: "Sincronize o PDV ou ative a emissão fiscal no painel web.",
+          sale
+        });
+        return;
+      }
+
+      const payload = buildFiscalDocumentPayload(sale, activeSession, config);
+      const documentId = createId("documento-fiscal");
+      const command = connectivity === "online" ? "emitir-nfce" : "emitir-nfce-contingencia";
+      const response = await store.callFiscalWorker({
+        scope: localStoreScope,
+        command,
+        documentId,
+        config,
+        payload: command === "emitir-nfce-contingencia"
+          ? {
+              ...payload,
+              motivoContingencia: "PDV operando sem comunicação com a SEFAZ"
+            }
+          : payload
+      });
+      const responseData = asRecord(response.data) ?? {};
+
+      showFiscalEmissionResult(sale, {
+        ...response,
+        data: {
+          ...responseData,
+          documentId
+        }
+      });
+      setFiscalDocumentsRefreshToken((current) => current + 1);
+      void syncPendingEvents({ showMessage: false }).then((eventsSynced) => {
+        if (eventsSynced) {
+          void syncPendingFiscalDocuments({ showMessage: false });
+        }
+      });
+    } catch (error) {
+      setFiscalEmissionModal({
+        tone: "error",
+        title: "Falha na emissão fiscal",
+        message: "A venda foi concluída, mas o PDV não conseguiu chamar o fluxo fiscal.",
+        detail: "Verifique a configuração fiscal local e tente emitir novamente pelos detalhes da venda.",
+        sale
+      });
+      setFiscalDocumentsRefreshToken((current) => current + 1);
+    }
+  }
+
+  async function printFiscalDocumentFromModal() {
+    const state = fiscalEmissionModal;
+    const store = getLocalPdvStore();
+
+    if (!state?.xmlPath || !store?.getFiscalConfig || !store.callFiscalWorker) {
+      return;
+    }
+
+    setIsFiscalPrinting(true);
+
+    try {
+      const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
+      const config = asRecord(fiscalConfig) ?? {};
+      const response = await store.callFiscalWorker({
+        scope: localStoreScope,
+        command: "imprimir-danfe",
+        documentId: state.documentId || createId("documento-fiscal"),
+        config,
+        payload: {
+          vendaId: state.sale.id,
+          xmlPath: state.xmlPath,
+          modelo: "65"
+        }
+      });
+
+      setFiscalEmissionModal(current => current
+        ? {
+            ...current,
+            tone: response.success ? "success" : "error",
+            detail: response.friendlyMessage || current.detail || "Não foi possível imprimir o DANFE."
+          }
+        : current);
+    } catch (error) {
+      setFiscalEmissionModal(current => current
+        ? {
+            ...current,
+            tone: "error",
+            detail: "Não foi possível imprimir o DANFE."
+          }
+        : current);
+    } finally {
+      setIsFiscalPrinting(false);
+    }
+  }
+
+  async function reprintFiscalDocumentFromDetails(sale: SaleRecord, document: FiscalDocumentRecord) {
+    const store = getLocalPdvStore();
+    const xmlPath = getFiscalDocumentXmlPath(document);
+
+    if (!xmlPath || !store?.getFiscalConfig || !store.callFiscalWorker) {
+      onSystemMessage("XML autorizado indisponível para reimpressão.");
+      return;
+    }
+
+    setReprintingFiscalDocumentId(document.id);
+
+    try {
+      const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
+      const config = asRecord(fiscalConfig) ?? {};
+      const response = await store.callFiscalWorker({
+        scope: localStoreScope,
+        command: "reimprimir-danfe",
+        documentId: document.id,
+        config,
+        payload: {
+          vendaId: sale.id,
+          xmlPath,
+          modelo: document.modelo || "65",
+          serie: document.serie,
+          numero: document.numero,
+          chave: document.chave
+        }
+      });
+
+      if (response.success) {
+        onSystemMessage("DANFE enviado para reimpressão.");
+      } else {
+        onSystemMessage(response.friendlyMessage || "Não foi possível reimprimir o DANFE.");
+      }
+
+      setFiscalDocumentsRefreshToken((current) => current + 1);
+    } catch (error) {
+      onSystemMessage(error instanceof Error ? error.message : "Não foi possível reimprimir o DANFE.");
+    } finally {
+      setReprintingFiscalDocumentId(null);
+    }
+  }
+
   function confirmDeleteCommand() {
     if (!commandDeleteRequest) {
       return;
@@ -2074,6 +3222,7 @@ export function DesktopCashierFlow({
       clienteConvenioId: convenioClient?.id ?? null,
       clienteConvenioNome: convenioClient?.name ?? null
     });
+    void openFiscalDispatchForSale(nextSale, session);
   }
 
   function requestCancelSale(sale: SaleRecord) {
@@ -2316,20 +3465,34 @@ export function DesktopCashierFlow({
   }, [localStoreScope]);
 
   useEffect(() => {
-    if (!isLocalStateReady || connectivity !== "online" || !deviceCredential) {
+    if (!isLocalStateReady || connectivity !== "online") {
       return;
     }
 
-    void syncPendingEvents();
+    const runLocalSyncCycle = () => {
+      void transmitPendingContingencyFiscalDocuments().then(() => {
+        if (!deviceCredential) {
+          return;
+        }
+
+        void syncPendingEvents().then((eventsSynced) => {
+          if (eventsSynced) {
+            void syncPendingFiscalDocuments();
+          }
+        });
+      });
+    };
+
+    runLocalSyncCycle();
 
     const intervalId = window.setInterval(() => {
-      void syncPendingEvents();
+      runLocalSyncCycle();
     }, 30000);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [connectivity, deviceCredential, isLocalStateReady, syncPendingEvents]);
+  }, [connectivity, deviceCredential, isLocalStateReady, syncPendingEvents, syncPendingFiscalDocuments, transmitPendingContingencyFiscalDocuments]);
 
   useEffect(() => {
     if (!isLocalStateReady) {
@@ -3099,6 +4262,7 @@ export function DesktopCashierFlow({
               const commandSaleTitle = sale.originCommandTitle?.trim();
               const saleTitle = commandSaleTitle || `Venda ${sales.length - index}`;
               const SaleIcon = canceled ? X : commandSaleTitle ? ReceiptText : ShoppingCart;
+              const fiscalSummary = getSaleFiscalSummary(fiscalDocumentsBySaleId[sale.id] ?? []);
 
               return (
                 <button
@@ -3117,6 +4281,10 @@ export function DesktopCashierFlow({
                       <span>{getPaymentLabel(sale.paymentMethod)}</span>
                       {canceled ? <span className="pdv-sale-status-badge">Cancelada</span> : null}
                     </em>
+                  </span>
+                  <span className={`pdv-history-fiscal pdv-history-fiscal-${fiscalSummary.tone}`}>
+                    <strong>{fiscalSummary.title}</strong>
+                    <em>{fiscalSummary.label}</em>
                   </span>
                   <span className="pdv-history-line-total">
                     <em>{getCartQuantity(sale.items)} itens</em>
@@ -3341,6 +4509,16 @@ export function DesktopCashierFlow({
               ? History
               : Store;
   const isWideShell = session && activeView !== "menu";
+  const isScrollableShell =
+    session &&
+    ["sale", "commands", "command-editor", "agreement", "expenses", "history"].includes(activeView);
+  const shellClassName = [
+    "pdv-cashier-shell",
+    isWideShell ? "pdv-cashier-shell-wide" : "",
+    isScrollableShell ? "pdv-cashier-shell-scroll" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <>
@@ -3420,7 +4598,7 @@ export function DesktopCashierFlow({
         </div>
       </header>
 
-      <section className={isWideShell ? "pdv-cashier-shell pdv-cashier-shell-wide" : "pdv-cashier-shell"} aria-label="Sistema do caixa">
+      <section className={shellClassName} aria-label="Sistema do caixa">
         <div className="pdv-cashier-section-title" aria-label={sectionTitle}>
           <span className="pdv-cashier-section-main">
             <SectionIcon aria-hidden="true" />
@@ -3544,6 +4722,7 @@ export function DesktopCashierFlow({
             isManualSyncing={isManualSyncing}
             isUnpairing={isUnpairing}
             lastAccessLabel={lastAccessLabel}
+            localStoreScope={localStoreScope}
             onClose={() => setIsSettingsOpen(false)}
             onShowSyncDetails={() => setIsSyncDetailsOpen(true)}
             onSyncNow={syncNow}
@@ -3556,14 +4735,27 @@ export function DesktopCashierFlow({
           <SyncFailureDetailsModal
             events={failedSyncEvents}
             fallbackMessage={eventSyncError || syncSummary.lastError || catalogSyncError}
+            fiscalDocuments={failedFiscalDocuments}
             onClose={() => setIsSyncDetailsOpen(false)}
           />
         ) : null}
         {selectedSale ? (
           <SaleDetailsModal
+            fiscalDocuments={selectedSaleFiscalDocuments}
+            isFiscalLoading={isSelectedSaleFiscalLoading}
+            reprintingFiscalDocumentId={reprintingFiscalDocumentId}
             sale={selectedSale}
             onCancelRequest={requestCancelSale}
             onClose={() => setSelectedSale(null)}
+            onReprintFiscal={reprintFiscalDocumentFromDetails}
+            onRetryFiscal={(sale) => {
+              if (!session) {
+                onSystemMessage("Abra o caixa antes de tentar emitir a NFC-e.");
+                return;
+              }
+
+              void emitFiscalDocumentForSale(sale, session);
+            }}
           />
         ) : null}
         {saleCancelRequest ? (
@@ -3573,6 +4765,14 @@ export function DesktopCashierFlow({
           />
         ) : null}
         {completedSale ? <SaleSuccessModal sale={completedSale} onClose={() => setCompletedSale(null)} /> : null}
+        {fiscalEmissionModal ? (
+          <FiscalEmissionModal
+            isPrinting={isFiscalPrinting}
+            state={fiscalEmissionModal}
+            onClose={() => setFiscalEmissionModal(null)}
+            onPrint={printFiscalDocumentFromModal}
+          />
+        ) : null}
         {completedAgreementReceipt ? (
           <AgreementReceiptSuccessModal
             receipt={completedAgreementReceipt}
@@ -3603,6 +4803,7 @@ function PdvSettingsModal({
   isManualSyncing,
   isUnpairing,
   lastAccessLabel,
+  localStoreScope,
   onClose,
   onShowSyncDetails,
   onSyncNow,
@@ -3618,6 +4819,7 @@ function PdvSettingsModal({
   isManualSyncing: boolean;
   isUnpairing: boolean;
   lastAccessLabel: string;
+  localStoreScope: string;
   onClose: () => void;
   onShowSyncDetails: () => void;
   onSyncNow: () => void | Promise<void>;
@@ -3634,6 +4836,98 @@ function PdvSettingsModal({
       ? `${syncSummary.pending} ${syncSummary.pending === 1 ? "pendente" : "pendentes"}`
       : "Sem pendências";
   const canSyncNow = connectivity === "online" && !isManualSyncing;
+  const [printSettings, setPrintSettings] = useState<PdvFiscalPrintSettings>(defaultPdvFiscalPrintSettings);
+  const [fiscalSeries, setFiscalSeries] = useState(1);
+  const [printerOptions, setPrinterOptions] = useState<string[]>([]);
+  const [defaultPrinterName, setDefaultPrinterName] = useState("");
+  const [isPrintConfigLoading, setIsPrintConfigLoading] = useState(false);
+  const [isPrintConfigSaving, setIsPrintConfigSaving] = useState(false);
+  const [printConfigFeedback, setPrintConfigFeedback] = useState("");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadPrintSettings() {
+      const store = getLocalPdvStore();
+
+      if (!store) {
+        return;
+      }
+
+      setIsPrintConfigLoading(true);
+      setPrintConfigFeedback("");
+
+      try {
+        const savedConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
+        const savedPrinting = getPdvFiscalPrintSettingsFromConfig(asRecord(savedConfig));
+        const savedSeries = getPdvFiscalSeriesValue(asRecord(savedConfig)) ?? 1;
+
+        if (isMounted) {
+          setPrintSettings(savedPrinting);
+          setFiscalSeries(savedSeries);
+        }
+
+        const response = await store.callFiscalWorker?.({
+          scope: localStoreScope,
+          command: "listar-impressoras-disponiveis",
+          config: buildPdvFiscalPrintConfig(savedPrinting)
+        });
+        const responseData = response?.data as { printers?: unknown; defaultPrinter?: unknown } | null | undefined;
+        const printers = Array.isArray(responseData?.printers)
+          ? responseData.printers.filter((printer): printer is string => typeof printer === "string" && printer.trim().length > 0)
+          : [];
+
+        if (isMounted) {
+          setPrinterOptions(printers);
+          setDefaultPrinterName(typeof responseData?.defaultPrinter === "string" ? responseData.defaultPrinter : "");
+        }
+      } catch (error) {
+        if (isMounted) {
+          setPrintConfigFeedback(error instanceof Error ? error.message : "Não foi possível carregar a impressão local.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsPrintConfigLoading(false);
+        }
+      }
+    }
+
+    void loadPrintSettings();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [localStoreScope]);
+
+  async function savePrintSettings() {
+    const store = getLocalPdvStore();
+
+    if (!store?.saveFiscalConfig) {
+      setPrintConfigFeedback("Configuração local indisponível neste ambiente.");
+      return;
+    }
+
+    setIsPrintConfigSaving(true);
+    setPrintConfigFeedback("");
+
+    try {
+      const normalizedSettings = normalizePdvFiscalPrintSettings(printSettings);
+      const normalizedSeries = normalizePdvFiscalSeries(fiscalSeries);
+      const currentConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
+
+      await store.saveFiscalConfig({
+        scope: localStoreScope,
+        config: mergePdvFiscalLocalSettings(asRecord(currentConfig), normalizedSettings, normalizedSeries)
+      });
+      setPrintSettings(normalizedSettings);
+      setFiscalSeries(normalizedSeries);
+      setPrintConfigFeedback("Configuração fiscal local salva.");
+    } catch (error) {
+      setPrintConfigFeedback(error instanceof Error ? error.message : "Não foi possível salvar a impressão local.");
+    } finally {
+      setIsPrintConfigSaving(false);
+    }
+  }
 
   return (
     <CashierModal
@@ -3718,6 +5012,115 @@ function PdvSettingsModal({
               : "Sincronizar agora"}
         </button>
       </section>
+
+      <section className="pdv-settings-sync pdv-settings-printing" aria-label="Impressão fiscal do PDV">
+        <div className="pdv-settings-section-head">
+          <Printer aria-hidden="true" size={20} />
+          <div>
+            <strong>Fiscal local</strong>
+            <span>{defaultPrinterName ? `Padrão do Windows: ${defaultPrinterName}` : "Série e impressão deste computador"}</span>
+          </div>
+        </div>
+
+        <div className="pdv-printing-grid">
+          <button
+            aria-checked={printSettings.useDefaultPrinter}
+            className={printSettings.useDefaultPrinter ? "pdv-printing-toggle pdv-printing-toggle-active" : "pdv-printing-toggle"}
+            disabled={isPrintConfigLoading || isPrintConfigSaving}
+            role="switch"
+            type="button"
+            onClick={() =>
+              setPrintSettings(current => ({
+                ...current,
+                useDefaultPrinter: !current.useDefaultPrinter
+              }))
+            }
+          >
+            <span className="pdv-printing-switch" aria-hidden="true">
+              <span />
+            </span>
+            <span>
+              <strong>Usar impressora padrão</strong>
+              <small>{printSettings.useDefaultPrinter ? "Ativa" : "Manual"}</small>
+            </span>
+          </button>
+
+          <label className="pdv-printing-path">
+            <span>Executável UniDANFE</span>
+            <input
+              disabled={isPrintConfigLoading || isPrintConfigSaving}
+              maxLength={260}
+              placeholder="C:\Unimake\UniNFe\unidanfe.exe"
+              value={printSettings.danfeExePath}
+              onChange={event =>
+                setPrintSettings(current => ({
+                  ...current,
+                  danfeExePath: event.currentTarget.value
+                }))
+              }
+            />
+          </label>
+
+          <label>
+            <span>Impressora</span>
+            <input
+              disabled={isPrintConfigLoading || isPrintConfigSaving || printSettings.useDefaultPrinter}
+              list="pdv-fiscal-printers"
+              maxLength={160}
+              value={printSettings.printerName}
+              onChange={event =>
+                setPrintSettings(current => ({
+                  ...current,
+                  printerName: event.currentTarget.value
+                }))
+              }
+            />
+            <datalist id="pdv-fiscal-printers">
+              {printerOptions.map(printer => (
+                <option key={printer} value={printer} />
+              ))}
+            </datalist>
+          </label>
+
+          <label>
+            <span>Bobina mm</span>
+            <input
+              disabled={isPrintConfigLoading || isPrintConfigSaving}
+              inputMode="numeric"
+              max={210}
+              min={58}
+              type="number"
+              value={printSettings.bobinaMm}
+              onChange={event =>
+                setPrintSettings(current => ({
+                  ...current,
+                  bobinaMm: Math.min(Math.max(Number(event.currentTarget.value) || 80, 58), 210)
+                }))
+              }
+            />
+          </label>
+
+          <label>
+            <span>Série NF-e/NFC-e</span>
+            <input
+              disabled={isPrintConfigLoading || isPrintConfigSaving}
+              inputMode="numeric"
+              max={999}
+              min={1}
+              type="number"
+              value={fiscalSeries}
+              onChange={event => setFiscalSeries(normalizePdvFiscalSeries(event.currentTarget.value, fiscalSeries))}
+            />
+          </label>
+        </div>
+
+        {printConfigFeedback ? <p className="pdv-sync-message">{printConfigFeedback}</p> : null}
+
+        <button className="pdv-sync-action pdv-printing-save" type="button" disabled={isPrintConfigLoading || isPrintConfigSaving} onClick={savePrintSettings}>
+          {isPrintConfigSaving ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Check aria-hidden="true" size={17} />}
+          {isPrintConfigSaving ? "Salvando" : "Salvar"}
+        </button>
+      </section>
     </CashierModal>
   );
 }
@@ -3742,12 +5145,16 @@ function formatSyncFailureDate(value?: string | null) {
 function SyncFailureDetailsModal({
   events,
   fallbackMessage,
+  fiscalDocuments,
   onClose
 }: {
   events: LocalPdvStorePendingEvent[];
   fallbackMessage?: string | null;
+  fiscalDocuments: FiscalDocumentRecord[];
   onClose: () => void;
 }) {
+  const hasFailures = events.length > 0 || fiscalDocuments.length > 0;
+
   return (
     <CashierModal
       title="Detalhes da sincronização"
@@ -3760,7 +5167,7 @@ function SyncFailureDetailsModal({
         </button>
       }
     >
-      {events.length > 0 ? (
+      {hasFailures ? (
         <div className="pdv-sync-failure-list">
           {events.map((event) => (
             <article className="pdv-sync-failure-row" key={event.id}>
@@ -3794,6 +5201,42 @@ function SyncFailureDetailsModal({
                 <details className="pdv-sync-failure-technical">
                   <summary>Dados técnicos</summary>
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+                </details>
+              </div>
+            </article>
+          ))}
+          {fiscalDocuments.map((document) => (
+            <article className="pdv-sync-failure-row" key={document.id}>
+              <span className="pdv-sync-failure-icon" aria-hidden="true">
+                <AlertTriangle size={19} />
+              </span>
+              <div className="pdv-sync-failure-content">
+                <div className="pdv-sync-failure-head">
+                  <strong>{document.modelo === "55" ? "NF-e" : "NFC-e"}</strong>
+                  <em>{Number(document.sync_attempts || 0)} {Number(document.sync_attempts || 0) === 1 ? "tentativa" : "tentativas"}</em>
+                </div>
+                <p>{document.sync_error || document.mensagem_operador || fallbackMessage || "Documento fiscal recusado pela sincronização."}</p>
+                <dl className="pdv-sync-failure-meta">
+                  <div>
+                    <dt>ID local</dt>
+                    <dd>{document.id}</dd>
+                  </div>
+                  <div>
+                    <dt>Nota</dt>
+                    <dd>Série {document.serie || "-"} · Nº {document.numero || "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Venda</dt>
+                    <dd>{document.venda_id || "Não vinculada"}</dd>
+                  </div>
+                  <div>
+                    <dt>Falhou em</dt>
+                    <dd>{formatSyncFailureDate(document.updated_at)}</dd>
+                  </div>
+                </dl>
+                <details className="pdv-sync-failure-technical">
+                  <summary>Dados técnicos</summary>
+                  <pre>{JSON.stringify(document.raw_result, null, 2)}</pre>
                 </details>
               </div>
             </article>
@@ -4983,6 +6426,84 @@ function SaleSuccessModal({ sale, onClose }: { sale: SaleRecord; onClose: () => 
   );
 }
 
+function FiscalEmissionModal({
+  state,
+  isPrinting,
+  onClose,
+  onPrint
+}: {
+  state: FiscalEmissionModalState;
+  isPrinting: boolean;
+  onClose: () => void;
+  onPrint: () => void;
+}) {
+  const toneClassName = `pdv-fiscal-emission-${state.tone}`;
+  const canClose = state.tone !== "pending";
+  const canPrint = Boolean(state.xmlPath) && (state.tone === "success" || state.tone === "queued");
+  const shouldShowFiscalKey = Boolean(state.fiscalKey) &&
+    (state.tone === "success" || state.fiscalStatus === "contingencia_emitida");
+  const summaryItems = [
+    formatCurrency(state.sale.totalCents),
+    state.fiscalNumber ? `NFC-e nº ${state.fiscalNumber}` : null,
+    canPrint ? "DANFE disponível" : null
+  ].filter(Boolean);
+  const Icon = state.tone === "success"
+    ? Check
+    : state.tone === "pending"
+      ? LoaderCircle
+      : state.tone === "queued"
+        ? History
+        : AlertTriangle;
+
+  return (
+    <CashierModal
+      title={state.title}
+      description={state.tone === "pending" ? "Venda concluída. Emitindo documento fiscal." : "Venda concluída."}
+      dismissible={canClose}
+      onClose={onClose}
+      footer={
+        canClose ? (
+          <>
+            <button className="pdv-secondary-action" type="button" onClick={onClose}>
+              Fechar
+            </button>
+            {canPrint ? (
+              <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
+                {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+                {isPrinting ? "Imprimindo" : "Imprimir DANFE"}
+              </button>
+            ) : null}
+          </>
+        ) : null
+      }
+    >
+      <div className={`pdv-fiscal-emission ${toneClassName}`}>
+        <section className="pdv-fiscal-emission-main" aria-live="polite">
+          <span className="pdv-fiscal-emission-icon" aria-hidden="true">
+            <Icon className={state.tone === "pending" ? "pdv-spin" : undefined} size={22} strokeWidth={2.6} />
+          </span>
+          <div>
+            <strong>{state.message}</strong>
+            <span>{summaryItems.join(" · ")}</span>
+          </div>
+        </section>
+
+        {state.fiscalProtocol && state.tone === "success" ? (
+          <p className="pdv-fiscal-emission-note">Protocolo {state.fiscalProtocol}</p>
+        ) : null}
+
+        {state.detail ? (
+          <p className="pdv-fiscal-emission-detail">{state.detail}</p>
+        ) : null}
+
+        {shouldShowFiscalKey ? (
+          <p className="pdv-fiscal-emission-key">Chave {state.fiscalKey}</p>
+        ) : null}
+      </div>
+    </CashierModal>
+  );
+}
+
 function AgreementReceiptSuccessModal({
   receipt,
   onClose
@@ -5046,25 +6567,193 @@ function AgreementReceiptSuccessModal({
   );
 }
 
-function SaleDetailsModal({
+function getFiscalDocumentNumberLabel(document?: FiscalDocumentRecord | null, options: { includeSerie?: boolean } = {}) {
+  const modelLabel = document?.modelo === "55" ? "NF-e" : "NFC-e";
+
+  if (!document?.numero) {
+    return modelLabel;
+  }
+
+  if (options.includeSerie && document.serie) {
+    return `${modelLabel} ${document.serie}/${document.numero}`;
+  }
+
+  return `${modelLabel} ${document.numero}`;
+}
+
+function getFiscalDocumentStatus(document: FiscalDocumentRecord) {
+  const status = String(document.status || "").toLowerCase();
+
+  if (status === "autorizada" || status === "emitida" || status === "sucesso") {
+    return { label: "Emitida", tone: "success" as const };
+  }
+
+  if (
+    status === "contingencia" ||
+    status === "contingencia_emitida" ||
+    status === "contingencia_transmissao_pendente" ||
+    status === "erro_transmissao_contingencia"
+  ) {
+    return { label: "Contingência", tone: "warning" as const };
+  }
+
+  if (status === "pendente" || status.includes("pendente") || status === "transmitindo") {
+    return { label: "Pendente", tone: "pending" as const };
+  }
+
+  if (status === "cancelada" || status === "inutilizada") {
+    return { label: status === "cancelada" ? "Cancelada" : "Inutilizada", tone: "neutral" as const };
+  }
+
+  return { label: "Com erro", tone: "error" as const };
+}
+
+function getMainFiscalDocument(documents: FiscalDocumentRecord[]) {
+  if (documents.length === 0) {
+    return null;
+  }
+
+  const sortedDocuments = [...documents].sort((first, second) =>
+    String(second.updated_at || second.created_at || "").localeCompare(String(first.updated_at || first.created_at || ""))
+  );
+  const successDocument = sortedDocuments.find((document) => getFiscalDocumentStatus(document).tone === "success");
+
+  if (successDocument) {
+    return successDocument;
+  }
+
+  const contingencyDocument = sortedDocuments.find((document) => getFiscalDocumentStatus(document).tone === "warning");
+
+  return contingencyDocument ?? sortedDocuments[0];
+}
+
+function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = false) {
+  if (isLoading) {
+    return {
+      title: "Fiscal",
+      label: "Carregando",
+      tone: "neutral" as const,
+      document: null as FiscalDocumentRecord | null
+    };
+  }
+
+  const document = getMainFiscalDocument(documents);
+
+  if (!document) {
+    return {
+      title: "NFC-e",
+      label: "Não emitida",
+      tone: "error" as const,
+      document
+    };
+  }
+
+  const status = getFiscalDocumentStatus(document);
+
+  if (status.tone === "success") {
+    return {
+      title: getFiscalDocumentNumberLabel(document),
+      label: "Emitida",
+      tone: "success" as const,
+      document
+    };
+  }
+
+  if (status.tone === "warning") {
+    return {
+      title: getFiscalDocumentNumberLabel(document),
+      label: "Em contingência",
+      tone: "warning" as const,
+      document
+    };
+  }
+
+  return {
+    title: getFiscalDocumentNumberLabel(document),
+    label: "Não emitida",
+    tone: "error" as const,
+    document
+  };
+}
+
+function getFiscalDocumentMessage(document: FiscalDocumentRecord) {
+  return document.mensagem_operador || document.mensagem_sefaz || "Sem retorno fiscal informado.";
+}
+
+function getFiscalDocumentSyncStatusLabel(status?: string | null) {
+  if (status === "synced") {
+    return "Sincronizada";
+  }
+
+  if (status === "failed") {
+    return "Falha na sincronização";
+  }
+
+  if (status === "pending") {
+    return "Sincronização pendente";
+  }
+
+  return null;
+}
+
+function getFiscalDocumentXmlPath(document: FiscalDocumentRecord) {
+  if (document.xml_autorizado_path) {
+    return document.xml_autorizado_path;
+  }
+
+  const rawResult = asRecord(document.raw_result);
+  const data = asRecord(rawResult?.data);
+  const payload = asRecord(rawResult?.payload);
+
+  return String(
+    data?.xmlAutorizadoPath ??
+      data?.xmlPath ??
+      payload?.xmlPath ??
+      ""
+  ).trim() || null;
+}
+
+function canReprintFiscalDocument(document: FiscalDocumentRecord) {
+  const status = getFiscalDocumentStatus(document);
+
+  return (status.tone === "success" || status.tone === "warning") && Boolean(getFiscalDocumentXmlPath(document));
+}
+
+function canRetryFiscalDocuments(documents: FiscalDocumentRecord[]) {
+  if (documents.length === 0) {
+    return true;
+  }
+
+  return !documents.some((document) => {
+    const status = getFiscalDocumentStatus(document);
+    return status.tone === "success" || status.tone === "warning";
+  });
+}
+
+function SaleFiscalDetailsModal({
   sale,
+  fiscalDocuments,
+  isFiscalLoading,
+  reprintingFiscalDocumentId,
   onClose,
-  onCancelRequest
+  onReprintFiscal,
+  onRetryFiscal
 }: {
   sale: SaleRecord;
+  fiscalDocuments: FiscalDocumentRecord[];
+  isFiscalLoading: boolean;
+  reprintingFiscalDocumentId: string | null;
   onClose: () => void;
-  onCancelRequest: (sale: SaleRecord) => void;
+  onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
+  onRetryFiscal: (sale: SaleRecord) => void;
 }) {
-  const paymentOption = getPaymentOption(sale.paymentMethod);
-  const PaymentIcon = paymentOption.icon;
-  const isCommandSale = Boolean(sale.originCommandTitle);
-  const OriginIcon = isCommandSale ? ReceiptText : ShoppingCart;
-  const canceled = isSaleCanceled(sale);
+  const summary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading);
+  const canRetryFiscal = !isSaleCanceled(sale) && !isFiscalLoading && canRetryFiscalDocuments(fiscalDocuments);
 
   return (
     <CashierModal
-      title="Detalhes da venda"
-      description={`${formatDateTime(sale.createdAt)} · ${getPaymentLabel(sale.paymentMethod)}${canceled ? " · Cancelada" : ""}`}
+      title="Fiscal da venda"
+      description={`${summary.title} · ${summary.label}`}
       size="lg"
       onClose={onClose}
       footer={
@@ -5072,94 +6761,251 @@ function SaleDetailsModal({
           <button className="pdv-secondary-action" type="button" onClick={onClose}>
             Fechar
           </button>
-          {!canceled ? (
-            <button className="pdv-danger-action" type="button" onClick={() => onCancelRequest(sale)}>
-              <Trash2 aria-hidden="true" size={17} />
-              Cancelar venda
+          {canRetryFiscal ? (
+            <button className="pdv-confirm-action" type="button" onClick={() => onRetryFiscal(sale)}>
+              <RefreshCw aria-hidden="true" size={17} />
+              Tentar emitir NFC-e
             </button>
           ) : null}
         </>
       }
     >
-      <div className="pdv-sale-details-flow">
-        {canceled ? (
-          <div className="pdv-sale-details-status" role="status">
-            <X aria-hidden="true" size={17} />
-            <span>Venda cancelada. Este recebimento não compõe a conferência do caixa.</span>
+      <div className="pdv-fiscal-details-flow">
+        <div className={`pdv-fiscal-details-summary pdv-fiscal-details-summary-${summary.tone}`}>
+          <ReceiptText aria-hidden="true" size={20} />
+          <div>
+            <strong>{summary.title}</strong>
+            <span>{summary.label}</span>
           </div>
-        ) : null}
-
-        <div className="pdv-sale-details-strip" aria-label="Resumo da venda">
-          <span className="pdv-sale-detail-token">
-            <span className="pdv-sale-detail-token-icon">
-              <PaymentIcon aria-hidden="true" size={18} />
-            </span>
-            <span>
-              <em>Pagamento</em>
-              <strong>{paymentOption.label}</strong>
-            </span>
-          </span>
-          <span className="pdv-sale-detail-token">
-            <span className="pdv-sale-detail-token-icon">
-              <OriginIcon aria-hidden="true" size={18} />
-            </span>
-            <span>
-              <em>{isCommandSale ? "Comanda" : "Origem"}</em>
-              <strong>{isCommandSale ? sale.originCommandTitle : "Venda direta"}</strong>
-            </span>
-          </span>
-          <span className="pdv-sale-detail-token">
-            <span className="pdv-sale-detail-token-icon">
-              <Package aria-hidden="true" size={18} />
-            </span>
-            <span>
-              <em>Itens</em>
-              <strong>{getCartQuantity(sale.items)} itens</strong>
-            </span>
-          </span>
         </div>
 
-        <section className="pdv-checkout-list pdv-sale-details-list" aria-label="Itens da venda">
-          <div className="pdv-checkout-list-head" aria-hidden="true">
-            <span>Produto</span>
-            <span>Quantidade</span>
-            <span>Total</span>
+        <section className="pdv-fiscal-events" aria-label="Eventos fiscais da venda">
+          <div className="pdv-fiscal-events-head">
+            <strong>Eventos fiscais</strong>
+            {isFiscalLoading ? <span>Carregando</span> : <span>{fiscalDocuments.length || 0} registro(s)</span>}
           </div>
-          <div className="pdv-checkout-list-body">
-            {sale.items.map((item) => (
-              <div className="pdv-checkout-item" key={item.id}>
-                <ProductThumbnail
-                  backgroundColor={item.categoryColor}
-                  color={item.categoryAccent}
-                  icon={item.categoryIcon}
-                  imageUrl={item.imageUrl}
-                  label={item.category}
-                  size="sm"
-                />
-                <span className="pdv-checkout-product">
-                  <strong>{item.name}</strong>
-                  <em>
-                    <span>{formatCurrency(item.priceCents)} un.</span>
-                    <span>{item.category}</span>
-                  </em>
-                </span>
-                <span className="pdv-checkout-quantity">
-                  <strong>{item.quantity}</strong>
-                </span>
-                <span className="pdv-checkout-total">
-                  <strong>{formatCurrency(item.quantity * item.priceCents)}</strong>
-                </span>
-              </div>
-            ))}
-          </div>
+
+          {isFiscalLoading ? (
+            <div className="pdv-fiscal-history-skeleton" aria-hidden="true">
+              <span />
+              <span />
+            </div>
+          ) : fiscalDocuments.length > 0 ? (
+            <div className="pdv-fiscal-history-list">
+              {fiscalDocuments.map((document) => {
+                const status = getFiscalDocumentStatus(document);
+                const numberLabel = getFiscalDocumentNumberLabel(document, { includeSerie: true });
+                const message = getFiscalDocumentMessage(document);
+                const syncStatusLabel = getFiscalDocumentSyncStatusLabel(document.sync_status);
+
+                return (
+                  <article className="pdv-fiscal-history-item" key={document.id}>
+                    <div className="pdv-fiscal-history-main">
+                      <span className={`pdv-fiscal-history-badge pdv-fiscal-history-${status.tone}`}>
+                        {status.label}
+                      </span>
+                      <strong>{numberLabel}</strong>
+                      <em>{formatDateTime(document.updated_at || document.created_at)}</em>
+                    </div>
+                    <div className="pdv-fiscal-history-meta">
+                      {document.codigo_retorno_sefaz ? <span>Retorno {document.codigo_retorno_sefaz}</span> : null}
+                      {document.protocolo ? <span>Protocolo {document.protocolo}</span> : null}
+                      {document.chave ? <span>Chave {document.chave}</span> : null}
+                      {syncStatusLabel ? <span>{syncStatusLabel}</span> : null}
+                    </div>
+                    {status.tone !== "success" || document.sync_error ? (
+                      <p>{document.sync_error || message}</p>
+                    ) : null}
+                    {canReprintFiscalDocument(document) ? (
+                      <div className="pdv-fiscal-history-actions">
+                        <button
+                          className="pdv-secondary-action pdv-fiscal-reprint-action"
+                          disabled={reprintingFiscalDocumentId === document.id}
+                          type="button"
+                          onClick={() => onReprintFiscal(sale, document)}
+                        >
+                          {reprintingFiscalDocumentId === document.id ? (
+                            <LoaderCircle aria-hidden="true" className="pdv-spin" size={16} />
+                          ) : (
+                            <Printer aria-hidden="true" size={16} />
+                          )}
+                          {reprintingFiscalDocumentId === document.id ? "Reimprimindo" : "Reimprimir DANFE"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="pdv-fiscal-history-empty">
+              <ReceiptText aria-hidden="true" size={18} />
+              <span>Nenhuma NFC-e registrada para esta venda.</span>
+            </div>
+          )}
         </section>
-
-        <div className="pdv-sale-total-inline pdv-payment-total-inline pdv-sale-details-total" aria-live="polite">
-          <span>Total da venda</span>
-          <strong>{formatCurrency(sale.totalCents)}</strong>
-        </div>
       </div>
     </CashierModal>
+  );
+}
+
+function SaleDetailsModal({
+  sale,
+  fiscalDocuments,
+  isFiscalLoading,
+  reprintingFiscalDocumentId,
+  onClose,
+  onCancelRequest,
+  onReprintFiscal,
+  onRetryFiscal
+}: {
+  sale: SaleRecord;
+  fiscalDocuments: FiscalDocumentRecord[];
+  isFiscalLoading: boolean;
+  reprintingFiscalDocumentId: string | null;
+  onClose: () => void;
+  onCancelRequest: (sale: SaleRecord) => void;
+  onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
+  onRetryFiscal: (sale: SaleRecord) => void;
+}) {
+  const [isFiscalDetailsOpen, setIsFiscalDetailsOpen] = useState(false);
+  const paymentOption = getPaymentOption(sale.paymentMethod);
+  const PaymentIcon = paymentOption.icon;
+  const isCommandSale = Boolean(sale.originCommandTitle);
+  const OriginIcon = isCommandSale ? ReceiptText : ShoppingCart;
+  const canceled = isSaleCanceled(sale);
+  const canRetryFiscal = !canceled && !isFiscalLoading && canRetryFiscalDocuments(fiscalDocuments);
+  const fiscalSummary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading);
+
+  return (
+    <>
+      <CashierModal
+        title="Detalhes da venda"
+        description={`${formatDateTime(sale.createdAt)} · ${getPaymentLabel(sale.paymentMethod)}${canceled ? " · Cancelada" : ""}`}
+        size="lg"
+        onClose={onClose}
+        footer={
+          <>
+            <button className="pdv-secondary-action" type="button" onClick={onClose}>
+              Fechar
+            </button>
+            {!canceled ? (
+              <button className="pdv-danger-action" type="button" onClick={() => onCancelRequest(sale)}>
+                <Trash2 aria-hidden="true" size={17} />
+                Cancelar venda
+              </button>
+            ) : null}
+            {canRetryFiscal ? (
+              <button className="pdv-confirm-action" type="button" onClick={() => onRetryFiscal(sale)}>
+                <RefreshCw aria-hidden="true" size={17} />
+                Tentar emitir NFC-e
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <div className="pdv-sale-details-flow">
+          {canceled ? (
+            <div className="pdv-sale-details-status" role="status">
+              <X aria-hidden="true" size={17} />
+              <span>Venda cancelada. Este recebimento não compõe a conferência do caixa.</span>
+            </div>
+          ) : null}
+
+          <div className="pdv-sale-details-strip" aria-label="Resumo da venda">
+            <span className="pdv-sale-detail-token">
+              <span className="pdv-sale-detail-token-icon">
+                <PaymentIcon aria-hidden="true" size={18} />
+              </span>
+              <span>
+                <em>Pagamento</em>
+                <strong>{paymentOption.label}</strong>
+              </span>
+            </span>
+            <span className="pdv-sale-detail-token">
+              <span className="pdv-sale-detail-token-icon">
+                <OriginIcon aria-hidden="true" size={18} />
+              </span>
+              <span>
+                <em>{isCommandSale ? "Comanda" : "Origem"}</em>
+                <strong>{isCommandSale ? sale.originCommandTitle : "Venda direta"}</strong>
+              </span>
+            </span>
+            <span className="pdv-sale-detail-token">
+              <span className="pdv-sale-detail-token-icon">
+                <Package aria-hidden="true" size={18} />
+              </span>
+              <span>
+                <em>Itens</em>
+                <strong>{getCartQuantity(sale.items)} itens</strong>
+              </span>
+            </span>
+          </div>
+
+          <div className={`pdv-sale-fiscal-summary pdv-sale-fiscal-summary-${fiscalSummary.tone}`} aria-label="Resumo fiscal da venda">
+            <ReceiptText aria-hidden="true" size={18} />
+            <div>
+              <strong>{fiscalSummary.title}</strong>
+              <span>{fiscalSummary.label}</span>
+            </div>
+            <button type="button" disabled={isFiscalLoading} onClick={() => setIsFiscalDetailsOpen(true)}>
+              Ver detalhes
+            </button>
+          </div>
+
+          <section className="pdv-checkout-list pdv-sale-details-list" aria-label="Itens da venda">
+            <div className="pdv-checkout-list-head" aria-hidden="true">
+              <span>Produto</span>
+              <span>Quantidade</span>
+              <span>Total</span>
+            </div>
+            <div className="pdv-checkout-list-body">
+              {sale.items.map((item) => (
+                <div className="pdv-checkout-item" key={item.id}>
+                  <ProductThumbnail
+                    backgroundColor={item.categoryColor}
+                    color={item.categoryAccent}
+                    icon={item.categoryIcon}
+                    imageUrl={item.imageUrl}
+                    label={item.category}
+                    size="sm"
+                  />
+                  <span className="pdv-checkout-product">
+                    <strong>{item.name}</strong>
+                    <em>
+                      <span>{formatCurrency(item.priceCents)} un.</span>
+                      <span>{item.category}</span>
+                    </em>
+                  </span>
+                  <span className="pdv-checkout-quantity">
+                    <strong>{item.quantity}</strong>
+                  </span>
+                  <span className="pdv-checkout-total">
+                    <strong>{formatCurrency(item.quantity * item.priceCents)}</strong>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <div className="pdv-sale-total-inline pdv-payment-total-inline pdv-sale-details-total" aria-live="polite">
+            <span>Total da venda</span>
+            <strong>{formatCurrency(sale.totalCents)}</strong>
+          </div>
+        </div>
+      </CashierModal>
+      {isFiscalDetailsOpen ? (
+        <SaleFiscalDetailsModal
+          fiscalDocuments={fiscalDocuments}
+          isFiscalLoading={isFiscalLoading}
+          reprintingFiscalDocumentId={reprintingFiscalDocumentId}
+          sale={sale}
+          onClose={() => setIsFiscalDetailsOpen(false)}
+          onReprintFiscal={onReprintFiscal}
+          onRetryFiscal={onRetryFiscal}
+        />
+      ) : null}
+    </>
   );
 }
 

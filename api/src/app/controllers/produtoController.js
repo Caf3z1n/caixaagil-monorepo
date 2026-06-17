@@ -162,6 +162,21 @@ function sanitizeGrupoFiscalResumo(grupoFiscal) {
     regime_tributario: data.regime_tributario,
     cfop: data.cfop,
     ncm: data.ncm,
+    cst_icms: data.cst_icms,
+    csosn: data.csosn,
+    aliquota_icms: data.aliquota_icms,
+    reducao_icms: data.reducao_icms,
+    base_icms_st: data.base_icms_st,
+    cst_pis: data.cst_pis,
+    aliquota_pis: data.aliquota_pis,
+    cst_cofins: data.cst_cofins,
+    aliquota_cofins: data.aliquota_cofins,
+    ibs_ativo: data.ibs_ativo,
+    cst_ibs: data.cst_ibs,
+    classificacao_ibs: data.classificacao_ibs,
+    aliquota_ibs_uf: data.aliquota_ibs_uf,
+    aliquota_ibs_municipal: data.aliquota_ibs_municipal,
+    aliquota_cbs: data.aliquota_cbs,
   };
 }
 

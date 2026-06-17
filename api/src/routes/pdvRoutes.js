@@ -8,7 +8,9 @@ router.post('/parear', controller.pairDesktop);
 router.post('/sessao', controller.showDesktopSession);
 router.post('/turno/previa', controller.showDesktopShiftPreview);
 router.post('/catalogo', controller.showDesktopCatalog);
+router.post('/certificado-fiscal', controller.downloadDesktopFiscalCertificate);
 router.post('/sync/push', controller.syncDesktopEvents);
+router.post('/sync/fiscal', controller.syncDesktopFiscalDocuments);
 router.post('/desparear', controller.unpairDesktop);
 
 router.use(auth);

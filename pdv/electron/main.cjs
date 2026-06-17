@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("node:path");
 const { createLocalPdvStore } = require("./local-store.cjs");
+const { createFiscalWorkerService } = require("./fiscal-worker-service.cjs");
 
 const isDev = !app.isPackaged;
 const appIconPath = path.join(
@@ -42,7 +43,9 @@ function createWindow() {
 
 app.whenReady().then(() => {
   app.setName("Caixa Ágil PDV");
-  createLocalPdvStore(app).registerIpc(ipcMain);
+  const localStore = createLocalPdvStore(app);
+  localStore.registerIpc(ipcMain);
+  createFiscalWorkerService(app, localStore).registerIpc(ipcMain);
 
   if (process.platform === "win32") {
     app.setAppUserModelId("br.com.eticasistemas.caixaagil.pdv");

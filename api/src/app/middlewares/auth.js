@@ -27,7 +27,12 @@ function getRequiredPermission(req) {
 function isMainAccountOnlyRoute(req) {
   const baseUrl = req.baseUrl || '';
 
-  return baseUrl.startsWith('/usuarios') || baseUrl.startsWith('/assinaturas') || baseUrl.startsWith('/configuracoes');
+  return (
+    baseUrl.startsWith('/usuarios') ||
+    baseUrl.startsWith('/assinaturas') ||
+    baseUrl.startsWith('/configuracoes') ||
+    baseUrl.startsWith('/nf')
+  );
 }
 
 module.exports = async (req, res, next) => {

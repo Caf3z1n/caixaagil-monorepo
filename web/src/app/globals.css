@@ -4787,11 +4787,11 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 }
 
 .configuration-flow-shell {
-  width: min(100%, 720px);
+  width: min(100%, 560px);
 }
 
 .configuration-flow-card {
-  padding: 32px;
+  padding: 34px 32px 26px;
 }
 
 .configuration-flow-panel {
@@ -4972,15 +4972,28 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 
 .configuration-setting-group {
   display: grid;
-  gap: 8px;
+  gap: 9px;
 }
 
-.configuration-setting-group h2 {
+.configuration-setting-group-head {
+  display: grid;
+  gap: 3px;
+}
+
+.configuration-setting-group-head h2 {
   margin: 0;
   color: var(--orange);
   font-size: 0.74rem;
   font-weight: 950;
   line-height: 1;
+}
+
+.configuration-setting-group-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 720;
+  line-height: 1.2;
 }
 
 .configuration-setting-list {
@@ -4991,18 +5004,38 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 }
 
 .configuration-setting-row {
+  position: relative;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  min-height: 58px;
-  padding: 9px 14px;
+  min-height: 62px;
+  padding: 10px 14px;
   border-top: 1px solid var(--line-cool);
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.configuration-setting-action-row::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--orange);
+  clip-path: circle(0 at var(--system-menu-hover-x, 50%) var(--system-menu-hover-y, 50%));
+  opacity: 0;
+  transition: opacity 90ms ease-out;
+  will-change: clip-path, opacity;
+}
+
+.configuration-setting-row > * {
+  position: relative;
+  z-index: 1;
 }
 
 .configuration-setting-action-row {
   appearance: none;
-  grid-template-columns: 42px minmax(0, 1fr) auto 18px;
+  grid-template-columns: 42px minmax(0, 1fr) 18px;
   width: 100%;
   border-right: 0;
   border-bottom: 0;
@@ -5013,18 +5046,28 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   font: inherit;
   text-align: left;
   transition:
-    background-color 180ms ease-out,
-    color 180ms ease-out;
+    border-color 180ms ease-out,
+    color 180ms ease-out,
+    transform 180ms ease-out;
 }
 
 .configuration-setting-action-row:hover,
+.configuration-setting-action-row.configuration-setting-row--hovering,
 .configuration-setting-action-row:focus-visible {
-  background: transparent;
+  border-color: transparent;
+  color: var(--surface);
   outline: 0;
+  transform: translateY(-1px);
+}
+
+.configuration-setting-action-row.configuration-setting-row--hovering::before,
+.configuration-setting-action-row:focus-visible::before {
+  animation: platform-menu-wave 490ms linear both;
+  opacity: 1;
 }
 
 .configuration-setting-action-row:focus-visible {
-  box-shadow: inset 0 0 0 2px oklch(0.84 0.09 45);
+  box-shadow: inset 0 0 0 2px oklch(0.99 0.004 76 / 0.44);
 }
 
 .configuration-setting-action-arrow {
@@ -5039,6 +5082,19 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   border-top: 0;
 }
 
+.configuration-setting-row-disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.configuration-setting-row-disabled:hover,
+.configuration-setting-row-disabled:focus-visible {
+  border-color: var(--line-cool);
+  background: var(--surface);
+  box-shadow: none;
+  transform: none;
+}
+
 .configuration-setting-icon {
   display: inline-grid;
   place-items: center;
@@ -5048,11 +5104,29 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   border-radius: 12px;
   background: oklch(0.982 0.016 62);
   color: var(--orange);
+  transition:
+    background-color 180ms ease-out,
+    border-color 180ms ease-out,
+    color 180ms ease-out;
+}
+
+.configuration-setting-action-row:hover .configuration-setting-icon,
+.configuration-setting-action-row.configuration-setting-row--hovering .configuration-setting-icon,
+.configuration-setting-action-row:focus-visible .configuration-setting-icon {
+  border-color: oklch(1 0 0 / 0.22);
+  background: oklch(1 0 0 / 0.16);
+  color: var(--surface);
+}
+
+.configuration-setting-row-disabled .configuration-setting-icon {
+  border-color: var(--line-cool);
+  background: oklch(0.972 0.006 78);
+  color: oklch(0.52 0.018 252);
 }
 
 .configuration-setting-copy {
   display: grid;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -5063,14 +5137,36 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   font-weight: 930;
   line-height: 1.18;
   text-overflow: ellipsis;
+  transition: color 180ms ease-out;
   white-space: nowrap;
 }
 
 .configuration-setting-copy small {
+  overflow: hidden;
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 650;
   line-height: 1.34;
+  text-overflow: ellipsis;
+  transition: color 180ms ease-out;
+  white-space: nowrap;
+}
+
+.configuration-setting-action-row:hover .configuration-setting-copy strong,
+.configuration-setting-action-row.configuration-setting-row--hovering .configuration-setting-copy strong,
+.configuration-setting-action-row:focus-visible .configuration-setting-copy strong {
+  color: var(--surface);
+}
+
+.configuration-setting-action-row:hover .configuration-setting-copy small,
+.configuration-setting-action-row.configuration-setting-row--hovering .configuration-setting-copy small,
+.configuration-setting-action-row:focus-visible .configuration-setting-copy small {
+  color: oklch(0.99 0.004 76 / 0.78);
+}
+
+.configuration-setting-row-disabled .configuration-setting-copy strong,
+.configuration-setting-row-disabled .configuration-setting-copy small {
+  color: oklch(0.48 0.016 255 / 0.72);
 }
 
 .configuration-setting-badge {
@@ -5086,7 +5182,697 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   font-size: 0.68rem;
   font-weight: 900;
   line-height: 1;
+  transition:
+    background-color 180ms ease-out,
+    border-color 180ms ease-out,
+    color 180ms ease-out;
   white-space: nowrap;
+}
+
+.configuration-setting-action-row:hover .configuration-setting-action-arrow,
+.configuration-setting-action-row.configuration-setting-row--hovering .configuration-setting-action-arrow,
+.configuration-setting-action-row:focus-visible .configuration-setting-action-arrow {
+  color: var(--surface);
+  transform: translateX(2px);
+}
+
+.configuration-setting-status {
+  justify-self: end;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.configuration-flow-shell-fiscal {
+  width: min(100%, 1080px);
+}
+
+.configuration-flow-card-fiscal {
+  padding: 28px;
+}
+
+.configuration-fiscal-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.fiscal-settings-form {
+  display: grid;
+  gap: 16px;
+}
+
+.fiscal-settings-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fiscal-status-tile {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 8px;
+  min-height: 62px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.fiscal-status-tile svg {
+  grid-row: span 2;
+  color: var(--orange);
+}
+
+.fiscal-status-tile strong {
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 0.83rem;
+  font-weight: 930;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-status-tile small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 720;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-status-tile-active {
+  border-color: oklch(0.86 0.07 45);
+  background: oklch(0.982 0.016 62);
+}
+
+.fiscal-status-tile-ready {
+  border-color: oklch(0.84 0.08 155);
+  background: oklch(0.982 0.018 155);
+}
+
+.fiscal-status-tile-ready svg {
+  color: oklch(0.52 0.14 155);
+}
+
+.fiscal-settings-feedback {
+  margin: 0;
+}
+
+.fiscal-settings-section {
+  gap: 13px;
+  padding: 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.fiscal-settings-section-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+}
+
+.fiscal-settings-section-head > span {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid oklch(0.9 0.052 45);
+  border-radius: 8px;
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+}
+
+.fiscal-settings-section-head strong {
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 940;
+  line-height: 1.1;
+}
+
+.fiscal-settings-toggle-row {
+  display: grid;
+  gap: 8px;
+}
+
+.fiscal-settings-toggle {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  justify-self: start;
+  gap: 10px;
+  min-height: 46px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.fiscal-settings-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.fiscal-settings-toggle strong,
+.fiscal-settings-toggle small {
+  display: block;
+  line-height: 1.1;
+}
+
+.fiscal-settings-toggle strong {
+  color: var(--ink-deep);
+  font-size: 0.84rem;
+  font-weight: 920;
+}
+
+.fiscal-settings-toggle small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 720;
+}
+
+.fiscal-settings-toggle-active .configuration-switch {
+  background: var(--orange);
+}
+
+.fiscal-settings-toggle-active .configuration-switch > span {
+  transform: translateX(20px);
+}
+
+.fiscal-issuance-headline {
+  display: grid;
+  grid-template-columns: minmax(230px, auto) minmax(220px, 1fr);
+  align-items: end;
+  gap: 12px;
+}
+
+.fiscal-environment-field {
+  display: grid;
+  gap: 6px;
+}
+
+.fiscal-environment-field > span,
+.fiscal-secret-field > span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.fiscal-disabled-panel {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 12px;
+  border: 1px dashed oklch(0.82 0.035 260);
+  border-radius: 12px;
+  background: oklch(0.972 0.006 260);
+  color: var(--muted);
+}
+
+.fiscal-disabled-panel > svg {
+  color: var(--orange);
+}
+
+.fiscal-disabled-panel strong,
+.fiscal-disabled-panel span {
+  display: block;
+  line-height: 1.2;
+}
+
+.fiscal-disabled-panel strong {
+  color: var(--ink-deep);
+  font-size: 0.84rem;
+  font-weight: 920;
+}
+
+.fiscal-disabled-panel span {
+  margin-top: 3px;
+  font-size: 0.74rem;
+  font-weight: 720;
+}
+
+.fiscal-settings-form .platform-select {
+  width: 100%;
+}
+
+.fiscal-settings-form .platform-select-control {
+  min-height: 42px;
+  border-radius: 12px;
+}
+
+.fiscal-certificate-row,
+.fiscal-certificate-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.fiscal-certificate-picker {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 32px auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 1px solid oklch(0.86 0.07 45);
+  border-radius: 12px;
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+  cursor: pointer;
+  font-weight: 920;
+}
+
+.fiscal-certificate-picker > span {
+  display: inline-grid;
+  place-items: center;
+}
+
+.fiscal-certificate-picker input {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.fiscal-certificate-picker:focus-within {
+  box-shadow: 0 0 0 3px oklch(0.86 0.07 45 / 0.28);
+}
+
+.fiscal-certificate-file,
+.fiscal-certificate-details {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.fiscal-certificate-file strong,
+.fiscal-certificate-file small,
+.fiscal-certificate-details strong,
+.fiscal-certificate-details span,
+.fiscal-certificate-details small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-certificate-file strong,
+.fiscal-certificate-details strong {
+  color: var(--ink-deep);
+  font-size: 0.84rem;
+  font-weight: 900;
+}
+
+.fiscal-certificate-details span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.fiscal-certificate-file small,
+.fiscal-certificate-details small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 720;
+}
+
+.fiscal-secret-field {
+  display: grid;
+  gap: 6px;
+}
+
+.fiscal-secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: stretch;
+  min-height: 42px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.fiscal-secret-input:focus-within {
+  border-color: oklch(0.72 0.14 45);
+  box-shadow: 0 0 0 3px oklch(0.88 0.08 45 / 0.28);
+}
+
+.fiscal-secret-input input {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.fiscal-secret-input input:focus,
+.fiscal-secret-input input:focus-visible {
+  box-shadow: none;
+  outline: none;
+}
+
+.fiscal-secret-input button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--line-cool);
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.fiscal-secret-input button:hover {
+  color: var(--orange);
+}
+
+.fiscal-secret-input button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.fiscal-settings-submit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.fiscal-lookup-hint {
+  color: var(--orange);
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.fiscal-issuance-control-section,
+.fiscal-certificate-section,
+.fiscal-numbering-section {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.fiscal-settings-section-head-split {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.fiscal-settings-section-head-split > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fiscal-settings-section-head-split small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.73rem;
+  font-weight: 760;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-env-pill,
+.fiscal-certificate-validity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-cool);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 930;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.fiscal-env-pill-active,
+.fiscal-certificate-validity-ready {
+  border-color: oklch(0.82 0.09 155);
+  background: oklch(0.968 0.03 155);
+  color: oklch(0.45 0.15 155);
+}
+
+.fiscal-certificate-validity-warning {
+  border-color: oklch(0.84 0.12 74);
+  background: oklch(0.972 0.035 74);
+  color: oklch(0.49 0.13 68);
+}
+
+.fiscal-certificate-validity-expired {
+  border-color: oklch(0.82 0.12 29);
+  background: oklch(0.972 0.025 29);
+  color: oklch(0.54 0.18 29);
+}
+
+.fiscal-issuance-control-section .fiscal-issuance-headline {
+  grid-template-columns: minmax(230px, 0.78fr) minmax(260px, 1.22fr);
+  align-items: end;
+}
+
+.fiscal-issuance-control-section .fiscal-settings-toggle,
+.fiscal-environment-card .platform-select-control {
+  min-height: 48px;
+}
+
+.fiscal-disabled-panel-compact {
+  min-height: 52px;
+  background: oklch(0.982 0.006 78);
+}
+
+.fiscal-certificate-section .fiscal-certificate-card {
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.fiscal-certificate-section .fiscal-certificate-picker {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 122px;
+  padding: 14px;
+  text-align: center;
+}
+
+.fiscal-certificate-section .fiscal-certificate-picker > span {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.fiscal-certificate-section .fiscal-certificate-details {
+  gap: 12px;
+  min-height: 122px;
+  padding: 14px;
+  background: var(--surface);
+}
+
+.fiscal-certificate-title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fiscal-certificate-title-row > strong {
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 0.92rem;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-certificate-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.72fr);
+  gap: 8px;
+}
+
+.fiscal-certificate-meta-grid > span {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 3px 8px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 10px;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.fiscal-certificate-meta-grid svg {
+  grid-row: span 2;
+  margin-top: 1px;
+  color: var(--orange);
+}
+
+.fiscal-certificate-meta-grid strong,
+.fiscal-certificate-meta-grid small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fiscal-certificate-meta-grid strong {
+  color: var(--ink-deep);
+  font-size: 0.74rem;
+  font-weight: 930;
+  line-height: 1;
+}
+
+.fiscal-certificate-meta-grid small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.fiscal-certificate-password-field {
+  max-width: 560px;
+}
+
+.fiscal-numbering-section {
+  gap: 16px;
+}
+
+.fiscal-numbering-group {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.fiscal-numbering-group + .fiscal-numbering-group {
+  padding-top: 14px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.fiscal-numbering-label {
+  display: inline-grid;
+  justify-items: center;
+  align-content: center;
+  gap: 6px;
+  min-height: 44px;
+  border: 1px solid oklch(0.9 0.052 45);
+  border-radius: 10px;
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+}
+
+.fiscal-numbering-label strong {
+  color: var(--orange);
+  font-size: 0.74rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.fiscal-numbering-grid {
+  gap: 10px;
+}
+
+.fiscal-numbering-grid-nfce {
+  grid-template-columns: minmax(90px, 0.55fr) minmax(130px, 0.75fr) minmax(130px, 0.75fr) minmax(220px, 1.2fr);
+}
+
+.fiscal-numbering-grid-nfe {
+  grid-template-columns: minmax(90px, 0.55fr) minmax(130px, 0.75fr);
+  max-width: 430px;
+}
+
+.integration-status {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 8px;
+  min-height: 46px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.integration-status svg {
+  grid-row: span 2;
+  color: var(--muted);
+}
+
+.integration-status strong,
+.integration-status small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-status strong {
+  color: var(--ink-deep);
+  font-size: 0.84rem;
+  font-weight: 920;
+  line-height: 1.12;
+}
+
+.integration-status small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 720;
+  line-height: 1.2;
+}
+
+.integration-status-ready {
+  border-color: oklch(0.84 0.08 155);
+  background: oklch(0.982 0.018 155);
+}
+
+.integration-status-ready svg {
+  color: oklch(0.52 0.14 155);
+}
+
+.fiscal-settings-skeleton {
+  display: grid;
+  gap: 12px;
+}
+
+.fiscal-settings-skeleton span {
+  min-height: 62px;
+  border-radius: 12px;
+  background: var(--surface-2);
+  animation: platform-skeleton-pulse 950ms ease-in-out infinite;
 }
 
 .platform-flow-shell-compact.convenio-flow-shell {
@@ -8652,6 +9438,78 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .fiscal-form-grid-advanced {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fiscal-company-grid,
+.fiscal-address-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: start;
+}
+
+.fiscal-field-span-2 {
+  grid-column: span 2;
+}
+
+.fiscal-field-span-3 {
+  grid-column: span 3;
+}
+
+.fiscal-field-span-4 {
+  grid-column: span 4;
+}
+
+.fiscal-field-span-5 {
+  grid-column: span 5;
+}
+
+.fiscal-field-span-6 {
+  grid-column: span 6;
+}
+
+.fiscal-field-span-8 {
+  grid-column: span 8;
+}
+
+.fiscal-field-span-12 {
+  grid-column: 1 / -1;
+}
+
+.fiscal-field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fiscal-autofill-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+  padding: 0 7px;
+  border: 1px solid oklch(0.88 0.045 155);
+  border-radius: 999px;
+  background: oklch(0.982 0.018 155);
+  color: oklch(0.46 0.12 155);
+  font-size: 0.66rem;
+  font-style: normal;
+  font-weight: 920;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.fiscal-autofill-badge-loading {
+  border-color: oklch(0.88 0.07 45);
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+}
+
+.fiscal-lookup-muted {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 760;
+  line-height: 1.15;
 }
 
 .fiscal-advanced-icms {
@@ -14941,8 +15799,20 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   .fiscal-form-grid-main,
   .fiscal-form-grid-four,
   .fiscal-form-grid-five,
+  .fiscal-company-grid,
+  .fiscal-address-grid,
   .fiscal-form-grid-advanced {
     grid-template-columns: 1fr;
+  }
+
+  .fiscal-field-span-2,
+  .fiscal-field-span-3,
+  .fiscal-field-span-4,
+  .fiscal-field-span-5,
+  .fiscal-field-span-6,
+  .fiscal-field-span-8,
+  .fiscal-field-span-12 {
+    grid-column: 1 / -1;
   }
 
   .fiscal-advanced-icms-head {
@@ -15039,12 +15909,8 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   }
 
   .configuration-setting-action-row {
-    grid-template-columns: 38px minmax(0, 1fr) auto;
+    grid-template-columns: 38px minmax(0, 1fr);
     align-items: center;
-  }
-
-  .configuration-setting-action-row .configuration-setting-badge {
-    grid-column: auto;
   }
 
   .configuration-setting-action-arrow {
@@ -15069,6 +15935,36 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   .configuration-setting-badge {
     grid-column: 2;
     justify-self: start;
+  }
+
+  .configuration-setting-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .configuration-flow-card-fiscal {
+    padding: 20px;
+  }
+
+  .fiscal-settings-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fiscal-issuance-headline,
+  .fiscal-certificate-row,
+  .fiscal-certificate-card {
+    grid-template-columns: 1fr;
+  }
+
+  .fiscal-settings-submit-row {
+    align-items: stretch;
+    flex-direction: column;
+    justify-content: stretch;
+  }
+
+  .fiscal-settings-submit-row .platform-secondary-button,
+  .fiscal-settings-submit-row .platform-primary-button {
+    width: 100%;
   }
 
   .fiscal-groups-head-actions {
@@ -15651,6 +16547,27 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
     border-radius: 18px;
   }
 
+  .configuration-flow-card-fiscal {
+    padding: 16px 14px;
+  }
+
+  .fiscal-settings-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fiscal-settings-section {
+    padding: 12px;
+  }
+
+  .fiscal-settings-toggle {
+    justify-self: stretch;
+  }
+
+  .fiscal-issuance-headline,
+  .fiscal-certificate-card {
+    grid-template-columns: 1fr;
+  }
+
   .platform-flow-actions {
     flex-direction: column;
   }
@@ -16082,5 +16999,26 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 
   .convenio-charge-actions {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .fiscal-settings-section-head-split,
+  .fiscal-issuance-control-section .fiscal-issuance-headline,
+  .fiscal-certificate-section .fiscal-certificate-card,
+  .fiscal-certificate-meta-grid,
+  .fiscal-numbering-group,
+  .fiscal-numbering-grid-nfce,
+  .fiscal-numbering-grid-nfe {
+    grid-template-columns: 1fr;
+  }
+
+  .fiscal-env-pill {
+    justify-self: start;
+  }
+
+  .fiscal-certificate-password-field,
+  .fiscal-numbering-grid-nfe {
+    max-width: none;
   }
 }

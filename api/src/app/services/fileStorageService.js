@@ -14,9 +14,17 @@ const mimeExtensions = new Map([
   ['application/pdf', '.pdf'],
   ['application/xml', '.xml'],
   ['text/xml', '.xml'],
+  ['application/x-pkcs12', '.pfx'],
+  ['application/pkcs12', '.pfx'],
 ]);
 
 const allowedMimeTypes = new Set(mimeExtensions.keys());
+const certificateExtensions = new Set(['.pfx', '.p12']);
+const certificateMimeTypes = new Set([
+  'application/x-pkcs12',
+  'application/pkcs12',
+  'application/octet-stream',
+]);
 
 function getStorageRoot() {
   return storageRoot;
@@ -42,11 +50,33 @@ function getArquivoTipo(mimeType) {
   return 'outro';
 }
 
+function isCertificateFile(file) {
+  const extension = path.extname(file.originalname || '').toLowerCase();
+
+  return certificateExtensions.has(extension) && certificateMimeTypes.has(file.mimetype);
+}
+
+function isAllowedUploadFile(file) {
+  return allowedMimeTypes.has(file.mimetype) || isCertificateFile(file);
+}
+
 function getExtension(file) {
   const mappedExtension = mimeExtensions.get(file.mimetype);
   const originalExtension = path.extname(file.originalname || '').toLowerCase();
 
+  if (isCertificateFile(file)) {
+    return originalExtension || mappedExtension || '.pfx';
+  }
+
   return mappedExtension || originalExtension || '.bin';
+}
+
+function getArquivoTipoByFile(file) {
+  if (isCertificateFile(file)) {
+    return 'certificado';
+  }
+
+  return getArquivoTipo(file.mimetype);
 }
 
 function buildStorageDirectory(usuarioId, mimeType) {
@@ -92,7 +122,9 @@ module.exports = {
   buildStoredFileName,
   ensureDirectory,
   getArquivoTipo,
+  getArquivoTipoByFile,
   getStorageRoot,
+  isAllowedUploadFile,
   removePhysicalFile,
   toAbsolutePath,
   toRelativePath,
