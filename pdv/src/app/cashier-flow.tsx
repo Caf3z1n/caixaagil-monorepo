@@ -4283,8 +4283,11 @@ export function DesktopCashierFlow({
                     </em>
                   </span>
                   <span className={`pdv-history-fiscal pdv-history-fiscal-${fiscalSummary.tone}`}>
-                    <strong>{fiscalSummary.title}</strong>
-                    <em>{fiscalSummary.label}</em>
+                    <strong>
+                      {fiscalSummary.title}
+                      <span className="pdv-history-fiscal-separator" aria-hidden="true" />
+                      <em>{fiscalSummary.label}</em>
+                    </strong>
                   </span>
                   <span className="pdv-history-line-total">
                     <em>{getCartQuantity(sale.items)} itens</em>

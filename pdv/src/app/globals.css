@@ -1348,53 +1348,49 @@ button {
 }
 
 .pdv-history-fiscal strong {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   max-width: 100%;
   overflow: hidden;
   color: var(--ink-deep);
   font-size: 0.82rem;
-  font-weight: 950;
+  font-weight: 800;
   line-height: 1.1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.pdv-history-fiscal-separator {
+  display: inline-block;
+  width: 1px;
+  height: 11px;
+  background: var(--line-cool);
+  flex: 0 0 auto;
+  align-self: center;
+  border-radius: 1px;
+}
+
 .pdv-history-fiscal em {
-  display: inline-flex;
-  align-items: center;
-  width: max-content;
-  max-width: 100%;
-  min-height: 22px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  font-size: 0.68rem;
   font-style: normal;
-  font-weight: 950;
-  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0.01em;
   white-space: nowrap;
 }
 
 .pdv-history-fiscal-success em {
-  border-color: oklch(0.8 0.09 154);
-  background: oklch(0.96 0.035 154);
   color: var(--success);
 }
 
 .pdv-history-fiscal-warning em {
-  border-color: oklch(0.86 0.11 73);
-  background: oklch(0.975 0.04 73);
   color: oklch(0.48 0.12 66);
 }
 
 .pdv-history-fiscal-error em {
-  border-color: oklch(0.84 0.07 29);
-  background: oklch(0.982 0.018 29);
   color: var(--danger);
 }
 
 .pdv-history-fiscal-neutral em {
-  border-color: var(--line-cool);
-  background: oklch(0.965 0.005 76);
   color: var(--muted);
 }
 
