@@ -5777,15 +5777,14 @@ function CashPaymentModal({
   return (
     <CashierModal
       title={title}
+      size="sm"
       onClose={onClose}
       footer={
         <>
-          <button className="pdv-secondary-action" type="button" onClick={onClose}>
-            <ArrowLeft aria-hidden="true" size={17} />
+          <button className="pdv-cash-payment-cancel" type="button" onClick={onClose}>
             Voltar
           </button>
-          <button className="pdv-confirm-action" type="submit" form="pdv-cash-payment-form" disabled={!canConfirm}>
-            <Check aria-hidden="true" size={17} />
+          <button className="pdv-cash-payment-confirm" type="submit" form="pdv-cash-payment-form" disabled={!canConfirm}>
             {confirmLabel}
           </button>
         </>
@@ -5793,15 +5792,12 @@ function CashPaymentModal({
     >
       <form className="pdv-cash-payment" id="pdv-cash-payment-form" onSubmit={handleSubmit}>
         <div className="pdv-cash-payment-total">
-          <span>
-            <Banknote aria-hidden="true" size={18} />
-            {totalLabel}
-          </span>
+          <span className="pdv-cash-payment-total-label">{totalLabel}</span>
           <strong>{formatCurrency(totalCents)}</strong>
         </div>
 
         <label className="pdv-cash-payment-received">
-          <span>Valor recebido</span>
+          <span className="pdv-cash-payment-received-label">Valor recebido</span>
           <input
             ref={inputRef}
             inputMode="numeric"
