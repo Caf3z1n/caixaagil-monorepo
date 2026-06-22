@@ -1,0 +1,99 @@
+name: Release PDV
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-pdv-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish PDV
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: pdv/package-lock.json
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install PDV dependencies
+        run: npm --prefix pdv ci --workspaces=false
+
+      - name: Resolve PDV version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./pdv/package.json').version"
+          $parts = $version.Split(".")
+          $releaseVersion = $version
+
+          if ($parts.Length -eq 3 -and $parts[2] -eq "0") {
+            $releaseVersion = "$($parts[0]).$($parts[1])"
+          }
+
+          $tag = "v$releaseVersion"
+
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne $tag) {
+            throw "A tag ${{ github.ref_name }} não corresponde à versão do PDV ($tag)."
+          }
+
+          "PDV_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PDV_RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PDV_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Typecheck PDV
+        run: npm --prefix pdv run typecheck
+
+      - name: Build PDV installer
+        run: npm --prefix pdv run dist
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          $artifacts = @(
+            "pdv/dist/caixaagil-pdv-setup.exe",
+            "pdv/dist/caixaagil-pdv-setup.exe.blockmap",
+            "pdv/dist/latest.yml"
+          )
+
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path $artifact)) {
+              throw "Artefato não encontrado: $artifact"
+            }
+          }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.PDV_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Caixa Ágil PDV v${{ env.PDV_RELEASE_VERSION }}
+          body: |
+            Instalador Windows do Caixa Ágil PDV.
+
+            Link público estável:
+            https://caixaagil.tech/download/pdv
+          draft: false
+          prerelease: false
+          make_latest: true
+          files: |
+            pdv/dist/caixaagil-pdv-setup.exe
+            pdv/dist/caixaagil-pdv-setup.exe.blockmap
+            pdv/dist/latest.yml

@@ -9,18 +9,13 @@
     "dev:next": "next dev --webpack -p 3030",
     "dev:electron": "wait-on http://localhost:3030 && electron electron/main.cjs",
     "build:fiscal-worker": "dotnet build fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj",
-    "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -o electron/resources/fiscal-worker/win-x64",
+    "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o electron/resources/fiscal-worker/win-x64",
     "build": "next build",
+    "dist": "npm run build && npm run publish:fiscal-worker && electron-builder --publish never",
+    "dist:dir": "npm run build && npm run publish:fiscal-worker && electron-builder --dir",
+    "release": "npm run dist",
     "start": "electron electron/main.cjs",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "caixaagil-monorepo": "file:..",
-    "lucide-react": "^1.7.0",
-    "next": "16.2.6",
-    "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@types/node": "^20",
@@ -28,10 +23,86 @@
     "@types/react-dom": "^19",
     "concurrently": "^9.2.1",
     "electron": "^39.2.6",
+    "electron-builder": "^26.8.1",
+    "lucide-react": "^1.7.0",
+    "next": "16.2.6",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "sql.js": "^1.14.1",
     "typescript": "^5",
     "wait-on": "^9.0.3"
   },
   "overrides": {
     "postcss": "8.5.10"
+  },
+  "build": {
+    "appId": "br.com.caixaagil.pdv",
+    "productName": "Caixa Agil PDV",
+    "asar": true,
+    "compression": "maximum",
+    "electronLanguages": [
+      "pt-BR",
+      "en-US"
+    ],
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
+    "artifactName": "caixaagil-pdv-setup.${ext}",
+    "files": [
+      "electron/**/*",
+      "!electron/resources/**",
+      "out/**/*",
+      "package.json",
+      "!**/*.map",
+      "!**/*.pdb",
+      "!**/*.log",
+      "!**/.next/**",
+      "!**/src/**",
+      "!**/fiscal-worker/**",
+      "!**/docs/**"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/resources/fiscal-worker/win-x64/CaixaAgil.FiscalWorker.exe",
+        "to": "fiscal-worker/CaixaAgil.FiscalWorker.exe"
+      },
+      {
+        "from": "node_modules/sql.js/dist",
+        "to": "sqljs",
+        "filter": [
+          "sql-wasm.js",
+          "sql-wasm.wasm"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "electron/assets/app-icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": "always",
+      "shortcutName": "Caixa Agil PDV"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Caf3z1n",
+        "repo": "caixaagil-monorepo",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

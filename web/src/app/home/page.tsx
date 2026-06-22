@@ -25,9 +25,10 @@ const nextActions = [
   {
     title: "Instalar PDV Windows",
     text: "Prepare o computador do caixa para vender com operação local.",
-    href: "#instalacao",
+    href: "/download/pdv",
     icon: MonitorDown,
-    action: "Preparar instalação"
+    action: "Baixar instalador",
+    download: true
   },
   {
     title: "Gerenciar PDVs e equipe",
@@ -85,13 +86,8 @@ export default function PlatformHomePage() {
           <div className="platform-start-actions" id="instalacao">
             {nextActions.map((item) => {
               const Icon = item.icon;
-
-              return (
-                <Link
-                  className="platform-action-row"
-                  href={item.href}
-                  key={item.title}
-                >
+              const content = (
+                <>
                   <span className="platform-action-icon">
                     <Icon aria-hidden="true" size={20} />
                   </span>
@@ -103,6 +99,28 @@ export default function PlatformHomePage() {
                     {item.action}
                     <ArrowRight aria-hidden="true" size={16} />
                   </em>
+                </>
+              );
+
+              if (item.download) {
+                return (
+                  <a
+                    className="platform-action-row"
+                    href={item.href}
+                    key={item.title}
+                  >
+                    {content}
+                  </a>
+                );
+              }
+
+              return (
+                <Link
+                  className="platform-action-row"
+                  href={item.href}
+                  key={item.title}
+                >
+                  {content}
                 </Link>
               );
             })}

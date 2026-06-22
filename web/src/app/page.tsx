@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import {
   ArrowRight,
   Check,
+  Download,
   X
 } from "lucide-react";
 
@@ -198,6 +199,10 @@ export default function HomePage() {
                 Ver planos
                 <ArrowRight aria-hidden="true" size={19} />
               </SmoothScrollLink>
+              <a className="button button-ghost" href="/download/pdv">
+                Baixar PDV
+                <Download aria-hidden="true" size={18} />
+              </a>
             </div>
           </div>
 

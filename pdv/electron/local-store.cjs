@@ -1,11 +1,21 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const initSqlJs = require("sql.js");
+
+function createSqlJsRuntime(app) {
+  const wasmDirectory = app.isPackaged
+    ? path.join(process.resourcesPath, "sqljs")
+    : path.join(__dirname, "..", "node_modules", "sql.js", "dist");
+  const initSqlJs = app.isPackaged
+    ? require(path.join(wasmDirectory, "sql-wasm.js"))
+    : require("sql.js");
+
+  return { initSqlJs, wasmDirectory };
+}
 
 function createLocalPdvStore(app) {
   const dbDirectory = path.join(app.getPath("userData"), "data");
   const dbPath = path.join(dbDirectory, "caixa-agil-pdv.sqlite");
-  const wasmDirectory = path.join(__dirname, "..", "node_modules", "sql.js", "dist");
+  const { initSqlJs, wasmDirectory } = createSqlJsRuntime(app);
   let databasePromise = null;
   let writeQueue = Promise.resolve();
 

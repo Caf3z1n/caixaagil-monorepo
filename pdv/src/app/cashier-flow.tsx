@@ -34,6 +34,7 @@ import {
   Copy,
   CreditCard,
   CupSoda,
+  Download,
   Dumbbell,
   Gift,
   HandCoins,
@@ -73,7 +74,8 @@ import {
   type FiscalWorkerResponse,
   type LocalPdvStoreEventPayload,
   type LocalPdvStorePendingEvent,
-  type LocalPdvStoreSummary
+  type LocalPdvStoreSummary,
+  type PdvUpdateStatus
 } from "@/lib/local-pdv-store";
 
 type ConnectivityState = "online" | "offline";
@@ -1872,6 +1874,129 @@ function EmployeeAuthModal({
   );
 }
 
+function shouldShowPdvUpdateModal(status: PdvUpdateStatus | null) {
+  return status?.status === "available" ||
+    status?.status === "downloading" ||
+    status?.status === "downloaded";
+}
+
+function formatPdvReleaseVersion(version: string | null | undefined) {
+  const normalized = String(version || "").trim();
+  const match = /^(\d+)\.(\d+)\.0$/.exec(normalized);
+
+  if (match) {
+    return `v${match[1]}.${match[2]}`;
+  }
+
+  return normalized ? `v${normalized}` : "nova versão";
+}
+
+function formatUpdateSize(bytes: number | null | undefined) {
+  const size = Number(bytes);
+
+  if (!Number.isFinite(size) || size <= 0) {
+    return "Tamanho indisponível";
+  }
+
+  const megabytes = size / 1024 / 1024;
+
+  return `${new Intl.NumberFormat("pt-BR", {
+    maximumFractionDigits: megabytes >= 100 ? 0 : 1,
+    minimumFractionDigits: megabytes >= 100 ? 0 : 1
+  }).format(megabytes)} MB`;
+}
+
+function PdvUpdateModal({
+  hasOpenSession,
+  isBusy,
+  onPostpone,
+  onUpdate,
+  status
+}: {
+  hasOpenSession: boolean;
+  isBusy: boolean;
+  onPostpone: () => void;
+  onUpdate: () => void | Promise<void>;
+  status: PdvUpdateStatus | null;
+}) {
+  if (!shouldShowPdvUpdateModal(status)) {
+    return null;
+  }
+
+  const availableVersion = formatPdvReleaseVersion(status?.availableVersion);
+  const updateSize = formatUpdateSize(status?.sizeBytes);
+  const progress = Math.max(0, Math.min(100, Math.round(Number(status?.progress ?? 0))));
+  const isDownloaded = status?.status === "downloaded";
+  const isDownloading = status?.status === "downloading";
+  const isAvailable = status?.status === "available";
+  const primaryLabel = isDownloaded
+    ? hasOpenSession
+      ? "Feche o caixa"
+      : "Reiniciar e instalar"
+    : isDownloading
+      ? "Baixando"
+      : "Atualizar PDV";
+  const primaryDisabled = isBusy || isDownloading || (isDownloaded && hasOpenSession);
+
+  return (
+    <CashierModal
+      title="Atualização disponível"
+      description={`Versão ${availableVersion} pronta para este PDV.`}
+      onClose={onPostpone}
+      dismissible={false}
+      size="sm"
+      footer={
+        <>
+          <button className="pdv-secondary-action" type="button" disabled={isDownloading || isBusy} onClick={onPostpone}>
+            Deixar para depois
+          </button>
+          <button className="pdv-primary-action" type="button" disabled={primaryDisabled} onClick={onUpdate}>
+            {isBusy || isDownloading ? (
+              <LoaderCircle className="pdv-spin" aria-hidden="true" size={17} />
+            ) : isDownloaded ? (
+              <RefreshCw aria-hidden="true" size={17} />
+            ) : (
+              <Download aria-hidden="true" size={17} />
+            )}
+            {primaryLabel}
+          </button>
+        </>
+      }
+    >
+      <div className="pdv-update-modal-body">
+        <span className="pdv-update-modal-icon" aria-hidden="true">
+          {isDownloaded ? <Check size={22} /> : <Download size={22} />}
+        </span>
+
+        <div className="pdv-update-modal-summary">
+          <div>
+            <small>Nova versão</small>
+            <strong>{availableVersion}</strong>
+          </div>
+          <div>
+            <small>Tamanho</small>
+            <strong>{updateSize}</strong>
+          </div>
+        </div>
+
+        <div className="pdv-update-modal-progress" aria-label={`Progresso do download: ${progress}%`}>
+          <span style={{ width: `${isAvailable ? 0 : progress}%` }} />
+        </div>
+
+        <p>
+          {isDownloaded
+            ? hasOpenSession
+              ? "O download terminou. Feche o caixa para instalar a atualização."
+              : "O download terminou. Reinicie o PDV para concluir a instalação."
+            : isDownloading
+              ? `Baixando atualização: ${progress}%`
+              : "Baixe agora ou continue usando esta versão por enquanto."}
+        </p>
+      </div>
+    </CashierModal>
+  );
+}
+
 export function DesktopCashierFlow({
   connectivity,
   deviceCredential,
@@ -1962,6 +2087,9 @@ export function DesktopCashierFlow({
   const [isCatalogSyncing, setIsCatalogSyncing] = useState(false);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isSyncDetailsOpen, setIsSyncDetailsOpen] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<PdvUpdateStatus | null>(null);
+  const [isUpdateActionRunning, setIsUpdateActionRunning] = useState(false);
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null);
   const [isOpeningSession, setIsOpeningSession] = useState(false);
   const [previewShiftNumber, setPreviewShiftNumber] = useState(() =>
     getPreviewDailyShiftNumber(new Date(), shiftSequenceScope)
@@ -1975,6 +2103,45 @@ export function DesktopCashierFlow({
     () => `${shiftSequenceScope || "local"}:${deviceId || "device"}`,
     [deviceId, shiftSequenceScope]
   );
+
+  useEffect(() => {
+    const store = getLocalPdvStore();
+    let isMounted = true;
+
+    if (!store?.getUpdateStatus) {
+      return undefined;
+    }
+
+    store.getUpdateStatus()
+      .then((status) => {
+        if (isMounted) {
+          setUpdateStatus(status);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setUpdateStatus(null);
+        }
+      });
+
+    const unsubscribe = store.onUpdateStatus?.((status) => {
+      setUpdateStatus(status);
+    });
+
+    store.checkForUpdates?.()
+      .then((status) => {
+        if (isMounted) {
+          setUpdateStatus(status);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
+  }, []);
+
   const totalCents = getCartTotal(cartItems);
   const totalQuantity = getCartQuantity(cartItems);
   const commandEditorTotalCents = getCartTotal(commandEditor?.items ?? []);
@@ -6093,6 +6260,56 @@ export function DesktopCashierFlow({
   ]
     .filter(Boolean)
     .join(" ");
+  const updateVersionKey = updateStatus?.availableVersion || "unknown";
+  const shouldShowUpdateModal = shouldShowPdvUpdateModal(updateStatus) && dismissedUpdateVersion !== updateVersionKey;
+
+  function postponePdvUpdate() {
+    setDismissedUpdateVersion(updateVersionKey);
+  }
+
+  async function downloadPdvUpdate() {
+    const store = getLocalPdvStore();
+
+    if (!store?.downloadUpdate) {
+      return;
+    }
+
+    setIsUpdateActionRunning(true);
+
+    try {
+      const status = await store.downloadUpdate();
+      setUpdateStatus(status);
+    } finally {
+      setIsUpdateActionRunning(false);
+    }
+  }
+
+  async function installPdvUpdate() {
+    const store = getLocalPdvStore();
+
+    if (!store?.installUpdate || session) {
+      return;
+    }
+
+    setIsUpdateActionRunning(true);
+
+    try {
+      await store.installUpdate();
+    } finally {
+      setIsUpdateActionRunning(false);
+    }
+  }
+
+  async function runPdvUpdateAction() {
+    if (updateStatus?.status === "downloaded") {
+      await installPdvUpdate();
+      return;
+    }
+
+    if (updateStatus?.status === "available") {
+      await downloadPdvUpdate();
+    }
+  }
 
   return (
     <>
@@ -6171,6 +6388,16 @@ export function DesktopCashierFlow({
           </button>
         </div>
       </header>
+
+      {shouldShowUpdateModal ? (
+        <PdvUpdateModal
+          hasOpenSession={Boolean(session)}
+          isBusy={isUpdateActionRunning}
+          status={updateStatus}
+          onPostpone={postponePdvUpdate}
+          onUpdate={runPdvUpdateAction}
+        />
+      ) : null}
 
       <section className={shellClassName} aria-label="Sistema do caixa">
         <div className="pdv-cashier-section-title" aria-label={sectionTitle}>

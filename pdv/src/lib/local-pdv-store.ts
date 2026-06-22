@@ -80,6 +80,24 @@ export type FiscalDocumentRecord = {
   updated_at: string;
 };
 
+export type PdvUpdateStatusName =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "error"
+  | "unsupported";
+
+export type PdvUpdateStatus = {
+  status: PdvUpdateStatusName;
+  version?: string | null;
+  availableVersion?: string | null;
+  error?: string | null;
+  progress?: number | null;
+  sizeBytes?: number | null;
+};
+
 export type LocalPdvStoreBridge = {
   loadState<TState>(payload: { scope: string }): Promise<TState | null>;
   saveState(payload: { scope: string; state: unknown }): Promise<{ ok: true; updatedAt: string }>;
@@ -138,6 +156,11 @@ export type LocalPdvStoreBridge = {
     chave?: string;
     status?: string;
   }): Promise<FiscalDocumentRecord[]>;
+  getUpdateStatus?(): Promise<PdvUpdateStatus>;
+  checkForUpdates?(): Promise<PdvUpdateStatus>;
+  downloadUpdate?(): Promise<PdvUpdateStatus>;
+  installUpdate?(): Promise<{ ok: boolean }>;
+  onUpdateStatus?(callback: (status: PdvUpdateStatus) => void): () => void;
 };
 
 declare global {

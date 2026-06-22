@@ -85,5 +85,29 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   },
   listFiscalDocuments(payload) {
     return ipcRenderer.invoke("pdv-fiscal:list-documents", payload);
+  },
+  getUpdateStatus() {
+    return ipcRenderer.invoke("pdv-update:get-status");
+  },
+  checkForUpdates() {
+    return ipcRenderer.invoke("pdv-update:check");
+  },
+  downloadUpdate() {
+    return ipcRenderer.invoke("pdv-update:download");
+  },
+  installUpdate() {
+    return ipcRenderer.invoke("pdv-update:install");
+  },
+  onUpdateStatus(callback) {
+    if (typeof callback !== "function") {
+      return () => {};
+    }
+
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("pdv-update:status", listener);
+
+    return () => {
+      ipcRenderer.removeListener("pdv-update:status", listener);
+    };
   }
 });

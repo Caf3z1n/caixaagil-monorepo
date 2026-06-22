@@ -8,6 +8,8 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>CaixaAgil.FiscalWorker</AssemblyName>
     <RootNamespace>CaixaAgil.FiscalWorker</RootNamespace>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
   <ItemGroup>

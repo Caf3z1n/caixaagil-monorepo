@@ -85,7 +85,7 @@ const progressSteps: Array<{ id: OnboardingStep; label: string }> = [
   { id: "done", label: "Pronto" }
 ];
 
-const desktopDownloadUrl = "https://api.caixaagil.eticasistemas.com.br/updates/desktop/caixa-agil-setup-1.3.2.exe";
+const desktopDownloadUrl = "/download/pdv";
 
 export function OnboardingFlow() {
   const router = useRouter();
