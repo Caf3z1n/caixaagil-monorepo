@@ -16126,6 +16126,14 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   line-height: 1.48;
 }
 
+.platform-modal-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
 .platform-modal .platform-compact-form {
   margin-top: 22px;
 }

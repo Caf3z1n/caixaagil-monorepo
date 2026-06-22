@@ -1843,6 +1843,18 @@ function handlePdvError(res, error, defaultMessage) {
   return res.status(500).json({ message: defaultMessage, detail: error.message });
 }
 
+function resetPdvDevicePairing(pdv, status = 'pendente') {
+  pdv.status = status;
+  pdv.dispositivo_id = null;
+  pdv.credencial_hash = null;
+  pdv.pareado_em = null;
+  pdv.codigo_pareamento_hash = null;
+  pdv.codigo_pareamento_expira_em = null;
+  pdv.codigo_pareamento_usado_em = null;
+  pdv.sincronizacao_pendente = false;
+  pdv.ultima_fila_offline_em = null;
+}
+
 module.exports = {
   getUserPdvsSnapshot,
 
@@ -1926,14 +1938,9 @@ module.exports = {
       const registrosVinculados = await getPdvRegistrosVinculados(req.user.id, pdv.id);
 
       if (registrosVinculados > 0) {
-        await pdv.update({
-          ativo: false,
-          status: 'inativo',
-          codigo_pareamento_hash: null,
-          codigo_pareamento_expira_em: null,
-          codigo_pareamento_usado_em: null,
-          credencial_hash: null,
-        });
+        resetPdvDevicePairing(pdv, 'inativo');
+        pdv.ativo = false;
+        await pdv.save();
         const identificacao = await getVirtualIdentificacao(req.user.id, pdv.id);
 
         return res.json({
@@ -2017,6 +2024,32 @@ module.exports = {
       );
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao gerar código de pareamento.', detail: error.message });
+    }
+  },
+
+  async unpair(req, res) {
+    try {
+      const pdv = await findUserPdv(req.user.id, req.params.id);
+
+      if (!pdv) {
+        return res.status(404).json({ message: 'PDV não encontrado.' });
+      }
+
+      resetPdvDevicePairing(pdv, pdv.ativo ? 'pendente' : 'inativo');
+      await pdv.save();
+
+      const [identificacao, registrosVinculados] = await Promise.all([
+        getVirtualIdentificacao(req.user.id, pdv.id),
+        getPdvRegistrosVinculados(req.user.id, pdv.id),
+      ]);
+
+      return res.json({
+        action: 'unpaired',
+        pdv: sanitizePdv(pdv, { identificacao, registros_vinculados: registrosVinculados }),
+        message: 'PDV desvinculado. Gere um novo código para ativar outro computador.',
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao desvincular PDV.', detail: error.message });
     }
   },
 
@@ -2307,29 +2340,8 @@ module.exports = {
   },
 
   async unpairDesktop(req, res) {
-    try {
-      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
-
-      if (!pdv) {
-        return res.status(401).json({ message: 'PDV não autenticado ou já desvinculado.' });
-      }
-
-      pdv.status = 'pendente';
-      pdv.dispositivo_id = null;
-      pdv.credencial_hash = null;
-      pdv.pareado_em = null;
-      pdv.sincronizacao_pendente = false;
-      pdv.ultima_fila_offline_em = null;
-      await pdv.save();
-
-      const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
-
-      return res.json({
-        message: 'PDV desvinculado. Gere um novo código para ativar este caixa novamente.',
-        pdv: sanitizePdv(pdv, { identificacao }),
-      });
-    } catch (error) {
-      return res.status(500).json({ message: 'Erro ao desvincular PDV.', detail: error.message });
-    }
+    return res.status(403).json({
+      message: 'Desvincule este PDV pelo painel web da conta.',
+    });
   },
 };

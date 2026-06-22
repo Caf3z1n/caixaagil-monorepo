@@ -20,5 +20,6 @@ router.post('/:id/ativar', controller.activate);
 router.put('/:id', controller.update);
 router.delete('/:id', controller.remove);
 router.post('/:id/codigo-pareamento', controller.createPairingCode);
+router.post('/:id/desvincular', controller.unpair);
 
 module.exports = router;

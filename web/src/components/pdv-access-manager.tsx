@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
+  Unplug,
   UserRound,
   X
 } from "lucide-react";
@@ -77,12 +78,14 @@ type Subconta = {
   ultimo_acesso_em: string | null;
 };
 
-type DeletePdvResponse =
-  | { action: "deleted"; id: number; message?: string }
-  | { action: "deactivated"; pdv: Pdv; message?: string };
-
 type ActivatePdvResponse = {
   action: "activated";
+  pdv: Pdv;
+  message?: string;
+};
+
+type UnpairPdvResponse = {
+  action: "unpaired";
   pdv: Pdv;
   message?: string;
 };
@@ -204,7 +207,7 @@ export function PdvAccessManager() {
   const [isPdvModalOpen, setIsPdvModalOpen] = useState(false);
   const [isSubcontaModalOpen, setIsSubcontaModalOpen] = useState(false);
   const [isPairingModalOpen, setIsPairingModalOpen] = useState(false);
-  const [pdvToDelete, setPdvToDelete] = useState<Pdv | null>(null);
+  const [pdvToUnpair, setPdvToUnpair] = useState<Pdv | null>(null);
   const [subcontaToDelete, setSubcontaToDelete] = useState<Subconta | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -218,20 +221,20 @@ export function PdvAccessManager() {
     isPdvModalOpen ||
     isSubcontaModalOpen ||
     isPairingModalOpen ||
-    Boolean(pdvToDelete) ||
+    Boolean(pdvToUnpair) ||
     Boolean(subcontaToDelete);
   const pdvModalPresence = useModalPresence(isPdvModalOpen);
   const subcontaModalPresence = useModalPresence(isSubcontaModalOpen);
   const pairingModalPresence = useModalPresence(isPairingModalOpen);
-  const pdvDeletePresence = useModalPresence(pdvToDelete);
-  const visiblePdvToDelete = pdvDeletePresence.presentValue;
+  const pdvUnpairPresence = useModalPresence(pdvToUnpair);
+  const visiblePdvToUnpair = pdvUnpairPresence.presentValue;
   const subcontaDeletePresence = useModalPresence(subcontaToDelete);
   const visibleSubcontaToDelete = subcontaDeletePresence.presentValue;
   const hasVisibleModal =
     pdvModalPresence.isPresent ||
     subcontaModalPresence.isPresent ||
     pairingModalPresence.isPresent ||
-    pdvDeletePresence.isPresent ||
+    pdvUnpairPresence.isPresent ||
     subcontaDeletePresence.isPresent;
 
   const selectedPdv = useMemo(
@@ -359,8 +362,8 @@ export function PdvAccessManager() {
       return;
     }
 
-    if (pdvToDelete) {
-      setPdvToDelete(null);
+    if (pdvToUnpair) {
+      setPdvToUnpair(null);
       return;
     }
 
@@ -450,9 +453,9 @@ export function PdvAccessManager() {
     }
   }
 
-  async function handleConfirmDelete() {
-    if (!token || !pdvToDelete) {
-      setPdvToDelete(null);
+  async function handleConfirmUnpairPdv() {
+    if (!token || !pdvToUnpair) {
+      setPdvToUnpair(null);
       return;
     }
 
@@ -460,29 +463,22 @@ export function PdvAccessManager() {
     setFeedback(null);
 
     try {
-      const result = await apiDelete<DeletePdvResponse>(`/pdvs/${pdvToDelete.id}`, { token });
+      const result = await apiPost<UnpairPdvResponse>(`/pdvs/${pdvToUnpair.id}/desvincular`, {}, { token });
 
-      if (result?.action === "deactivated") {
-        setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
-      } else {
-        setPdvs((current) => current.filter((item) => item.id !== pdvToDelete.id));
-      }
+      setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
+      setSelectedPdvId(result.pdv.id);
 
-      if (selectedPdvId === pdvToDelete.id) {
-        setSelectedPdvId(null);
-      }
-
-      if (activePairing?.pdvId === pdvToDelete.id) {
+      if (activePairing?.pdvId === result.pdv.id) {
         setActivePairing(null);
         setIsPairingModalOpen(false);
       }
 
-      setPdvToDelete(null);
-      setFeedback(null);
+      setPdvToUnpair(null);
+      setFeedback({ tone: "success", text: result.message || "PDV desvinculado." });
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: getApiMessage(error, "Não foi possível excluir o PDV.")
+        text: getApiMessage(error, "Não foi possível desvincular o PDV.")
       });
     } finally {
       setIsSaving(false);
@@ -956,18 +952,18 @@ export function PdvAccessManager() {
                       >
                         <RotateCcw aria-hidden="true" size={15} />
                       </button>
-                    ) : (
+                    ) : pdv.pareado_em ? (
                       <button
                         type="button"
-                        aria-label={`Excluir ${pdv.nome}`}
+                        aria-label={`Desvincular dispositivo de ${pdv.nome}`}
                         onClick={(event) => {
                           event.stopPropagation();
-                          setPdvToDelete(pdv);
+                          setPdvToUnpair(pdv);
                         }}
                       >
-                        <Trash2 aria-hidden="true" size={15} />
+                        <Unplug aria-hidden="true" size={15} />
                       </button>
-                    )}
+                    ) : null}
                   </span>
                 </div>
               ))
@@ -1197,15 +1193,15 @@ export function PdvAccessManager() {
         </div>
       ) : null}
 
-      {pdvDeletePresence.isPresent && visiblePdvToDelete ? (
+      {pdvUnpairPresence.isPresent && visiblePdvToUnpair ? (
         <div
           className="platform-modal-backdrop"
-          data-modal-state={pdvDeletePresence.state}
+          data-modal-state={pdvUnpairPresence.state}
           role="presentation"
           {...pdvModalDismiss.backdropProps}
         >
           <section
-            aria-labelledby="platform-delete-modal-title"
+            aria-labelledby="platform-unpair-pdv-modal-title"
             aria-modal="true"
             className="platform-modal platform-modal-compact"
             role="dialog"
@@ -1214,36 +1210,29 @@ export function PdvAccessManager() {
               className="platform-modal-close"
               type="button"
               aria-label="Fechar"
-              onClick={() => setPdvToDelete(null)}
+              onClick={() => setPdvToUnpair(null)}
             >
               <X aria-hidden="true" size={18} />
             </button>
             <div className="platform-modal-head">
-              <h2 id="platform-delete-modal-title">
-                {visiblePdvToDelete.acao_remocao === "desativar" ? "Desativar PDV?" : "Excluir PDV?"}
-              </h2>
-              <p>{visiblePdvToDelete.identificacao} · {visiblePdvToDelete.nome}</p>
+              <h2 id="platform-unpair-pdv-modal-title">Desvincular dispositivo?</h2>
+              <p>{visiblePdvToUnpair.identificacao} · {visiblePdvToUnpair.nome}</p>
             </div>
             {modalFeedback}
+            <p className="platform-modal-note">
+              O cadastro e o histórico do PDV serão preservados. O computador pareado perderá acesso quando validar a sessão na API.
+            </p>
 
             <div className="platform-modal-actions">
-              <button className="platform-secondary-button" type="button" onClick={() => setPdvToDelete(null)}>
+              <button className="platform-secondary-button" type="button" onClick={() => setPdvToUnpair(null)}>
                 Cancelar
               </button>
-              <button className="platform-primary-button platform-danger-button" disabled={isSaving} type="button" onClick={handleConfirmDelete}>
-                {isSaving
-                  ? visiblePdvToDelete.acao_remocao === "desativar"
-                    ? "Desativando"
-                    : "Excluindo"
-                  : visiblePdvToDelete.acao_remocao === "desativar"
-                    ? "Desativar"
-                    : "Excluir"}
+              <button className="platform-primary-button platform-danger-button" disabled={isSaving} type="button" onClick={handleConfirmUnpairPdv}>
+                {isSaving ? "Desvinculando" : "Desvincular"}
                 {isSaving ? (
                   <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
-                ) : visiblePdvToDelete.acao_remocao === "desativar" ? (
-                  <Ban aria-hidden="true" size={16} />
                 ) : (
-                  <Trash2 aria-hidden="true" size={16} />
+                  <Unplug aria-hidden="true" size={16} />
                 )}
               </button>
             </div>

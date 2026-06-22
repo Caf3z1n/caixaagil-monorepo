@@ -418,9 +418,7 @@ type DesktopCashierFlowProps = {
   initialEmployees?: ApiEmployee[];
   lastAccessLabel: string;
   systemMessage?: string;
-  isUnpairing: boolean;
   onConnectivityChange: (state: ConnectivityState) => void;
-  onUnpair: () => void | Promise<void>;
   onSystemMessage: (message: string) => void;
 };
 
@@ -1883,9 +1881,7 @@ export function DesktopCashierFlow({
   initialSettings,
   initialEmployees,
   lastAccessLabel,
-  isUnpairing,
   onConnectivityChange,
-  onUnpair,
   systemMessage,
   onSystemMessage
 }: DesktopCashierFlowProps) {
@@ -6319,13 +6315,11 @@ export function DesktopCashierFlow({
             eventSyncError={eventSyncError}
             isCatalogSyncing={isCatalogSyncing}
             isManualSyncing={isManualSyncing}
-            isUnpairing={isUnpairing}
             lastAccessLabel={lastAccessLabel}
             localStoreScope={localStoreScope}
             onClose={() => setIsSettingsOpen(false)}
             onShowSyncDetails={() => setIsSyncDetailsOpen(true)}
             onSyncNow={syncNow}
-            onUnpair={onUnpair}
             pdvIdentity={pdvIdentity}
             syncSummary={syncSummary}
           />
@@ -6411,12 +6405,10 @@ function PdvSettingsModal({
   eventSyncError,
   isCatalogSyncing,
   isManualSyncing,
-  isUnpairing,
   localStoreScope,
   onClose,
   onShowSyncDetails,
   onSyncNow,
-  onUnpair,
   pdvIdentity,
   syncSummary
 }: {
@@ -6426,13 +6418,11 @@ function PdvSettingsModal({
   eventSyncError: string;
   isCatalogSyncing: boolean;
   isManualSyncing: boolean;
-  isUnpairing: boolean;
   lastAccessLabel: string;
   localStoreScope: string;
   onClose: () => void;
   onShowSyncDetails: () => void;
   onSyncNow: () => void | Promise<void>;
-  onUnpair: () => void | Promise<void>;
   pdvIdentity: string;
   syncSummary: LocalPdvStoreSummary;
 }) {
@@ -6587,16 +6577,6 @@ function PdvSettingsModal({
       description={pdvIdentity}
       size="sm"
       onClose={onClose}
-      footer={
-        <button className="pdv-danger-action" type="button" onClick={onUnpair} disabled={isUnpairing}>
-          {isUnpairing ? (
-            <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
-          ) : (
-            <LogOut aria-hidden="true" size={17} />
-          )}
-          {isUnpairing ? "Desvinculando" : "Desvincular PDV"}
-        </button>
-      }
     >
       <div className="pdv-settings-panel">
         <section className="pdv-settings-section" aria-label="Sincronização do PDV">

@@ -182,7 +182,6 @@ export default function PdvActivationPage() {
   const [statusMessage, setStatusMessage] = useState("");
   const [systemMessage, setSystemMessage] = useState("");
   const [isActivating, setIsActivating] = useState(false);
-  const [isUnpairing, setIsUnpairing] = useState(false);
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
   const [initialPdvSettings, setInitialPdvSettings] = useState<ApiPdvSettings | null>(null);
   const [initialEmployees, setInitialEmployees] = useState<ApiEmployee[]>([]);
@@ -361,51 +360,6 @@ export default function PdvActivationPage() {
     }
   }
 
-  async function unpairPdv() {
-    const storedCredential = getStoredCredential();
-
-    if (!storedCredential || isUnpairing) {
-      clearDesktopSession();
-      setActivatedPdv(null);
-      setStep("intro");
-      setAppState("activation");
-      return;
-    }
-
-    setIsUnpairing(true);
-    setSystemMessage("");
-
-    try {
-      await apiPost<{ message?: string }>("/pdvs/desparear", {
-        credencial_dispositivo: storedCredential,
-        dispositivo_id: getDeviceId()
-      });
-
-      clearDesktopSession();
-      setActivatedPdv(null);
-      setInitialPdvSettings(null);
-      setInitialEmployees([]);
-      setActivationCode("");
-      setStep("intro");
-      setAppState("activation");
-    } catch (error) {
-      if (error instanceof ApiError && (error.status === 400 || error.status === 401 || error.status === 403)) {
-        clearDesktopSession();
-        setActivatedPdv(null);
-        setInitialPdvSettings(null);
-        setInitialEmployees([]);
-        setActivationCode("");
-        setStep("intro");
-        setAppState("activation");
-        return;
-      }
-
-      setSystemMessage(error instanceof Error ? error.message : "Não foi possível desvincular este PDV.");
-    } finally {
-      setIsUnpairing(false);
-    }
-  }
-
   function getPanelClass(renderedStep: PdvStep) {
     return [
       "pdv-onboarding-panel",
@@ -533,12 +487,10 @@ export default function PdvActivationPage() {
           connectivity={connectivity}
           deviceCredential={getStoredCredential()}
           deviceId={getDeviceId()}
-          isUnpairing={isUnpairing}
           initialSettings={initialPdvSettings}
           initialEmployees={initialEmployees}
           lastAccessLabel={formatDateTime(activatedPdv?.ultimo_acesso_em)}
           onConnectivityChange={setConnectivity}
-          onUnpair={unpairPdv}
           onSystemMessage={setSystemMessage}
           pdvIdentity={pdvIdentity}
           shiftSequenceScope={getShiftSequenceScope(activatedPdv)}

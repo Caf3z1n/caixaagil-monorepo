@@ -1,0 +1,103 @@
+name: Deploy API
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'api/**'
+      - '.github/workflows/deploy-api.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy API
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm --prefix api ci
+
+      - name: Build API
+        run: npm --prefix api run build
+
+      - name: Package API
+        run: |
+          tar \
+            --exclude='./node_modules' \
+            --exclude='./dist' \
+            --exclude='./.env' \
+            --exclude='./storage' \
+            -czf /tmp/caixaagil-api.tar.gz \
+            -C api .
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/caixaagil_vps
+          chmod 600 ~/.ssh/caixaagil_vps
+          ssh-keyscan -p "${{ secrets.VPS_PORT }}" "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          ssh -i ~/.ssh/caixaagil_vps -p "${{ secrets.VPS_PORT }}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "mkdir -p '${{ secrets.VPS_DEPLOY_PATH }}/releases'"
+          scp -i ~/.ssh/caixaagil_vps -P "${{ secrets.VPS_PORT }}" /tmp/caixaagil-api.tar.gz \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_DEPLOY_PATH }}/releases/api-${{ github.sha }}.tar.gz"
+
+      - name: Deploy on VPS
+        run: |
+          ssh -i ~/.ssh/caixaagil_vps -p "${{ secrets.VPS_PORT }}" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "DEPLOY_PATH='${{ secrets.VPS_DEPLOY_PATH }}' RELEASE_ID='${{ github.sha }}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          BASE="${DEPLOY_PATH:-/home/deploy/caixaagil}"
+          RELEASE_ID="${RELEASE_ID:?RELEASE_ID is required}"
+          RELEASE="$BASE/releases/api-$RELEASE_ID"
+          ARCHIVE="$BASE/releases/api-$RELEASE_ID.tar.gz"
+          CURRENT="$BASE/api"
+          SHARED_ENV="$BASE/shared/api.env"
+          SHARED_STORAGE="$BASE/shared/storage"
+
+          test -f "$SHARED_ENV"
+          mkdir -p "$BASE/releases" "$SHARED_STORAGE"
+          rm -rf "$RELEASE"
+          mkdir -p "$RELEASE"
+          tar -xzf "$ARCHIVE" -C "$RELEASE"
+
+          ln -sfn "$SHARED_ENV" "$RELEASE/.env"
+          rm -rf "$RELEASE/storage"
+          ln -sfn "$SHARED_STORAGE" "$RELEASE/storage"
+
+          cd "$RELEASE"
+          npm ci
+          npm run build
+          npm run migrate
+          npm prune --omit=dev
+
+          ln -sfn "$RELEASE" "$CURRENT"
+          pm2 startOrReload ecosystem.config.cjs --only caixaagil-api --update-env
+          pm2 save
+
+          find "$BASE/releases" -maxdepth 1 -type d -name 'api-*' ! -name "api-$RELEASE_ID" -printf '%T@ %p\n' \
+            | sort -rn \
+            | tail -n +4 \
+            | cut -d' ' -f2- \
+            | xargs -r rm -rf
+
+          rm -f "$ARCHIVE"
+          REMOTE
