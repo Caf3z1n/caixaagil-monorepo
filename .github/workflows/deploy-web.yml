@@ -25,6 +25,8 @@ jobs:
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      NEXT_PUBLIC_API_URL: https://api.caixaagil.tech
+      NEXT_PUBLIC_SITE_URL: https://caixaagil.tech
 
     steps:
       - name: Checkout
