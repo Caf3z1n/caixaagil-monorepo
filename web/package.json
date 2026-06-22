@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "caixaagil-monorepo": "file:../..",
     "lucide-react": "^1.7.0",
     "next": "16.2.6",
     "react": "19.2.4",
