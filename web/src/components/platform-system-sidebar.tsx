@@ -36,7 +36,7 @@ const systemSections: PlatformSystemSection[] = [
       { label: "Configurações", href: "/meu-sistema/configuracoes", icon: Settings2 },
       { label: "Clientes", icon: UsersRound },
       { label: "Recebimentos", icon: HandCoins },
-      { label: "Documentos fiscais", icon: ReceiptText }
+      { label: "Documentos fiscais", href: "/meu-sistema/documentos-fiscais", icon: ReceiptText }
     ]
   }
 ];

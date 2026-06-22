@@ -16,6 +16,7 @@ import {
   Armchair,
   ArrowLeft,
   ArrowRight,
+  Ban,
   Barcode,
   Beef,
   Beer,
@@ -35,6 +36,7 @@ import {
   Pencil,
   Pill,
   Plus,
+  RotateCcw,
   Search,
   Shapes,
   Shirt,
@@ -104,12 +106,17 @@ type CategoriaProduto = {
   icone: CategoryIconId;
   cor: CategoryColorId;
   ordem: number;
+  ativo: boolean;
   produtos_count: number;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
 };
 
 type GrupoFiscalResumo = {
   id: number;
   nome: string;
+  ativo: boolean;
   regime_tributario: "simples_nacional" | "regime_normal";
   cfop: string | null;
   ncm: string | null;
@@ -135,7 +142,11 @@ type Produto = {
   preco_custo_centavos: number;
   preco_venda_centavos: number;
   controla_estoque: boolean;
+  ativo: boolean;
   quantidade_estoque: number | null;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
   categoria: CategoriaProduto | null;
   grupo_fiscal: GrupoFiscalResumo | null;
   imagem: ArquivoResumo | null;
@@ -172,8 +183,44 @@ type ProductDraft = {
 };
 
 type PendingDelete =
-  | { type: "category"; id: number; label: string }
-  | { type: "product"; id: number; label: string };
+  | { type: "category"; id: number; label: string; action: "excluir" | "desativar" }
+  | { type: "product"; id: number; label: string; action: "excluir" | "desativar" };
+
+type DeleteCategoryResponse =
+  | {
+      action: "deleted";
+      id: number;
+      message?: string;
+    }
+  | {
+      action: "deactivated";
+      categoria: CategoriaProduto;
+      message?: string;
+    };
+
+type ActivateCategoryResponse = {
+  action: "activated";
+  categoria: CategoriaProduto;
+  message?: string;
+};
+
+type DeleteProductResponse =
+  | {
+      action: "deleted";
+      id: number;
+      message?: string;
+    }
+  | {
+      action: "deactivated";
+      produto: Produto;
+      message?: string;
+    };
+
+type ActivateProductResponse = {
+  action: "activated";
+  produto: Produto;
+  message?: string;
+};
 
 const categoryIconOptions = [
   { value: "package", label: "Geral", icon: Package },
@@ -348,6 +395,9 @@ function buildEmptyProductDraft(defaultCategoryId: number | null): ProductDraft 
 }
 
 function buildProductDraft(product: Produto): ProductDraft {
+  const productNcm = digitsOnly(product.ncm ?? "", 8);
+  const suggestedNcm = digitsOnly(product.grupo_fiscal?.ncm ?? "", 8);
+
   return {
     nome: uppercaseTextInput(product.nome),
     categoria_id: String(product.categoria_id),
@@ -355,7 +405,7 @@ function buildProductDraft(product: Produto): ProductDraft {
     imagem_url: resolveArquivoUrl(product.imagem),
     imagem_nome: product.imagem?.nome_original ?? "",
     codigo_barras: product.codigo_barras ?? "",
-    ncm: product.ncm ?? "",
+    ncm: productNcm || suggestedNcm,
     grupo_fiscal_id: product.grupo_fiscal_id ? String(product.grupo_fiscal_id) : "",
     preco_custo: formatMoneyFromCents(product.preco_custo_centavos),
     preco_venda: formatMoneyFromCents(product.preco_venda_centavos),
@@ -443,7 +493,11 @@ function ProductVisual({
       icone: "package",
       cor: "laranja",
       ordem: 0,
-      produtos_count: 0
+      ativo: true,
+      produtos_count: 0,
+      registros_vinculados: 0,
+      pode_excluir: true,
+      acao_remocao: "excluir"
     } satisfies CategoriaProduto);
   const Icon = iconById[fallbackCategory.icone] ?? Package;
   const color = colorById[fallbackCategory.cor] ?? colorById.laranja;
@@ -500,7 +554,10 @@ export function ProductCatalogManager() {
   const categories = useMemo(
     () =>
       [...snapshot.categorias].sort(
-        (left, right) => left.ordem - right.ordem || left.nome.localeCompare(right.nome, "pt-BR")
+        (left, right) =>
+          Number(right.ativo) - Number(left.ativo) ||
+          left.ordem - right.ordem ||
+          left.nome.localeCompare(right.nome, "pt-BR")
       ),
     [snapshot.categorias]
   );
@@ -508,7 +565,8 @@ export function ProductCatalogManager() {
     () => new Map(categories.map(category => [category.id, category])),
     [categories]
   );
-  const defaultCategoryId = categories[0]?.id ?? null;
+  const activeCategories = useMemo(() => categories.filter(category => category.ativo), [categories]);
+  const defaultCategoryId = activeCategories[0]?.id ?? categories[0]?.id ?? null;
   const editingCategory = editingCategoryId ? categoryById.get(editingCategoryId) ?? null : null;
   const editingProduct = editingProductId
     ? snapshot.produtos.find(product => product.id === editingProductId) ?? null
@@ -538,6 +596,13 @@ export function ProductCatalogManager() {
       return haystack.includes(normalizedSearch);
     });
   }, [categoryById, normalizedSearch, selectedCategoryId, snapshot.produtos]);
+  const productCategoryOptions = useMemo(
+    () =>
+      categories.filter(
+        category => category.ativo || String(category.id) === productDraft.categoria_id
+      ),
+    [categories, productDraft.categoria_id]
+  );
 
   const groupedProducts = useMemo(() => {
     return categories
@@ -545,7 +610,13 @@ export function ProductCatalogManager() {
         category,
         products: filteredProducts
           .filter(product => product.categoria_id === category.id)
-          .sort((left, right) => left.nome.localeCompare(right.nome, "pt-BR"))
+          .sort((left, right) => {
+            if (left.ativo !== right.ativo) {
+              return left.ativo ? -1 : 1;
+            }
+
+            return left.nome.localeCompare(right.nome, "pt-BR");
+          })
       }))
       .filter(group => group.products.length > 0 || selectedCategoryId === group.category.id);
   }, [categories, filteredProducts, selectedCategoryId]);
@@ -725,14 +796,20 @@ export function ProductCatalogManager() {
   function handleProductFiscalGroupChange(value: string) {
     setProductDraft(current => {
       const nextFiscalGroupId = value === "none" ? "" : value;
+      const currentFiscalGroup = snapshot.grupos_fiscais.find(group => String(group.id) === current.grupo_fiscal_id);
       const selectedFiscalGroup = snapshot.grupos_fiscais.find(group => String(group.id) === nextFiscalGroupId);
+      const currentSuggestedNcm = digitsOnly(currentFiscalGroup?.ncm ?? "", 8);
       const suggestedNcm = digitsOnly(selectedFiscalGroup?.ncm ?? "", 8);
-      const shouldApplySuggestedNcm = Boolean(suggestedNcm) && !current.ncm && !hasProductNcmTouched;
+      const shouldReplaceSuggestedNcm =
+        !hasProductNcmTouched &&
+        (!current.ncm || Boolean(currentSuggestedNcm && current.ncm === currentSuggestedNcm));
+      const shouldApplySuggestedNcm = Boolean(suggestedNcm) && shouldReplaceSuggestedNcm;
+      const shouldClearSuggestedNcm = !nextFiscalGroupId && shouldReplaceSuggestedNcm;
 
       return {
         ...current,
         grupo_fiscal_id: nextFiscalGroupId,
-        ncm: shouldApplySuggestedNcm ? suggestedNcm : current.ncm
+        ncm: shouldApplySuggestedNcm ? suggestedNcm : shouldClearSuggestedNcm ? "" : current.ncm
       };
     });
   }
@@ -849,9 +926,13 @@ export function ProductCatalogManager() {
         preco_custo_centavos: parseMoneyInputToCents(productDraft.preco_custo),
         preco_venda_centavos: parseMoneyInputToCents(productDraft.preco_venda),
         controla_estoque: productDraft.controla_estoque,
-        quantidade_estoque: productDraft.controla_estoque
-          ? productDraft.quantidade_estoque.replace(",", ".")
-          : 0
+        ...(editingProductId
+          ? {}
+          : {
+              quantidade_estoque: productDraft.controla_estoque
+                ? productDraft.quantidade_estoque.replace(",", ".")
+                : 0
+            })
       };
 
       try {
@@ -875,15 +956,15 @@ export function ProductCatalogManager() {
   }
 
   function requestDeleteCategory() {
-    if (!editingCategory || editingCategory.produtos_count > 0) {
-      setSubmitError("Não é possível excluir uma categoria com produtos vinculados.");
+    if (!editingCategory) {
       return;
     }
 
     setPendingDelete({
       type: "category",
       id: editingCategory.id,
-      label: editingCategory.nome
+      label: editingCategory.nome,
+      action: editingCategory.acao_remocao ?? "excluir"
     });
   }
 
@@ -895,7 +976,8 @@ export function ProductCatalogManager() {
     setPendingDelete({
       type: "product",
       id: editingProduct.id,
-      label: editingProduct.nome
+      label: editingProduct.nome,
+      action: editingProduct.acao_remocao ?? "excluir"
     });
   }
 
@@ -909,10 +991,10 @@ export function ProductCatalogManager() {
 
       try {
         if (pendingDelete.type === "category") {
-          await apiDelete(`/produtos/categorias/${pendingDelete.id}`, { token });
+          await apiDelete<DeleteCategoryResponse>(`/produtos/categorias/${pendingDelete.id}`, { token });
           closeCategoryModal();
         } else {
-          await apiDelete(`/produtos/${pendingDelete.id}`, { token });
+          await apiDelete<DeleteProductResponse>(`/produtos/${pendingDelete.id}`, { token });
           closeProductModal();
         }
 
@@ -921,6 +1003,34 @@ export function ProductCatalogManager() {
       } catch (error) {
         setPendingDelete(null);
         setSubmitError(getErrorMessage(error, "Não foi possível excluir o cadastro."));
+      }
+    })();
+  }
+
+  function executeActivate(target: "category" | "product") {
+    void (async () => {
+      const token = getStoredPlatformAuthToken();
+      const targetId = target === "category" ? editingCategoryId : editingProductId;
+
+      if (!token || !targetId) {
+        return;
+      }
+
+      setIsProductSubmitting(true);
+      setSubmitError(null);
+
+      try {
+        if (target === "category") {
+          await apiPost<ActivateCategoryResponse>(`/produtos/categorias/${targetId}/ativar`, {}, { token });
+        } else {
+          await apiPost<ActivateProductResponse>(`/produtos/${targetId}/ativar`, {}, { token });
+        }
+
+        await loadCatalog();
+      } catch (error) {
+        setSubmitError(getErrorMessage(error, target === "category" ? "Não foi possível ativar a categoria." : "Não foi possível ativar o produto."));
+      } finally {
+        setIsProductSubmitting(false);
       }
     })();
   }
@@ -1067,9 +1177,13 @@ export function ProductCatalogManager() {
             {categories.map(category => (
               <button
                 className={
-                  draggedCategoryId === category.id
-                    ? "product-category-order-row product-category-order-row-dragging"
-                    : "product-category-order-row"
+                  [
+                    "product-category-order-row",
+                    draggedCategoryId === category.id ? "product-category-order-row-dragging" : "",
+                    category.ativo ? "" : "platform-record-inactive"
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
                 }
                 draggable
                 key={category.id}
@@ -1088,6 +1202,7 @@ export function ProductCatalogManager() {
                   <strong>{category.nome}</strong>
                   <small>
                     {category.produtos_count} produto{category.produtos_count === 1 ? "" : "s"} vinculado{category.produtos_count === 1 ? "" : "s"}
+                    {category.ativo ? "" : " · Desativada"}
                   </small>
                 </span>
                 <span className="product-row-edit">
@@ -1182,7 +1297,7 @@ export function ProductCatalogManager() {
 
                     return (
                       <button
-                        className="product-catalog-row"
+                        className={product.ativo ? "product-catalog-row" : "product-catalog-row platform-record-inactive"}
                         key={product.id}
                         type="button"
                         onClick={() => openEditProductModal(product.id)}
@@ -1197,6 +1312,7 @@ export function ProductCatalogManager() {
                           <small>
                             {product.codigo_barras ? `Código ${product.codigo_barras}` : "Sem código de barras"} · Estoque{" "}
                             {formatStock(product.quantidade_estoque)}
+                            {!product.ativo ? " · Desativado" : ""}
                           </small>
                           {fiscalIssueBadges.length > 0 ? (
                             <span className="product-row-fiscal-badges">
@@ -1452,7 +1568,7 @@ export function ProductCatalogManager() {
 
             <div
               className={
-                editingCategoryId
+                editingCategoryId && editingCategory?.ativo !== false
                   ? "platform-modal-actions product-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete"
                   : "platform-modal-actions product-modal-actions platform-item-modal-actions"
               }
@@ -1460,26 +1576,37 @@ export function ProductCatalogManager() {
               <button className="platform-secondary-button" type="button" onClick={closeCategoryModal}>
                 Cancelar
               </button>
-              {editingCategoryId ? (
+              {editingCategoryId && editingCategory?.ativo === false ? (
+                <button
+                  className="platform-primary-button platform-save-button"
+                  disabled={isProductSubmitting}
+                  type="button"
+                  onClick={() => executeActivate("category")}
+                >
+                  <RotateCcw size={16} />
+                  Ativar
+                </button>
+              ) : editingCategoryId ? (
                 <button
                   className="fiscal-danger-button fiscal-edit-delete-button"
-                  disabled={Boolean(editingCategory?.produtos_count)}
                   title={
-                    editingCategory?.produtos_count
-                      ? "Categoria com produtos vinculados."
+                    editingCategory?.acao_remocao === "desativar"
+                      ? "Desativar categoria"
                       : "Excluir categoria"
                   }
                   type="button"
                   onClick={requestDeleteCategory}
                 >
-                  <Trash2 size={16} />
-                  Excluir
+                  {editingCategory?.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                  {editingCategory?.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
                 </button>
               ) : null}
-              <button className="platform-primary-button platform-save-button" type="submit" form="category-form" disabled={!canSaveCategoryDraft(categoryDraft)}>
-                <FolderPlus size={16} />
-                {editingCategoryId ? "Salvar categoria" : "Criar categoria"}
-              </button>
+              {editingCategoryId && editingCategory?.ativo === false ? null : (
+                <button className="platform-primary-button platform-save-button" type="submit" form="category-form" disabled={!canSaveCategoryDraft(categoryDraft)}>
+                  <FolderPlus size={16} />
+                  {editingCategoryId ? "Salvar categoria" : "Criar categoria"}
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -1580,9 +1707,9 @@ export function ProductCatalogManager() {
                   <PlatformSelect
                     ariaLabel="Selecionar categoria do produto"
                     value={productDraft.categoria_id}
-                    options={categories.map(category => ({
+                    options={productCategoryOptions.map(category => ({
                       value: String(category.id),
-                      label: category.nome,
+                      label: category.ativo ? category.nome : `${category.nome} (desativada)`,
                       leading: <ProductCategoryIcon category={category} />
                     }))}
                     onChange={value =>
@@ -1637,11 +1764,13 @@ export function ProductCatalogManager() {
                   value={productDraft.grupo_fiscal_id || "none"}
                   options={[
                     { value: "none", label: "Sem grupo fiscal", description: "Pode operar sem emissão fiscal" },
-                    ...snapshot.grupos_fiscais.map(group => ({
-                      value: String(group.id),
-                      label: group.nome,
-                      description: `CFOP ${group.cfop ?? "--"}`
-                    }))
+                    ...snapshot.grupos_fiscais
+                      .filter(group => group.ativo || String(group.id) === productDraft.grupo_fiscal_id)
+                      .map(group => ({
+                        value: String(group.id),
+                        label: group.ativo ? group.nome : `${group.nome} (desativado)`,
+                        description: `CFOP ${group.cfop ?? "--"}`
+                      }))
                   ]}
                   onChange={handleProductFiscalGroupChange}
                 />
@@ -1679,34 +1808,40 @@ export function ProductCatalogManager() {
                 </label>
               </div>
 
-              <section className="product-stock-control">
-                <span>
+              <button
+                aria-checked={productDraft.controla_estoque}
+                className={
+                  productDraft.controla_estoque
+                    ? "product-stock-control product-stock-control-active"
+                    : "product-stock-control"
+                }
+                role="switch"
+                type="button"
+                onClick={() =>
+                  setProductDraft(current => ({
+                    ...current,
+                    controla_estoque: !current.controla_estoque
+                  }))
+                }
+              >
+                <span className="product-stock-control-icon" aria-hidden="true">
+                  <Warehouse size={15} />
+                </span>
+                <span className="product-stock-control-copy">
                   <strong>Controlar estoque</strong>
                   <small>Use para itens que movimentam saldo físico.</small>
                 </span>
-                <button
-                  aria-checked={productDraft.controla_estoque}
-                  className={
-                    productDraft.controla_estoque
-                      ? "fiscal-switch fiscal-switch-active"
-                      : "fiscal-switch"
-                  }
-                  role="switch"
-                  type="button"
-                  onClick={() =>
-                    setProductDraft(current => ({
-                      ...current,
-                      controla_estoque: !current.controla_estoque
-                    }))
-                  }
+                <span
+                  className="configuration-switch product-stock-switch"
+                  aria-hidden="true"
                 >
                   <span />
-                </button>
-              </section>
+                </span>
+              </button>
 
-              {productDraft.controla_estoque ? (
+              {productDraft.controla_estoque && !editingProductId ? (
                 <label>
-                  <span>{editingProductId ? "Estoque atual" : "Estoque inicial"}</span>
+                  <span>Estoque inicial</span>
                   <input
                     value={productDraft.quantidade_estoque}
                     onChange={event =>
@@ -1724,7 +1859,7 @@ export function ProductCatalogManager() {
 
             <div
               className={
-                editingProductId
+                editingProductId && editingProduct?.ativo !== false
                   ? "platform-modal-actions product-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete"
                   : "platform-modal-actions product-modal-actions platform-item-modal-actions"
               }
@@ -1732,25 +1867,41 @@ export function ProductCatalogManager() {
               <button className="platform-secondary-button" type="button" onClick={closeProductModal}>
                 Cancelar
               </button>
-              {editingProductId ? (
-                <button className="fiscal-danger-button fiscal-edit-delete-button" type="button" onClick={requestDeleteProduct}>
-                  <Trash2 size={16} />
-                  Excluir
+              {editingProductId && editingProduct?.ativo === false ? (
+                <button
+                  className="platform-primary-button platform-save-button"
+                  type="button"
+                  onClick={() => executeActivate("product")}
+                  disabled={isProductSubmitting}
+                >
+                  <RotateCcw size={16} />
+                  Ativar
+                </button>
+              ) : editingProductId ? (
+                <button
+                  className="fiscal-danger-button fiscal-edit-delete-button"
+                  type="button"
+                  onClick={requestDeleteProduct}
+                >
+                  {editingProduct?.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                  {editingProduct?.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
                 </button>
               ) : null}
-              <button
-                className="platform-primary-button platform-save-button"
-                type="submit"
-                form="product-form"
-                disabled={isProductSubmitting || !canSaveProductDraft(productDraft)}
-              >
-                <PackagePlus size={16} />
-                {isProductSubmitting
-                  ? "Salvando..."
-                  : editingProductId
-                    ? "Salvar produto"
-                    : "Cadastrar produto"}
-              </button>
+              {editingProductId && editingProduct?.ativo === false ? null : (
+                <button
+                  className="platform-primary-button platform-save-button"
+                  type="submit"
+                  form="product-form"
+                  disabled={isProductSubmitting || !canSaveProductDraft(productDraft)}
+                >
+                  <PackagePlus size={16} />
+                  {isProductSubmitting
+                    ? "Salvando..."
+                    : editingProductId
+                      ? "Salvar produto"
+                      : "Cadastrar produto"}
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -1770,8 +1921,18 @@ export function ProductCatalogManager() {
             role="dialog"
           >
             <div className="platform-modal-head">
-              <h2 id="product-delete-confirm-title">Excluir cadastro?</h2>
-              <p>Confirme para excluir “{visiblePendingDelete.label}”. Essa ação não poderá ser desfeita.</p>
+              <h2 id="product-delete-confirm-title">
+                {visiblePendingDelete.action === "desativar"
+                  ? visiblePendingDelete.type === "product"
+                    ? "Desativar produto?"
+                    : "Desativar categoria?"
+                  : "Excluir cadastro?"}
+              </h2>
+              <p>
+                {visiblePendingDelete.action === "desativar"
+                  ? `“${visiblePendingDelete.label}” ficará indisponível para novos usos, mas segue preservado nos registros antigos.`
+                  : `Confirme para excluir “${visiblePendingDelete.label}”. Essa ação não poderá ser desfeita.`}
+              </p>
             </div>
 
             <div className="platform-modal-actions fiscal-delete-confirm-actions">
@@ -1779,8 +1940,12 @@ export function ProductCatalogManager() {
                 Cancelar
               </button>
               <button className="fiscal-danger-button fiscal-edit-delete-button" type="button" onClick={executeDelete}>
-                <Trash2 size={16} />
-                Excluir
+                {visiblePendingDelete.action === "desativar" ? (
+                  <Ban size={16} />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+                {visiblePendingDelete.action === "desativar" ? "Desativar" : "Excluir"}
               </button>
             </div>
           </section>

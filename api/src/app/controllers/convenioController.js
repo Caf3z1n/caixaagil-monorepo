@@ -1,4 +1,4 @@
-const { Op } = require('sequelize');
+const { col, fn, Op } = require('sequelize');
 const { Caixa, ClienteConvenio, Venda } = require('../models');
 
 function normalizeText(value, maxLength) {
@@ -43,6 +43,123 @@ function parseBoolean(value) {
   return false;
 }
 
+function normalizeDigits(value, maxLength) {
+  return String(value || '').replace(/\D/g, '').slice(0, maxLength);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function resolveTipoPessoa(value, fallback = 'fisica') {
+  const key = normalizeKey(value || fallback);
+
+  if (key === 'juridica' || key === 'pj' || key === 'pessoa juridica' || key === 'pessoa_juridica') {
+    return 'juridica';
+  }
+
+  return 'fisica';
+}
+
+function resolveFiscalSource(body = {}) {
+  return body.dados_fiscais || body.dadosFiscais || body.fiscal || body.emitente || {};
+}
+
+function sanitizeFiscalAddress(value) {
+  const source = isObject(value) ? value : {};
+
+  return {
+    logradouro: normalizeText(source.logradouro || source.rua || source.street, 160),
+    numero: normalizeText(source.numero || source.number, 20),
+    complemento: normalizeText(source.complemento || source.details, 80),
+    bairro: normalizeText(source.bairro || source.district, 80),
+    codigo_municipio: normalizeDigits(source.codigo_municipio || source.codigoMunicipio || source.municipality, 7),
+    municipio: normalizeText(source.municipio || source.cidade || source.city, 80),
+    uf: normalizeText(source.uf || source.estado || source.state, 2).toUpperCase(),
+    cep: normalizeDigits(source.cep || source.zip || source.code, 8),
+  };
+}
+
+function sanitizeFiscalData(value) {
+  const source = isObject(value) ? value : {};
+
+  return {
+    cnpj_cpf: normalizeDigits(source.cnpj_cpf || source.cnpjCpf || source.cnpj || source.documento, 14),
+    razao_social: normalizeText(source.razao_social || source.razaoSocial || source.nome || source.name, 160),
+    nome_fantasia: normalizeText(source.nome_fantasia || source.nomeFantasia || source.fantasia || source.alias, 160),
+    inscricao_estadual: normalizeDigits(source.inscricao_estadual || source.inscricaoEstadual || source.ie, 20),
+    inscricao_municipal: normalizeDigits(source.inscricao_municipal || source.inscricaoMunicipal || source.im, 20),
+    crt: normalizeDigits(source.crt, 1),
+    cnae: normalizeDigits(source.cnae, 7),
+    email: normalizeText(source.email, 160).toLowerCase(),
+    telefone: normalizeDigits(source.telefone || source.phone, 14),
+    endereco: sanitizeFiscalAddress(source.endereco || source.address),
+  };
+}
+
+function resolveClienteNome(tipoPessoa, body, dadosFiscais) {
+  if (tipoPessoa === 'juridica') {
+    return (
+      normalizeText(dadosFiscais?.nome_fantasia, 160) ||
+      normalizeText(body?.nome, 160) ||
+      normalizeText(dadosFiscais?.razao_social, 160)
+    );
+  }
+
+  return normalizeText(body?.nome, 160);
+}
+
+function getLegalClientFiscalValidationError(dadosFiscais) {
+  const missing = [];
+  const endereco = dadosFiscais?.endereco || {};
+
+  if (!dadosFiscais?.cnpj_cpf || dadosFiscais.cnpj_cpf.length !== 14) {
+    missing.push('CNPJ');
+  }
+
+  if (!dadosFiscais?.razao_social || dadosFiscais.razao_social.length < 2) {
+    missing.push('razão social');
+  }
+
+  if (!dadosFiscais?.nome_fantasia || dadosFiscais.nome_fantasia.length < 2) {
+    missing.push('nome fantasia');
+  }
+
+  if (!endereco.cep || endereco.cep.length !== 8) {
+    missing.push('CEP');
+  }
+
+  if (!endereco.municipio) {
+    missing.push('município');
+  }
+
+  if (!endereco.uf || endereco.uf.length !== 2) {
+    missing.push('UF');
+  }
+
+  if (!endereco.codigo_municipio || endereco.codigo_municipio.length !== 7) {
+    missing.push('código IBGE');
+  }
+
+  if (!endereco.logradouro) {
+    missing.push('logradouro');
+  }
+
+  if (!endereco.numero) {
+    missing.push('número');
+  }
+
+  if (!endereco.bairro) {
+    missing.push('bairro');
+  }
+
+  if (missing.length > 0) {
+    return `Informe ${missing.join(', ')} do cliente pessoa jurídica.`;
+  }
+
+  return null;
+}
+
 function toIso(value) {
   if (!value) {
     return null;
@@ -57,8 +174,9 @@ function toIso(value) {
   return date.toISOString();
 }
 
-function sanitizeCliente(cliente) {
+function sanitizeCliente(cliente, extra = {}) {
   const data = cliente.get ? cliente.get({ plain: true }) : cliente;
+  const registrosVinculados = Number(extra.registros_vinculados ?? data.registros_vinculados ?? 0);
 
   return {
     id: data.id,
@@ -66,6 +184,10 @@ function sanitizeCliente(cliente) {
     nome: data.nome,
     ativo: Boolean(data.ativo),
     permite_pagamento_frente_caixa: Boolean(data.permite_pagamento_frente_caixa),
+    dados_fiscais: resolveTipoPessoa(data.tipo_pessoa) === 'juridica' ? sanitizeFiscalData(data.dados_fiscais) : null,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
     created_at: toIso(data.created_at || data.createdAt),
     updated_at: toIso(data.updated_at || data.updatedAt),
   };
@@ -162,6 +284,16 @@ async function findUserCliente(usuarioId, id) {
   });
 }
 
+async function getClienteRegistrosVinculados(usuarioId, clienteId, options = {}) {
+  return Venda.count({
+    where: {
+      usuario_id: usuarioId,
+      cliente_convenio_id: clienteId,
+    },
+    ...options,
+  });
+}
+
 async function findUserClienteNameConflict(usuarioId, nome, ignoredId = null) {
   const targetKey = normalizeKey(nome);
 
@@ -186,6 +318,34 @@ async function findUserClienteNameConflict(usuarioId, nome, ignoredId = null) {
     }
 
     return normalizeKey(data.nome) === targetKey;
+  }) || null;
+}
+
+async function findUserClienteCnpjConflict(usuarioId, cnpj, ignoredId = null) {
+  const targetCnpj = normalizeDigits(cnpj, 14);
+
+  if (targetCnpj.length !== 14) {
+    return null;
+  }
+
+  const clientes = await ClienteConvenio.findAll({
+    where: {
+      usuario_id: usuarioId,
+      ativo: true,
+      tipo_pessoa: 'juridica',
+    },
+    attributes: ['id', 'dados_fiscais'],
+  });
+
+  return clientes.find(cliente => {
+    const data = cliente.get ? cliente.get({ plain: true }) : cliente;
+    const clienteId = Number(data.id);
+
+    if (ignoredId !== null && clienteId === Number(ignoredId)) {
+      return false;
+    }
+
+    return normalizeDigits(data.dados_fiscais?.cnpj_cpf, 14) === targetCnpj;
   }) || null;
 }
 
@@ -226,19 +386,42 @@ async function findUserRecebimento(usuarioId, vendaId) {
 module.exports = {
   async listClientes(req, res) {
     try {
-      const clientes = await ClienteConvenio.findAll({
-        where: {
-          usuario_id: req.user.id,
-          ativo: true,
-        },
-        order: [
-          ['nome', 'ASC'],
-          ['id', 'ASC'],
-        ],
-      });
+      const [clientes, vendasPorCliente] = await Promise.all([
+        ClienteConvenio.findAll({
+          where: {
+            usuario_id: req.user.id,
+          },
+          order: [
+            ['ativo', 'DESC'],
+            ['nome', 'ASC'],
+            ['id', 'ASC'],
+          ],
+        }),
+        Venda.findAll({
+          attributes: [
+            'cliente_convenio_id',
+            [fn('COUNT', col('id')), 'total'],
+          ],
+          where: {
+            usuario_id: req.user.id,
+            cliente_convenio_id: {
+              [Op.ne]: null,
+            },
+          },
+          group: ['cliente_convenio_id'],
+          raw: true,
+        }),
+      ]);
+      const countByClienteId = new Map(
+        vendasPorCliente.map(item => [Number(item.cliente_convenio_id), Number(item.total) || 0])
+      );
 
       return res.json({
-        clientes: clientes.map(sanitizeCliente),
+        clientes: clientes.map(cliente =>
+          sanitizeCliente(cliente, {
+            registros_vinculados: countByClienteId.get(cliente.id) ?? 0,
+          })
+        ),
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao listar clientes de convênio.', detail: error.message });
@@ -247,10 +430,29 @@ module.exports = {
 
   async createCliente(req, res) {
     try {
-      const nome = normalizeText(req.body?.nome, 160);
+      const tipoPessoa = resolveTipoPessoa(req.body?.tipo_pessoa);
+      const dadosFiscais = tipoPessoa === 'juridica' ? sanitizeFiscalData(resolveFiscalSource(req.body)) : null;
+      const nome = resolveClienteNome(tipoPessoa, req.body, dadosFiscais);
 
       if (nome.length < 2) {
         return res.status(400).json({ message: 'Informe o nome do cliente.' });
+      }
+
+      if (tipoPessoa === 'juridica') {
+        const fiscalValidationError = getLegalClientFiscalValidationError(dadosFiscais);
+
+        if (fiscalValidationError) {
+          return res.status(400).json({ message: fiscalValidationError });
+        }
+
+        const cnpjDuplicate = await findUserClienteCnpjConflict(req.user.id, dadosFiscais.cnpj_cpf);
+
+        if (cnpjDuplicate) {
+          return res.status(409).json({
+            code: 'CLIENTE_CONVENIO_CNPJ_DUPLICADO',
+            message: 'Já existe um cliente pessoa jurídica com esse CNPJ.',
+          });
+        }
       }
 
       const duplicate = await findUserClienteNameConflict(req.user.id, nome);
@@ -264,8 +466,9 @@ module.exports = {
 
       const cliente = await ClienteConvenio.create({
         usuario_id: req.user.id,
-        tipo_pessoa: 'fisica',
+        tipo_pessoa: tipoPessoa,
         nome,
+        dados_fiscais: dadosFiscais,
         ativo: true,
         permite_pagamento_frente_caixa: parseBoolean(req.body?.permite_pagamento_frente_caixa),
       });
@@ -280,14 +483,41 @@ module.exports = {
     try {
       const cliente = await findUserCliente(req.user.id, req.params.id);
 
-      if (!cliente || !cliente.ativo) {
+      if (!cliente) {
         return res.status(404).json({ message: 'Cliente não encontrado.' });
       }
 
-      const nome = normalizeText(req.body?.nome, 160);
+      const hasFiscalPayload = Object.prototype.hasOwnProperty.call(req.body || {}, 'dados_fiscais') ||
+        Object.prototype.hasOwnProperty.call(req.body || {}, 'dadosFiscais') ||
+        Object.prototype.hasOwnProperty.call(req.body || {}, 'fiscal') ||
+        Object.prototype.hasOwnProperty.call(req.body || {}, 'emitente');
+      const tipoPessoa = Object.prototype.hasOwnProperty.call(req.body || {}, 'tipo_pessoa')
+        ? resolveTipoPessoa(req.body?.tipo_pessoa)
+        : resolveTipoPessoa(cliente.tipo_pessoa);
+      const dadosFiscais = tipoPessoa === 'juridica'
+        ? sanitizeFiscalData(hasFiscalPayload ? resolveFiscalSource(req.body) : cliente.dados_fiscais)
+        : null;
+      const nome = resolveClienteNome(tipoPessoa, req.body, dadosFiscais) || normalizeText(cliente.nome, 160);
 
       if (nome.length < 2) {
         return res.status(400).json({ message: 'Informe o nome do cliente.' });
+      }
+
+      if (tipoPessoa === 'juridica') {
+        const fiscalValidationError = getLegalClientFiscalValidationError(dadosFiscais);
+
+        if (fiscalValidationError) {
+          return res.status(400).json({ message: fiscalValidationError });
+        }
+
+        const cnpjDuplicate = await findUserClienteCnpjConflict(req.user.id, dadosFiscais.cnpj_cpf, cliente.id);
+
+        if (cnpjDuplicate) {
+          return res.status(409).json({
+            code: 'CLIENTE_CONVENIO_CNPJ_DUPLICADO',
+            message: 'Já existe um cliente pessoa jurídica com esse CNPJ.',
+          });
+        }
       }
 
       const duplicate = await findUserClienteNameConflict(req.user.id, nome, cliente.id);
@@ -299,15 +529,20 @@ module.exports = {
         });
       }
 
-      const updates = { nome };
+      const updates = {
+        tipo_pessoa: tipoPessoa,
+        nome,
+        dados_fiscais: dadosFiscais,
+      };
 
       if (Object.prototype.hasOwnProperty.call(req.body || {}, 'permite_pagamento_frente_caixa')) {
         updates.permite_pagamento_frente_caixa = parseBoolean(req.body?.permite_pagamento_frente_caixa);
       }
 
       await cliente.update(updates);
+      const registrosVinculados = await getClienteRegistrosVinculados(req.user.id, cliente.id);
 
-      return res.json(sanitizeCliente(cliente));
+      return res.json(sanitizeCliente(cliente, { registros_vinculados: registrosVinculados }));
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao atualizar cliente de convênio.', detail: error.message });
     }
@@ -317,15 +552,78 @@ module.exports = {
     try {
       const cliente = await findUserCliente(req.user.id, req.params.id);
 
-      if (!cliente || !cliente.ativo) {
+      if (!cliente) {
         return res.status(404).json({ message: 'Cliente não encontrado.' });
       }
 
-      await cliente.update({ ativo: false });
+      const registrosVinculados = await getClienteRegistrosVinculados(req.user.id, cliente.id);
 
-      return res.status(204).send();
+      if (registrosVinculados > 0) {
+        await cliente.update({ ativo: false });
+
+        return res.json({
+          action: 'deactivated',
+          cliente: sanitizeCliente(cliente, { registros_vinculados: registrosVinculados }),
+          message: 'Cliente desativado para preservar os registros vinculados.',
+        });
+      }
+
+      await cliente.destroy();
+
+      return res.json({
+        action: 'deleted',
+        id: cliente.id,
+        message: 'Cliente excluído.',
+      });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao remover cliente de convênio.', detail: error.message });
+    }
+  },
+
+  async activateCliente(req, res) {
+    try {
+      const cliente = await findUserCliente(req.user.id, req.params.id);
+
+      if (!cliente) {
+        return res.status(404).json({ message: 'Cliente não encontrado.' });
+      }
+
+      if (cliente.ativo) {
+        const registrosVinculados = await getClienteRegistrosVinculados(req.user.id, cliente.id);
+        return res.json(sanitizeCliente(cliente, { registros_vinculados: registrosVinculados }));
+      }
+
+      const duplicate = await findUserClienteNameConflict(req.user.id, cliente.nome, cliente.id);
+
+      if (duplicate) {
+        return res.status(409).json({
+          code: 'CLIENTE_CONVENIO_NOME_DUPLICADO',
+          message: 'Já existe um cliente ativo com esse nome.',
+        });
+      }
+
+      if (resolveTipoPessoa(cliente.tipo_pessoa) === 'juridica') {
+        const dadosFiscais = sanitizeFiscalData(cliente.dados_fiscais);
+        const cnpjDuplicate = await findUserClienteCnpjConflict(req.user.id, dadosFiscais.cnpj_cpf, cliente.id);
+
+        if (cnpjDuplicate) {
+          return res.status(409).json({
+            code: 'CLIENTE_CONVENIO_CNPJ_DUPLICADO',
+            message: 'Já existe um cliente pessoa jurídica ativo com esse CNPJ.',
+          });
+        }
+      }
+
+      await cliente.update({ ativo: true });
+      const registrosVinculados = await getClienteRegistrosVinculados(req.user.id, cliente.id);
+
+      return res.json({
+        action: 'activated',
+        cliente: sanitizeCliente(cliente, { registros_vinculados: registrosVinculados }),
+        message: 'Cliente ativado.',
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao ativar cliente de convênio.', detail: error.message });
     }
   },
 

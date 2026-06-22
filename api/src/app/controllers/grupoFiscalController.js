@@ -72,6 +72,8 @@ function sanitizeGrupoFiscal(grupoFiscal) {
     aliquota_ibs_municipal: formatDecimal(data.aliquota_ibs_municipal),
     aliquota_cbs: formatDecimal(data.aliquota_cbs),
     produtos_vinculados: Number.isFinite(produtosVinculados) ? produtosVinculados : 0,
+    pode_excluir: produtosVinculados <= 0,
+    acao_remocao: produtosVinculados > 0 ? 'desativar' : 'excluir',
   };
 }
 
@@ -254,9 +256,22 @@ module.exports = {
         return res.status(400).json({ message: validationError });
       }
 
-      await grupoFiscal.update(payload);
+      if (!Object.prototype.hasOwnProperty.call(req.body || {}, 'ativo')) {
+        payload.ativo = grupoFiscal.ativo;
+      }
 
-      return res.json(sanitizeGrupoFiscal(grupoFiscal));
+      await grupoFiscal.update(payload);
+      const produtosVinculados = await Produto.count({
+        where: {
+          usuario_id: req.user.id,
+          grupo_fiscal_id: grupoFiscal.id,
+        },
+      });
+
+      return res.json(sanitizeGrupoFiscal({
+        ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
+        produtos_vinculados: produtosVinculados,
+      }));
     } catch (error) {
       return handleGrupoFiscalError(res, error, 'Erro ao atualizar grupo fiscal.');
     }
@@ -278,16 +293,61 @@ module.exports = {
       });
 
       if (getProdutosVinculados(grupoFiscal) > 0 || produtosVinculados > 0) {
-        return res.status(409).json({
-          message: 'Não é possível excluir este grupo porque ele possui produtos vinculados.',
+        await grupoFiscal.update({ ativo: false });
+
+        return res.json({
+          action: 'deactivated',
+          grupo_fiscal: sanitizeGrupoFiscal({
+            ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
+            ativo: false,
+            produtos_vinculados: produtosVinculados,
+          }),
+          message: 'Grupo fiscal desativado para preservar os produtos vinculados.',
         });
       }
 
       await grupoFiscal.destroy();
 
-      return res.status(204).send();
+      return res.json({
+        action: 'deleted',
+        id: grupoFiscal.id,
+        message: 'Grupo fiscal excluído.',
+      });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao excluir grupo fiscal.', detail: error.message });
+    }
+  },
+
+  async activate(req, res) {
+    try {
+      const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
+
+      if (!grupoFiscal) {
+        return res.status(404).json({ message: 'Grupo fiscal não encontrado.' });
+      }
+
+      const produtosVinculados = await Produto.count({
+        where: {
+          usuario_id: req.user.id,
+          grupo_fiscal_id: grupoFiscal.id,
+        },
+      });
+
+      if (!grupoFiscal.ativo) {
+        await grupoFiscal.update({ ativo: true });
+      }
+
+      return res.json({
+        action: 'activated',
+        grupo_fiscal: sanitizeGrupoFiscal({
+          ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
+          ativo: true,
+          produtos_vinculados: produtosVinculados,
+        }),
+        message: 'Grupo fiscal ativado.',
+      });
+    } catch (error) {
+      return handleGrupoFiscalError(res, error, 'Erro ao ativar grupo fiscal.');
     }
   },
 };

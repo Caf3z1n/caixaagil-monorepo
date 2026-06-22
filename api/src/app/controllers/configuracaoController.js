@@ -45,6 +45,42 @@ module.exports = {
     }
   },
 
+  async updateCommands(req, res) {
+    try {
+      const comandas = req.body?.comandas ?? req.body;
+      const configuracao = await configuracaoSistemaService.updateCommandSettings(req.user.id, comandas);
+
+      return res.json(configuracao);
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuração de comandas.');
+    }
+  },
+
+  async updateExpenses(req, res) {
+    try {
+      const lancarDespesas = req.body?.lancar_despesas ?? req.body?.despesas ?? req.body;
+      const configuracao = await configuracaoSistemaService.updateExpenseSettings(req.user.id, lancarDespesas);
+
+      return res.json(configuracao);
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuração de despesas.');
+    }
+  },
+
+  async updateEmployees(req, res) {
+    try {
+      const controleFuncionarios = req.body?.controle_funcionarios ?? req.body?.funcionarios ?? req.body;
+      const configuracao = await configuracaoSistemaService.updateEmployeeControlSettings(
+        req.user.id,
+        controleFuncionarios
+      );
+
+      return res.json(configuracao);
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuraÃ§Ã£o de funcionÃ¡rios.');
+    }
+  },
+
   async updateIntegrations(req, res) {
     try {
       const integracoes = req.body?.integracoes ?? req.body;

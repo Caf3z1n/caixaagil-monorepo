@@ -319,13 +319,16 @@ function getNextFiscalNumber(modelConfig) {
 }
 
 function isFiscalEmissionCommand(command) {
-  return command === "emitir-nfce" || command === "emitir-nfce-contingencia" || command === "emitir-nfe";
+  return command === "emitir-nfce" ||
+    command === "emitir-nfce-contingencia" ||
+    command === "emitir-nfe" ||
+    command === "emitir-nfe-contingencia";
 }
 
 function getFiscalModelKey(command, payload, response) {
   const model = String(response?.data?.modelo || payload?.modelo || "");
 
-  return model === "55" || command === "emitir-nfe" ? "nfe" : "nfce";
+  return model === "55" || command === "emitir-nfe" || command === "emitir-nfe-contingencia" ? "nfe" : "nfce";
 }
 
 function getFiscalEnvironment(config) {
@@ -486,10 +489,47 @@ function isDuplicateFiscalNumberResponse(response) {
   return status.includes("duplicidade") || code === 204 || code === 539 || /duplicidade\s+de\s+nf-e/i.test(message);
 }
 
+function isAutoInutilizationEligible(command, response, payload) {
+  if (!isFiscalEmissionCommand(command) || response?.success) {
+    return false;
+  }
+
+  const status = String(response?.status || "").toLowerCase();
+  const code = getSefazCode(response);
+  const data = getResponseData(response);
+  const numero = asPositiveNumber(data.numero || payload?.numero);
+  const serie = asPositiveNumber(data.serie || payload?.serie);
+
+  if (!numero || !serie) {
+    return false;
+  }
+
+  if (
+    status.includes("contingencia") ||
+    status.includes("duplicidade") ||
+    status.includes("denegada") ||
+    status.includes("configuracao") ||
+    status.includes("worker") ||
+    status.includes("certificado") ||
+    status.includes("timeout")
+  ) {
+    return false;
+  }
+
+  if ([100, 101, 102, 110, 135, 155, 204, 301, 302, 539].includes(code)) {
+    return false;
+  }
+
+  return status.includes("rejeitada") ||
+    status.includes("erro_emissao") ||
+    status.includes("erro") ||
+    response?.success === false;
+}
+
 async function advanceFiscalNumber(localStore, scope, config, command, payload, response) {
   const shouldAdvance = (
     response?.success &&
-    (response.status === "autorizada" || response.status === "contingencia_emitida")
+    (response.status === "autorizada" || response.status === "contingencia_emitida" || response.status === "inutilizada")
   ) || isDuplicateFiscalNumberResponse(response);
 
   if (!shouldAdvance) {
@@ -497,7 +537,7 @@ async function advanceFiscalNumber(localStore, scope, config, command, payload, 
   }
 
   const model = String(response?.data?.modelo || payload?.modelo || "");
-  const configKey = model === "55" || command === "emitir-nfe" ? "nfe" : "nfce";
+  const configKey = model === "55" || command === "emitir-nfe" || command === "emitir-nfe-contingencia" || command === "transmitir-nfe-contingencia" ? "nfe" : "nfce";
   const fiscalNumber = asPositiveNumber(response?.data?.numero || payload?.numero);
 
   if (!fiscalNumber) {
@@ -553,7 +593,115 @@ function createFiscalWorkerService(app, localStore) {
       return model;
     }
 
-    return command === "emitir-nfe" ? "55" : "65";
+    return command === "emitir-nfe" || command === "emitir-nfe-contingencia" ? "55" : "65";
+  }
+
+  async function recordFiscalResponse(scope, command, documentId, config, effectivePayload, response, correlationId) {
+    const responseData = getResponseData(response);
+    const logPath = writeFiscalLog(app, {
+      scope,
+      command,
+      correlationId,
+      success: Boolean(response.success),
+      status: response.status,
+      friendlyMessage: response.friendlyMessage,
+      technicalMessage: response.technicalMessage || null,
+      responseData,
+      config: sanitizeConfigForLog(config),
+      payload: effectivePayload
+    });
+
+    if (
+      ["registrar-pendente", "emitir-nfce", "emitir-nfce-contingencia", "transmitir-nfce-contingencia", "emitir-nfe", "emitir-nfe-contingencia", "transmitir-nfe-contingencia", "consultar-protocolo", "cancelar", "inutilizar", "imprimir-danfe", "reimprimir-danfe"].includes(command)
+    ) {
+      await localStore.recordFiscalDocument({
+        scope,
+        document: {
+          id: documentId,
+          venda_id: effectivePayload?.vendaId || effectivePayload?.venda_id || null,
+          command,
+          ambiente: config.ambiente || null,
+          modelo: responseData.modelo || effectivePayload?.modelo || (command === "emitir-nfe" || command === "emitir-nfe-contingencia" || command === "transmitir-nfe-contingencia" ? "55" : command === "emitir-nfce" || command === "emitir-nfce-contingencia" || command === "transmitir-nfce-contingencia" ? "65" : null),
+          serie: responseData.serie || effectivePayload?.serie || null,
+          numero: responseData.numero || responseData.numeroInicial || effectivePayload?.numero || effectivePayload?.numeroInicial || null,
+          chave: responseData.chave || effectivePayload?.chave || effectivePayload?.chaveAcesso || null,
+          status: response.status || (response.success ? "sucesso" : "erro"),
+          codigo_retorno_sefaz: response.codigoRetornoSefaz || responseData.cStat || null,
+          mensagem_sefaz: response.mensagemSefaz || responseData.xMotivo || null,
+          mensagem_operador: responseData.mensagemOperador || response.friendlyMessage || responseData.xMotivo || null,
+          mensagem_tecnica: response.technicalMessage || null,
+          protocolo: responseData.protocolo || null,
+          xml_enviado_path: responseData.xmlEnviadoPath || effectivePayload?.xmlPath || null,
+          xml_autorizado_path: responseData.xmlAutorizadoPath || null,
+          pdf_path: responseData.pdfPath || null,
+          impressao_status: command.includes("danfe") ? response.status : null,
+          raw_result: {
+            ...response,
+            payload: effectivePayload
+          },
+          log_path: logPath
+        }
+      });
+    }
+
+    return { logPath, responseData };
+  }
+
+  async function tryAutoInvalidateFailedEmission(scope, command, config, effectivePayload, response) {
+    if (!isAutoInutilizationEligible(command, response, effectivePayload)) {
+      return null;
+    }
+
+    const responseData = getResponseData(response);
+    const modelo = responseData.modelo || effectivePayload?.modelo || getFiscalModel(command, effectivePayload);
+    const serie = responseData.serie || effectivePayload?.serie || null;
+    const numero = responseData.numero || effectivePayload?.numero || null;
+    const documentId = createId("documento-fiscal");
+    const invalidationPayload = {
+      documentId,
+      vendaId: effectivePayload?.vendaId || effectivePayload?.venda_id || null,
+      modelo,
+      serie,
+      numero,
+      numeroInicial: numero,
+      numeroFinal: numero,
+      ano: effectivePayload?.issuedAt || effectivePayload?.createdAt || effectivePayload?.dhEmi || new Date().toISOString(),
+      justificativa: responseData.mensagemOperador || response.friendlyMessage || "Erro tecnico na emissao fiscal do PDV.",
+      motivo: responseData.xMotivo || response.status || "Falha de emissao",
+      sale: effectivePayload?.sale || null,
+      itens: Array.isArray(effectivePayload?.itens) ? effectivePayload.itens : []
+    };
+    const invalidationRequest = {
+      command: "inutilizar",
+      correlationId: createId("fiscal-correlation"),
+      config,
+      payload: invalidationPayload
+    };
+    const invalidationResponse = await runWorker(app, invalidationRequest);
+    const recorded = await recordFiscalResponse(
+      scope,
+      "inutilizar",
+      documentId,
+      config,
+      invalidationPayload,
+      invalidationResponse,
+      invalidationRequest.correlationId
+    );
+
+    await advanceFiscalNumber(localStore, scope, config, "inutilizar", invalidationPayload, invalidationResponse);
+
+    return {
+      documentId,
+      success: Boolean(invalidationResponse.success),
+      status: invalidationResponse.status,
+      friendlyMessage: invalidationResponse.friendlyMessage,
+      codigoRetornoSefaz: invalidationResponse.codigoRetornoSefaz || recorded.responseData.cStat || null,
+      mensagemSefaz: invalidationResponse.mensagemSefaz || recorded.responseData.xMotivo || null,
+      logPath: recorded.logPath,
+      modelo,
+      serie,
+      numero
+    };
   }
 
   async function prepareEmissionWithLocalNumberGuard(scope, savedConfig, config, command, payload, options = {}) {
@@ -671,58 +819,32 @@ function createFiscalWorkerService(app, localStore) {
       payload: effectivePayload
     };
     const result = await executeFiscalWorkerRequest(scope, command, savedConfig, config, request, documentId, effectivePayload);
-    const response = result.response;
-    const responseData = getResponseData(response);
+    let response = result.response;
+    let responseData = getResponseData(response);
 
     config = result.config;
     effectivePayload = result.payload;
 
-    const logPath = writeFiscalLog(app, {
-      scope,
-      command,
-      correlationId: request.correlationId,
-      success: Boolean(response.success),
-      status: response.status,
-      friendlyMessage: response.friendlyMessage,
-      technicalMessage: response.technicalMessage || null,
-      config: sanitizeConfigForLog(config),
-      payload: effectivePayload
-    });
-
-    if (
-      ["registrar-pendente", "emitir-nfce", "emitir-nfce-contingencia", "transmitir-nfce-contingencia", "emitir-nfe", "consultar-protocolo", "cancelar", "inutilizar", "imprimir-danfe", "reimprimir-danfe"].includes(command)
-    ) {
-      await localStore.recordFiscalDocument({
-        scope,
-        document: {
-          id: documentId,
-          venda_id: effectivePayload?.vendaId || effectivePayload?.venda_id || null,
-          command,
-          ambiente: config.ambiente || null,
-          modelo: responseData.modelo || effectivePayload?.modelo || (command === "emitir-nfe" ? "55" : command === "emitir-nfce" || command === "emitir-nfce-contingencia" || command === "transmitir-nfce-contingencia" ? "65" : null),
-          serie: responseData.serie || effectivePayload?.serie || null,
-          numero: responseData.numero || effectivePayload?.numero || null,
-          chave: response?.data?.chave || payload?.payload?.chave || null,
-          status: response.status || (response.success ? "sucesso" : "erro"),
-          codigo_retorno_sefaz: response.codigoRetornoSefaz || responseData.cStat || null,
-          mensagem_sefaz: response.mensagemSefaz || responseData.xMotivo || null,
-          mensagem_operador: responseData.mensagemOperador || response.friendlyMessage || responseData.xMotivo || null,
-          mensagem_tecnica: response.technicalMessage || null,
-          protocolo: response?.data?.protocolo || null,
-          xml_enviado_path: response?.data?.xmlEnviadoPath || effectivePayload?.xmlPath || null,
-          xml_autorizado_path: response?.data?.xmlAutorizadoPath || null,
-          pdf_path: response?.data?.pdfPath || null,
-          impressao_status: command.includes("danfe") ? response.status : null,
-          raw_result: {
-            ...response,
-            payload: effectivePayload
-          },
-          log_path: logPath
-        }
-      });
-    }
+    const recorded = await recordFiscalResponse(scope, command, documentId, config, effectivePayload, response, request.correlationId);
+    const logPath = recorded.logPath;
 
     await advanceFiscalNumber(localStore, scope, config, command, effectivePayload, response);
+
+    const autoInutilization = await tryAutoInvalidateFailedEmission(scope, command, config, effectivePayload, response);
+
+    if (autoInutilization) {
+      responseData = getResponseData(response);
+      response = {
+        ...response,
+        friendlyMessage: autoInutilization.success
+          ? `${response.friendlyMessage} Numero fiscal inutilizado automaticamente.`
+          : response.friendlyMessage,
+        data: {
+          ...responseData,
+          inutilizacaoAutomatica: autoInutilization
+        }
+      };
+    }
 
     return {
       ...response,

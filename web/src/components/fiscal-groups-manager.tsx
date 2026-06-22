@@ -13,12 +13,15 @@ import {
 import {
   ArrowLeft,
   ArrowRight,
+  Ban,
+  Check,
   FileCheck2,
   Info,
   ListChecks,
   LoaderCircle,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   ShieldCheck,
   Trash2,
@@ -63,6 +66,18 @@ type GrupoFiscal = {
   aliquota_ibs_municipal: number | null;
   aliquota_cbs: number | null;
   produtos_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
+};
+
+type DeleteFiscalGroupResponse =
+  | { action: "deleted"; id: number; message?: string }
+  | { action: "deactivated"; grupo_fiscal: GrupoFiscal; message?: string };
+
+type ActivateFiscalGroupResponse = {
+  action: "activated";
+  grupo_fiscal: GrupoFiscal;
+  message?: string;
 };
 
 type FiscalGroupDraft = {
@@ -283,7 +298,7 @@ function FiscalGroupListItem({
   return (
     <button
       type="button"
-      className="fiscal-group-row"
+      className={profile.ativo ? "fiscal-group-row" : "fiscal-group-row platform-record-inactive"}
       onClick={() => onEdit(profile.id)}
     >
       <span className="fiscal-group-row-icon" aria-hidden="true">
@@ -297,6 +312,7 @@ function FiscalGroupListItem({
         <small>
           CFOP {profile.cfop || "--"} · {formatTaxRegimeLabel(profile)} ·{" "}
           {formatLinkedProductCount(profile.produtos_vinculados ?? 0)}
+          {!profile.ativo ? " · Desativado" : ""}
         </small>
       </span>
 
@@ -691,29 +707,35 @@ export function FiscalGroupsManager() {
     : null;
   const editGroupPresence = useModalPresence(isEditModalOpen ? editingFiscalGroup : null);
   const visibleEditingFiscalGroup = editGroupPresence.presentValue;
-  const editingLinkedProductsCount = editingFiscalGroup?.produtos_vinculados ?? 0;
   const canSave = canSaveFiscalGroupDraft(fiscalGroupDraft);
-  const canDelete = Boolean(editingFiscalGroupId) && editingLinkedProductsCount === 0;
   const normalizedSearchValue = normalizeSearchValue(deferredSearchValue);
   const filteredFiscalGroups = useMemo(() => {
-    return fiscalGroups.filter(profile => {
-      if (!normalizedSearchValue) {
-        return true;
-      }
+    return fiscalGroups
+      .filter(profile => {
+        if (!normalizedSearchValue) {
+          return true;
+        }
 
-      const haystack = [
-        profile.nome,
-        profile.ncm ?? "",
-        profile.cfop ?? "",
-        profile.csosn ?? "",
-        profile.cst_icms ?? "",
-        formatTaxRegimeLabel(profile)
-      ]
-        .join(" ")
-        .toLowerCase();
+        const haystack = [
+          profile.nome,
+          profile.ncm ?? "",
+          profile.cfop ?? "",
+          profile.csosn ?? "",
+          profile.cst_icms ?? "",
+          formatTaxRegimeLabel(profile)
+        ]
+          .join(" ")
+          .toLowerCase();
 
-      return haystack.includes(normalizedSearchValue);
-    });
+        return haystack.includes(normalizedSearchValue);
+      })
+      .sort((left, right) => {
+        if (left.ativo !== right.ativo) {
+          return left.ativo ? -1 : 1;
+        }
+
+        return left.nome.localeCompare(right.nome, "pt-BR");
+      });
   }, [fiscalGroups, normalizedSearchValue]);
 
   function closeTopFiscalModal() {
@@ -885,11 +907,6 @@ export function FiscalGroupsManager() {
       return;
     }
 
-    if (!canDelete) {
-      setSubmitError("Não é possível excluir este grupo porque ele possui produtos vinculados.");
-      return;
-    }
-
     setSubmitError(null);
     setGroupPendingDelete(editingFiscalGroup);
   }
@@ -903,18 +920,18 @@ export function FiscalGroupsManager() {
         return;
       }
 
-      if ((targetGroup.produtos_vinculados ?? 0) > 0) {
-        setGroupPendingDelete(null);
-        setSubmitError("Não é possível excluir este grupo porque ele possui produtos vinculados.");
-        return;
-      }
-
       try {
-        await apiDelete(`/grupos-fiscais/${targetGroup.id}`, { token });
+        const result = await apiDelete<DeleteFiscalGroupResponse>(`/grupos-fiscais/${targetGroup.id}`, { token });
 
-        setFiscalGroups(currentGroups =>
-          currentGroups.filter(group => group.id !== targetGroup.id)
-        );
+        if (result?.action === "deactivated") {
+          setFiscalGroups(currentGroups =>
+            currentGroups.map(group => (group.id === result.grupo_fiscal.id ? result.grupo_fiscal : group))
+          );
+        } else {
+          setFiscalGroups(currentGroups =>
+            currentGroups.filter(group => group.id !== targetGroup.id)
+          );
+        }
         setGroupPendingDelete(null);
         setIsEditModalOpen(false);
         setEditingFiscalGroupId(null);
@@ -923,6 +940,29 @@ export function FiscalGroupsManager() {
       } catch (error) {
         setGroupPendingDelete(null);
         setSubmitError(getErrorMessage(error, "Não foi possível excluir o grupo fiscal."));
+      }
+    })();
+  }
+
+  function handleFiscalGroupActivate() {
+    void (async () => {
+      const token = getStoredPlatformAuthToken();
+      const targetGroup = editingFiscalGroup;
+
+      if (!token || !targetGroup) {
+        return;
+      }
+
+      try {
+        setSubmitError(null);
+        const result = await apiPost<ActivateFiscalGroupResponse>(`/grupos-fiscais/${targetGroup.id}/ativar`, {}, { token });
+
+        setFiscalGroups(currentGroups =>
+          currentGroups.map(group => (group.id === result.grupo_fiscal.id ? result.grupo_fiscal : group))
+        );
+        setFiscalGroupDraft(buildFiscalGroupDraft(result.grupo_fiscal));
+      } catch (error) {
+        setSubmitError(getErrorMessage(error, "Não foi possível ativar o grupo fiscal."));
       }
     })();
   }
@@ -1146,37 +1186,51 @@ export function FiscalGroupsManager() {
 
             <FiscalGroupEditor
               editingGroupId={editingFiscalGroupId ?? visibleEditingFiscalGroup.id}
-              linkedProductsCount={visibleEditingFiscalGroup.produtos_vinculados ?? editingLinkedProductsCount}
+              linkedProductsCount={visibleEditingFiscalGroup.produtos_vinculados ?? 0}
               draft={fiscalGroupDraft}
               errorMessage={submitError}
               onDraftChange={setFiscalGroupDraft}
               onSubmit={handleFiscalGroupSubmit}
             />
 
-            <div className="platform-modal-actions fiscal-edit-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete">
+            <div
+              className={
+                visibleEditingFiscalGroup.ativo
+                  ? "platform-modal-actions fiscal-edit-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete"
+                  : "platform-modal-actions fiscal-edit-modal-actions platform-item-modal-actions"
+              }
+            >
               <button className="platform-secondary-button" type="button" onClick={closeFiscalGroupEditModal}>
                 Cancelar
               </button>
 
-              <button
-                type="button"
-                className="fiscal-danger-button fiscal-edit-delete-button"
-                disabled={!canDelete}
-                title={
-                  canDelete
-                    ? "Excluir grupo fiscal"
-                    : "Este grupo possui produtos vinculados."
-                }
-                onClick={requestFiscalGroupDelete}
-              >
-                <Trash2 size={16} />
-                Excluir
-              </button>
+              {!visibleEditingFiscalGroup.ativo ? (
+                <button
+                  type="button"
+                  className="platform-primary-button platform-save-button"
+                  onClick={handleFiscalGroupActivate}
+                >
+                  <RotateCcw size={16} />
+                  Ativar
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="fiscal-danger-button fiscal-edit-delete-button"
+                  title={visibleEditingFiscalGroup.acao_remocao === "desativar" ? "Desativar grupo fiscal" : "Excluir grupo fiscal"}
+                  onClick={requestFiscalGroupDelete}
+                >
+                  {visibleEditingFiscalGroup.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                  {visibleEditingFiscalGroup.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
+                </button>
+              )}
 
-              <button className="platform-primary-button platform-save-button" type="submit" form="fiscal-group-form" disabled={!canSave}>
-                <ShieldCheck size={16} />
-                Salvar grupo
-              </button>
+              {visibleEditingFiscalGroup.ativo ? (
+                <button className="platform-primary-button platform-save-button" type="submit" form="fiscal-group-form" disabled={!canSave}>
+                  <ShieldCheck size={16} />
+                  Salvar grupo
+                </button>
+              ) : null}
             </div>
           </section>
         </div>
@@ -1196,10 +1250,13 @@ export function FiscalGroupsManager() {
           >
             <div className="platform-modal-head">
               <span className="platform-modal-kicker">Grupo fiscal</span>
-              <h2 id="fiscal-delete-confirm-title">Excluir grupo fiscal?</h2>
+              <h2 id="fiscal-delete-confirm-title">
+                {visibleGroupPendingDelete.acao_remocao === "desativar" ? "Desativar grupo fiscal?" : "Excluir grupo fiscal?"}
+              </h2>
               <p>
-                Confirme para excluir “{visibleGroupPendingDelete.nome}”. Essa ação não poderá ser
-                desfeita.
+                {visibleGroupPendingDelete.acao_remocao === "desativar"
+                  ? `“${visibleGroupPendingDelete.nome}” deixa de aparecer em novos vínculos, mas segue preservado nos produtos antigos.`
+                  : `Confirme para excluir “${visibleGroupPendingDelete.nome}”. Essa ação não poderá ser desfeita.`}
               </p>
             </div>
 
@@ -1217,8 +1274,8 @@ export function FiscalGroupsManager() {
                 className="fiscal-danger-button fiscal-edit-delete-button"
                 onClick={handleFiscalGroupDelete}
               >
-                <Trash2 size={16} />
-                Excluir grupo
+                {visibleGroupPendingDelete.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                {visibleGroupPendingDelete.acao_remocao === "desativar" ? "Desativar grupo" : "Excluir grupo"}
               </button>
             </div>
           </section>

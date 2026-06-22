@@ -112,11 +112,13 @@ function sanitizeCategoria(categoria) {
 function sanitizeEstoque(estoque, resumo = {}) {
   const data = estoque.get ? estoque.get({ plain: true }) : { ...estoque };
   const principalVenda = Boolean(data.principal_venda);
+  const registrosVinculados = Number(resumo.registros_vinculados ?? data.registros_vinculados ?? 0);
 
   return {
     id: data.id,
     usuario_id: data.usuario_id,
     nome: data.nome,
+    ativo: data.ativo !== false,
     principal_venda: principalVenda,
     permite_venda: principalVenda,
     tipo: principalVenda ? 'principal' : 'reposicao',
@@ -124,6 +126,9 @@ function sanitizeEstoque(estoque, resumo = {}) {
     ordem: Number(data.ordem || 0),
     produtos_count: resumo.produtos_count ?? 0,
     total_quantidade: resumo.total_quantidade ?? 0,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
   };
 }
 
@@ -220,6 +225,7 @@ async function ensureDefaultEstoque(usuarioId, transaction) {
         nome: ESTOQUE_PRINCIPAL_NOME,
         principal_venda: true,
         permite_venda: true,
+        ativo: true,
         ordem: 0,
       },
       { transaction }
@@ -230,6 +236,7 @@ async function ensureDefaultEstoque(usuarioId, transaction) {
     principal.nome !== ESTOQUE_PRINCIPAL_NOME ||
     !principal.principal_venda ||
     !principal.permite_venda ||
+    principal.ativo === false ||
     principal.ordem !== 0
   ) {
     await principal.update(
@@ -237,6 +244,7 @@ async function ensureDefaultEstoque(usuarioId, transaction) {
         nome: ESTOQUE_PRINCIPAL_NOME,
         principal_venda: true,
         permite_venda: true,
+        ativo: true,
         ordem: 0,
       },
       { transaction }
@@ -295,9 +303,21 @@ async function findUserProdutoControlado(usuarioId, id, options = {}) {
 }
 
 async function getResumoEstoques(usuarioId) {
-  const saldos = await SaldoEstoqueProduto.findAll({
-    where: { usuario_id: usuarioId },
-  });
+  const [saldos, movimentacoes] = await Promise.all([
+    SaldoEstoqueProduto.findAll({
+      where: { usuario_id: usuarioId },
+    }),
+    MovimentacaoEstoque.findAll({
+      where: {
+        usuario_id: usuarioId,
+        [Op.or]: [
+          { estoque_origem_id: { [Op.ne]: null } },
+          { estoque_destino_id: { [Op.ne]: null } },
+        ],
+      },
+      attributes: ['estoque_origem_id', 'estoque_destino_id'],
+    }),
+  ]);
   const resumo = new Map();
 
   saldos.forEach(saldo => {
@@ -306,6 +326,7 @@ async function getResumoEstoques(usuarioId) {
     const current = resumo.get(estoqueId) ?? {
       produtos_count: 0,
       total_quantidade: 0,
+      registros_vinculados: 0,
     };
 
     if (quantidade > 0) {
@@ -313,10 +334,48 @@ async function getResumoEstoques(usuarioId) {
     }
 
     current.total_quantidade = Number((current.total_quantidade + quantidade).toFixed(3));
+    current.registros_vinculados = Number(current.registros_vinculados ?? 0) + 1;
     resumo.set(estoqueId, current);
   });
 
+  movimentacoes.forEach(movimentacao => {
+    [movimentacao.estoque_origem_id, movimentacao.estoque_destino_id]
+      .filter(Boolean)
+      .forEach(estoqueId => {
+        const numericId = Number(estoqueId);
+        const current = resumo.get(numericId) ?? {
+          produtos_count: 0,
+          total_quantidade: 0,
+          registros_vinculados: 0,
+        };
+
+        current.registros_vinculados = Number(current.registros_vinculados ?? 0) + 1;
+        resumo.set(numericId, current);
+      });
+  });
+
   return resumo;
+}
+
+async function getEstoqueRegistrosVinculados(usuarioId, estoqueId, options = {}) {
+  const [saldosCount, movimentacoesCount] = await Promise.all([
+    SaldoEstoqueProduto.count({
+      where: {
+        usuario_id: usuarioId,
+        estoque_id: estoqueId,
+      },
+      transaction: options.transaction,
+    }),
+    MovimentacaoEstoque.count({
+      where: {
+        usuario_id: usuarioId,
+        [Op.or]: [{ estoque_origem_id: estoqueId }, { estoque_destino_id: estoqueId }],
+      },
+      transaction: options.transaction,
+    }),
+  ]);
+
+  return saldosCount + movimentacoesCount;
 }
 
 async function getOrCreateSaldo(usuarioId, produtoId, estoqueId, transaction) {
@@ -487,6 +546,11 @@ async function aplicarCompra(req, res) {
       return res.status(404).json({ message: 'Estoque não encontrado.' });
     }
 
+    if (destino.ativo === false) {
+      await transaction.rollback();
+      return res.status(409).json({ message: 'Estoque desativado não pode receber compra.' });
+    }
+
     if (itens.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ message: 'Adicione ao menos um produto à compra.' });
@@ -557,6 +621,11 @@ async function aplicarAcerto(req, res) {
       return res.status(404).json({ message: 'Estoque não encontrado.' });
     }
 
+    if (estoque.ativo === false) {
+      await transaction.rollback();
+      return res.status(409).json({ message: 'Estoque desativado não pode receber acerto.' });
+    }
+
     if (itens.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ message: 'Adicione ao menos um produto ao acerto.' });
@@ -620,6 +689,11 @@ async function aplicarTransferencia(req, res) {
     if (!origem || !destino) {
       await transaction.rollback();
       return res.status(404).json({ message: 'Selecione origem e destino da transferência.' });
+    }
+
+    if (origem.ativo === false || destino.ativo === false) {
+      await transaction.rollback();
+      return res.status(409).json({ message: 'Use apenas estoques ativos na transferência.' });
     }
 
     if (origem.id === destino.id) {
@@ -914,6 +988,7 @@ module.exports = {
         {
           usuario_id: req.user.id,
           ...payload,
+          ativo: true,
           ordem: Number.isFinite(Number(maxOrder)) ? Number(maxOrder) + 1 : 1,
         },
         { transaction }
@@ -960,10 +1035,11 @@ module.exports = {
       }
 
       await estoque.update(payload, { transaction });
+      const registrosVinculados = await getEstoqueRegistrosVinculados(req.user.id, estoque.id, { transaction });
       await transaction.commit();
       committed = true;
 
-      return res.json(sanitizeEstoque(estoque));
+      return res.json(sanitizeEstoque(estoque, { registros_vinculados: registrosVinculados }));
     } catch (error) {
       if (!committed) {
         await transaction.rollback();
@@ -992,6 +1068,7 @@ module.exports = {
         });
       }
 
+      const registrosVinculados = await getEstoqueRegistrosVinculados(req.user.id, estoque.id, { transaction });
       const saldosComQuantidade = await SaldoEstoqueProduto.count({
         where: {
           usuario_id: req.user.id,
@@ -1001,10 +1078,18 @@ module.exports = {
         transaction,
       });
 
-      if (saldosComQuantidade > 0) {
-        await transaction.rollback();
-        return res.status(409).json({
-          message: 'Zere os produtos deste estoque antes de excluir.',
+      if (registrosVinculados > 0) {
+        await estoque.update({ ativo: false }, { transaction });
+        await transaction.commit();
+        committed = true;
+
+        return res.json({
+          action: 'deactivated',
+          estoque: sanitizeEstoque(estoque, {
+            registros_vinculados: registrosVinculados,
+            produtos_count: saldosComQuantidade,
+          }),
+          message: 'Estoque desativado para preservar saldos e movimentações vinculadas.',
         });
       }
 
@@ -1019,13 +1104,54 @@ module.exports = {
       await transaction.commit();
       committed = true;
 
-      return res.status(204).send();
+      return res.json({
+        action: 'deleted',
+        id: estoque.id,
+        message: 'Estoque excluído.',
+      });
     } catch (error) {
       if (!committed) {
         await transaction.rollback();
       }
 
       return handleEstoqueError(res, error, 'Erro ao excluir estoque.');
+    }
+  },
+
+  async activateEstoque(req, res) {
+    const transaction = await sequelize.transaction();
+    let committed = false;
+
+    try {
+      await ensureDefaultEstoque(req.user.id, transaction);
+
+      const estoque = await findUserEstoque(req.user.id, req.params.id, { transaction });
+
+      if (!estoque) {
+        await transaction.rollback();
+        return res.status(404).json({ message: 'Estoque não encontrado.' });
+      }
+
+      if (!estoque.ativo) {
+        await estoque.update({ ativo: true }, { transaction });
+      }
+
+      const registrosVinculados = await getEstoqueRegistrosVinculados(req.user.id, estoque.id, { transaction });
+
+      await transaction.commit();
+      committed = true;
+
+      return res.json({
+        action: 'activated',
+        estoque: sanitizeEstoque(estoque, { registros_vinculados: registrosVinculados }),
+        message: 'Estoque ativado.',
+      });
+    } catch (error) {
+      if (!committed) {
+        await transaction.rollback();
+      }
+
+      return handleEstoqueError(res, error, 'Erro ao ativar estoque.');
     }
   },
 

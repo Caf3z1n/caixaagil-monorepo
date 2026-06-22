@@ -41,6 +41,9 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   markEventsFailed(payload) {
     return ipcRenderer.invoke("pdv-store:mark-events-failed", payload);
   },
+  ignoreEvents(payload) {
+    return ipcRenderer.invoke("pdv-store:ignore-events", payload);
+  },
   getFailedEvents(payload) {
     return ipcRenderer.invoke("pdv-store:get-failed-events", payload);
   },
@@ -58,6 +61,9 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   },
   markFiscalDocumentsFailed(payload) {
     return invokeOptional("pdv-store:mark-fiscal-documents-failed", payload, { ok: true, updated: 0 });
+  },
+  ignoreFiscalDocuments(payload) {
+    return ipcRenderer.invoke("pdv-store:ignore-fiscal-documents", payload);
   },
   getShiftPreview(payload) {
     return ipcRenderer.invoke("pdv-store:get-shift-preview", payload);

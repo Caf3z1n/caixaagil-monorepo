@@ -33,6 +33,10 @@ ClienteConvenio.init(
       allowNull: false,
       defaultValue: false,
     },
+    dados_fiscais: {
+      type: DataTypes.JSONB,
+      allowNull: true,
+    },
   },
   {
     sequelize,

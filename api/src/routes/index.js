@@ -14,6 +14,8 @@ const estoqueRoutes = require('./estoqueRoutes');
 const caixaRoutes = require('./caixaRoutes');
 const configuracaoRoutes = require('./configuracaoRoutes');
 const convenioRoutes = require('./convenioRoutes');
+const despesaRoutes = require('./despesaRoutes');
+const funcionarioRoutes = require('./funcionarioRoutes');
 const nfRoutes = require('./nfRoutes');
 const healthController = require('../app/controllers/healthController');
 
@@ -35,6 +37,8 @@ router.use('/estoques', estoqueRoutes);
 router.use('/caixa', caixaRoutes);
 router.use('/configuracoes', configuracaoRoutes);
 router.use('/convenios', convenioRoutes);
+router.use('/despesas', despesaRoutes);
+router.use('/funcionarios', funcionarioRoutes);
 router.use('/nf', nfRoutes);
 router.get('/health', healthController.show);
 

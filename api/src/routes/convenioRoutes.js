@@ -7,6 +7,7 @@ const router = Router();
 router.use(auth);
 router.get('/clientes', controller.listClientes);
 router.post('/clientes', controller.createCliente);
+router.post('/clientes/:id/ativar', controller.activateCliente);
 router.put('/clientes/:id', controller.updateCliente);
 router.delete('/clientes/:id', controller.deleteCliente);
 router.get('/recebimentos', controller.listRecebimentos);

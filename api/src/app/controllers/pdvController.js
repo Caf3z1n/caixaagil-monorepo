@@ -10,6 +10,7 @@ const {
   DespesaCaixa,
   Estoque,
   EventoPdv,
+  Funcionario,
   MovimentacaoEstoque,
   Nf,
   NfEvento,
@@ -21,7 +22,14 @@ const {
 } = require('../models');
 const produtoController = require('./produtoController');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
-const { toAbsolutePath } = require('../services/fileStorageService');
+const {
+  buildStorageDirectory,
+  buildStoredFileName,
+  ensureDirectory,
+  removePhysicalFile,
+  toAbsolutePath,
+  toRelativePath,
+} = require('../services/fileStorageService');
 
 const pairingTtlMinutes = 30;
 
@@ -123,12 +131,16 @@ function buildIdentificacao(index) {
 
 function sanitizePdv(pdv, extra = {}) {
   const data = pdv.get ? pdv.get({ plain: true }) : { ...pdv };
+  const registrosVinculados = Number(extra.registros_vinculados ?? data.registros_vinculados ?? 0);
 
   delete data.credencial_hash;
   delete data.codigo_pareamento_hash;
 
   return {
     ...data,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
     codigo_pareamento_pendente:
       Boolean(data.codigo_pareamento_expira_em) &&
       !data.codigo_pareamento_usado_em &&
@@ -136,6 +148,18 @@ function sanitizePdv(pdv, extra = {}) {
     status_operacional: resolveStatusOperacional(data),
     ...extra,
   };
+}
+
+async function getPdvRegistrosVinculados(usuarioId, pdvId) {
+  const [caixas, vendas, despesas, eventos, notas] = await Promise.all([
+    Caixa.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+    Venda.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+    DespesaCaixa.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+    EventoPdv.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+    Nf.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+  ]);
+
+  return caixas + vendas + despesas + eventos + notas;
 }
 
 async function listUserPdvs(usuarioId) {
@@ -161,17 +185,18 @@ async function getVirtualIdentificacao(usuarioId, pdvId) {
   return buildIdentificacao(index);
 }
 
-function sanitizePdvList(pdvs) {
-  return pdvs.map((pdv, index) =>
+async function sanitizePdvList(pdvs) {
+  return Promise.all(pdvs.map(async (pdv, index) =>
     sanitizePdv(pdv, {
       identificacao: buildIdentificacao(index),
+      registros_vinculados: await getPdvRegistrosVinculados(pdv.usuario_id, pdv.id),
     })
-  );
+  ));
 }
 
 async function getUserPdvsSnapshot(usuarioId) {
   const pdvs = await listUserPdvs(usuarioId);
-  const sanitized = sanitizePdvList(pdvs);
+  const sanitized = await sanitizePdvList(pdvs);
 
   return {
     pdvs: sanitized,
@@ -264,7 +289,8 @@ function getEventPayload(event) {
 
 function normalizeSyncEvent(event) {
   const payload = getEventPayload(event);
-  const eventId = normalizeText(event?.id || payload.eventId, 64) || `evento-${randomUUID()}`;
+  const rawEventId = normalizeText(event?.id || payload.eventId, 220) || `evento-${randomUUID()}`;
+  const eventId = normalizeSyncEventStorageId(rawEventId);
   const eventType = normalizeText(event?.event_type || event?.eventType || event?.tipo, 40);
   const aggregateType = normalizeText(event?.aggregate_type || event?.aggregateType || event?.agregado_tipo, 40);
   const aggregateId = normalizeText(event?.aggregate_id || event?.aggregateId || event?.agregado_id, 64);
@@ -275,6 +301,7 @@ function normalizeSyncEvent(event) {
 
   return {
     id: eventId,
+    clientId: rawEventId,
     eventType,
     aggregateType,
     aggregateId,
@@ -282,6 +309,21 @@ function normalizeSyncEvent(event) {
     payload,
     receivedAt: new Date(),
   };
+}
+
+function normalizeSyncEventStorageId(value) {
+  const rawValue = normalizeText(value, 220);
+
+  if (!rawValue) {
+    return `evento-${randomUUID()}`;
+  }
+
+  if (rawValue.length <= 64) {
+    return rawValue;
+  }
+
+  const digest = createHash('sha256').update(rawValue).digest('hex').slice(0, 16);
+  return `${rawValue.slice(0, 47)}-${digest}`;
 }
 
 function buildSaleCode(sale) {
@@ -331,7 +373,37 @@ function sanitizeDesktopClienteConvenio(cliente) {
     tipo_pessoa: data.tipo_pessoa || 'fisica',
     ativo: Boolean(data.ativo),
     permite_pagamento_frente_caixa: Boolean(data.permite_pagamento_frente_caixa),
+    dados_fiscais: data.tipo_pessoa === 'juridica' ? data.dados_fiscais || null : null,
     updated_at: data.updated_at || data.updatedAt || null,
+  };
+}
+
+function sanitizeDesktopFuncionario(funcionario) {
+  const data = funcionario.get ? funcionario.get({ plain: true }) : funcionario;
+
+  return {
+    id: data.id,
+    nome: data.nome,
+    codigo_hash: data.codigo_hash,
+    ativo: Boolean(data.ativo),
+    updated_at: data.updated_at || data.updatedAt || null,
+  };
+}
+
+async function loadDesktopFuncionariosSnapshot(usuarioId) {
+  const funcionarios = await Funcionario.findAll({
+    where: {
+      usuario_id: usuarioId,
+      ativo: true,
+    },
+    order: [
+      ['nome', 'ASC'],
+      ['id', 'ASC'],
+    ],
+  });
+
+  return {
+    funcionarios: funcionarios.map(sanitizeDesktopFuncionario),
   };
 }
 
@@ -353,11 +425,13 @@ function sanitizeDesktopConvenioRecebimento(venda) {
     titulo: data.titulo,
     cliente_convenio_id: data.cliente_convenio_id || null,
     cliente_nome: getVendaClienteConvenioNome(data),
+    cliente_tipo_pessoa: data.cliente_convenio?.tipo_pessoa || null,
     itens_count: Number(data.quantidade_itens || 0),
     itens: normalizeSaleItems(data.itens),
     total_centavos: sanitizeCents(data.total_centavos),
     status_convenio: normalizeKey(data.status_convenio) === 'pago' ? 'pago' : 'pendente',
     metodo_pagamento_recebimento: normalizeKey(data.metodo_pagamento_recebimento) || null,
+    caixa_recebimento_id: data.caixa_recebimento_id || null,
     registrado_em: data.registrado_em || null,
     recebido_em: data.recebido_em || null,
   };
@@ -440,7 +514,19 @@ async function findPrimaryStock(usuarioId, transaction) {
         nome: 'Estoque principal',
         principal_venda: true,
         permite_venda: true,
+        ativo: true,
         ordem: 0,
+      },
+      { transaction }
+    );
+  }
+
+  if (estoque.ativo === false || !estoque.principal_venda || !estoque.permite_venda) {
+    await estoque.update(
+      {
+        principal_venda: true,
+        permite_venda: true,
+        ativo: true,
       },
       { transaction }
     );
@@ -567,6 +653,38 @@ async function applySaleStockRestoration(usuarioId, sale, transaction) {
   }
 }
 
+async function resolveSessionEmployee(usuarioId, employee, transaction) {
+  const employeeId = Number(employee?.id || 0);
+  const fallbackName = normalizeText(employee?.nome || employee?.name, 120);
+
+  if (!Number.isInteger(employeeId) || employeeId <= 0) {
+    return {
+      id: null,
+      nome: fallbackName || null,
+    };
+  }
+
+  const funcionario = await Funcionario.findOne({
+    where: {
+      id: employeeId,
+      usuario_id: usuarioId,
+    },
+    transaction,
+  });
+
+  if (!funcionario || funcionario.ativo === false) {
+    return {
+      id: null,
+      nome: fallbackName || funcionario?.nome || null,
+    };
+  }
+
+  return {
+    id: String(funcionario.id),
+    nome: funcionario.nome,
+  };
+}
+
 async function upsertCashierSession({ pdv, session, status, transaction }) {
   if (!session?.id) {
     throw new Error('Evento de caixa sem sessão local.');
@@ -575,6 +693,14 @@ async function upsertCashierSession({ pdv, session, status, transaction }) {
   const openedAt = parseDate(session.openedAt || session.aberto_em);
   const closedAt = session.closedAt || session.fechado_em ? parseDate(session.closedAt || session.fechado_em) : null;
   const operationDate = getSaoPauloOperationDateParts(openedAt);
+  const openedByEmployee = await resolveSessionEmployee(pdv.usuario_id, {
+    id: session.openedByEmployeeId || session.funcionario_abertura_id,
+    nome: session.openedByEmployeeName || session.funcionario_abertura_nome,
+  }, transaction);
+  const closedByEmployee = await resolveSessionEmployee(pdv.usuario_id, {
+    id: session.closedByEmployeeId || session.funcionario_fechamento_id,
+    nome: session.closedByEmployeeName || session.funcionario_fechamento_nome,
+  }, transaction);
   const existing = await Caixa.findOne({
     where: {
       id: session.id,
@@ -592,8 +718,10 @@ async function upsertCashierSession({ pdv, session, status, transaction }) {
     situacao: status,
     aberto_em: openedAt,
     fechado_em: status === 'fechado' ? closedAt || new Date() : null,
-    funcionario_abertura_id: null,
-    funcionario_abertura_nome: null,
+    funcionario_abertura_id: openedByEmployee.id,
+    funcionario_abertura_nome: openedByEmployee.nome,
+    funcionario_fechamento_id: status === 'fechado' ? closedByEmployee.id : null,
+    funcionario_fechamento_nome: status === 'fechado' ? closedByEmployee.nome : null,
   };
 
   if (existing) {
@@ -604,6 +732,10 @@ async function upsertCashierSession({ pdv, session, status, transaction }) {
         data_operacao_rotulo: existing.data_operacao_rotulo || values.data_operacao_rotulo,
         numero_turno: normalizeShiftNumber(existing.numero_turno || values.numero_turno),
         aberto_em: existing.aberto_em || values.aberto_em,
+        funcionario_abertura_id: values.funcionario_abertura_id || existing.funcionario_abertura_id,
+        funcionario_abertura_nome: values.funcionario_abertura_nome || existing.funcionario_abertura_nome,
+        funcionario_fechamento_id: values.funcionario_fechamento_id || existing.funcionario_fechamento_id,
+        funcionario_fechamento_nome: values.funcionario_fechamento_nome || existing.funcionario_fechamento_nome,
       },
       { transaction }
     );
@@ -689,13 +821,35 @@ async function processSaleCompleted(pdv, payload, transaction) {
   const items = normalizeSaleItems(sale.items);
   const quantity = items.reduce((total, item) => total + item.quantidade, 0);
   const totalCents = sanitizeCents(sale.totalCents || sale.total_centavos);
-  const origemComandaNome = normalizeText(payload.origemComandaNome, 120);
-  const origem = payload.origem === 'comanda' ? 'comanda' : 'caixa';
+  const requestedCommandOrigin = payload.origem === 'comanda' || Boolean(payload.origemComandaNome);
+  const commandSettings = requestedCommandOrigin
+    ? await configuracaoSistemaService.getCommandSettings(pdv.usuario_id)
+    : { ativo: true };
+  const origem = requestedCommandOrigin && commandSettings.ativo ? 'comanda' : 'caixa';
+  const origemComandaNome = origem === 'comanda' ? normalizeText(payload.origemComandaNome, 120) : '';
   const paymentMethod = normalizeText(sale.paymentMethod || sale.metodo_pagamento, 20) || null;
   const isConvenioPayment = normalizeKey(paymentMethod) === 'convenio';
   const clientName = normalizeText(sale.clientName || sale.nome_cliente || sale.customerName, 120);
   const clientId = Number(sale.cliente_convenio_id || sale.clienteConvenioId || sale.clientId || 0);
-  const clientConvenioId = Number.isInteger(clientId) && clientId > 0 ? clientId : null;
+  const requestedClientConvenioId = Number.isInteger(clientId) && clientId > 0 ? clientId : null;
+  let clientConvenioId = null;
+  let convenioClientName = clientName || normalizeText(sale.customerLabel || sale.cliente_nome, 120) || null;
+
+  if (isConvenioPayment && requestedClientConvenioId) {
+    const convenioClient = await ClienteConvenio.findOne({
+      where: {
+        id: requestedClientConvenioId,
+        usuario_id: pdv.usuario_id,
+        ativo: true,
+      },
+      transaction,
+    });
+
+    if (convenioClient) {
+      clientConvenioId = convenioClient.id;
+      convenioClientName = convenioClientName || convenioClient.nome;
+    }
+  }
 
   const createdSale = await Venda.create(
     {
@@ -709,7 +863,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
       referencia_origem: origemComandaNome || null,
       titulo: origemComandaNome ? `Venda - ${origemComandaNome}` : 'Venda no caixa',
       cliente_convenio_id: isConvenioPayment ? clientConvenioId : null,
-      nome_cliente: isConvenioPayment ? clientName || normalizeText(sale.customerLabel || sale.cliente_nome, 120) || null : null,
+      nome_cliente: isConvenioPayment ? convenioClientName : null,
       rotulo_origem: origemComandaNome || 'Caixa',
       canal: 'pdv',
       itens: items,
@@ -889,6 +1043,7 @@ async function processExpenseCreated(pdv, payload, transaction) {
       pdv_id: pdv.id,
       dispositivo_id: pdv.dispositivo_id,
       caixa_id: cashierSession?.id || payload.session?.id,
+      origem: 'pdv',
       descricao: normalizeText(expense.title || expense.descricao, 160) || 'Despesa do caixa',
       valor_centavos: sanitizeCents(expense.amountCents || expense.valor_centavos),
       registrado_em: parseDate(expense.createdAt || expense.registrado_em),
@@ -897,12 +1052,88 @@ async function processExpenseCreated(pdv, payload, transaction) {
   );
 }
 
+async function processExpenseUpdated(pdv, payload, transaction) {
+  const expense = payload.expense;
+
+  if (!expense?.id) {
+    throw new Error('Evento de despesa sem identificador local.');
+  }
+
+  let cashierSession = null;
+
+  if (payload.session) {
+    cashierSession = await upsertCashierSession({
+      pdv,
+      session: payload.session,
+      status: 'aberto',
+      transaction,
+    });
+  }
+
+  const values = {
+    usuario_id: pdv.usuario_id,
+    pdv_id: pdv.id,
+    dispositivo_id: pdv.dispositivo_id,
+    caixa_id: cashierSession?.id || payload.session?.id,
+    origem: 'pdv',
+    descricao: normalizeText(expense.title || expense.descricao, 160) || 'Despesa do caixa',
+    valor_centavos: sanitizeCents(expense.amountCents || expense.valor_centavos),
+    registrado_em: parseDate(expense.createdAt || expense.registrado_em || new Date()),
+  };
+  const existingExpense = await DespesaCaixa.findOne({
+    where: {
+      id: expense.id,
+      usuario_id: pdv.usuario_id,
+    },
+    transaction,
+  });
+
+  if (!existingExpense) {
+    return DespesaCaixa.create(
+      {
+        id: expense.id,
+        ...values,
+      },
+      { transaction }
+    );
+  }
+
+  await existingExpense.update(values, { transaction });
+
+  return existingExpense;
+}
+
+async function processExpenseDeleted(pdv, payload, transaction) {
+  const expense = payload.expense;
+  const expenseId = expense?.id || payload.expenseId || payload.despesa_id;
+
+  if (!expenseId) {
+    throw new Error('Evento de despesa sem identificador local.');
+  }
+
+  const existingExpense = await DespesaCaixa.findOne({
+    where: {
+      id: expenseId,
+      usuario_id: pdv.usuario_id,
+    },
+    transaction,
+  });
+
+  if (!existingExpense) {
+    return null;
+  }
+
+  await existingExpense.destroy({ transaction });
+
+  return existingExpense;
+}
+
 async function processDesktopSyncEvent(pdv, rawEvent) {
   const event = normalizeSyncEvent(rawEvent);
 
   if (!event.eventType || !event.aggregateType || !event.aggregateId || !event.idempotencyKey) {
     return {
-      id: event.id,
+      id: event.clientId,
       status: 'erro',
       message: 'Evento offline incompleto.',
     };
@@ -916,7 +1147,7 @@ async function processDesktopSyncEvent(pdv, rawEvent) {
 
   if (existing) {
     return {
-      id: event.id,
+      id: event.clientId,
       status: existing.status === 'processado' ? 'duplicado' : existing.status,
     };
   }
@@ -936,6 +1167,10 @@ async function processDesktopSyncEvent(pdv, rawEvent) {
       await processConvenioReceived(pdv, event.payload, transaction);
     } else if (event.eventType === 'despesa_lancada') {
       await processExpenseCreated(pdv, event.payload, transaction);
+    } else if (event.eventType === 'despesa_atualizada') {
+      await processExpenseUpdated(pdv, event.payload, transaction);
+    } else if (event.eventType === 'despesa_excluida') {
+      await processExpenseDeleted(pdv, event.payload, transaction);
     } else {
       throw new Error(`Tipo de evento não suportado: ${event.eventType}.`);
     }
@@ -962,14 +1197,14 @@ async function processDesktopSyncEvent(pdv, rawEvent) {
     await transaction.commit();
 
     return {
-      id: event.id,
+      id: event.clientId,
       status: 'processado',
     };
   } catch (error) {
     await transaction.rollback();
 
     return {
-      id: event.id,
+      id: event.clientId,
       status: 'erro',
       message: error.message,
     };
@@ -1063,7 +1298,7 @@ function resolveFiscalTipoEmissao(document, rawResult, data, status) {
   const value = normalizeText(document.tipo_emissao || data.tpEmis || data.tipoEmissao || rawResult.tipo_emissao, 24);
   const normalized = `${value} ${status} ${rawResult.status || ''}`.toLowerCase();
 
-  if (value === '9' || normalized.includes('contingencia') || normalized.includes('contingência')) {
+  if (['4', '5', '6', '7', '8', '9'].includes(value) || normalized.includes('contingencia') || normalized.includes('contingência')) {
     return 'contingencia';
   }
 
@@ -1073,6 +1308,10 @@ function resolveFiscalTipoEmissao(document, rawResult, data, status) {
 function resolveFiscalTotalCentavos(document, rawResult) {
   const payload = asObject(rawResult.payload || document.payload);
   const sale = asObject(payload.sale || payload.venda);
+  const data = asObject(rawResult.data);
+  const xmlProc = typeof data.xmlProc === 'string' ? data.xmlProc : '';
+  const xmlTotalMatch = xmlProc.match(/<vNF>(\d+(?:\.\d{1,2})?)<\/vNF>/);
+  const xmlTotalCents = xmlTotalMatch ? Math.round(Number(xmlTotalMatch[1]) * 100) : 0;
 
   return sanitizeCents(
     document.total_centavos ??
@@ -1080,7 +1319,8 @@ function resolveFiscalTotalCentavos(document, rawResult) {
       sale.totalCents ??
       sale.total_centavos ??
       payload.totalCents ??
-      payload.total_centavos
+      payload.total_centavos ??
+      xmlTotalCents
   );
 }
 
@@ -1114,12 +1354,135 @@ function buildFiscalReturnPayload(document, rawResult, data) {
   };
 }
 
+const maxFiscalXmlBytes = 8 * 1024 * 1024;
+
+function normalizeXmlContent(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const content = value.trim();
+
+  if (!content || !content.includes('<') || Buffer.byteLength(content, 'utf8') > maxFiscalXmlBytes) {
+    return null;
+  }
+
+  return content;
+}
+
+function firstXmlContent(...values) {
+  for (const value of values) {
+    const content = normalizeXmlContent(value);
+
+    if (content) {
+      return content;
+    }
+  }
+
+  return null;
+}
+
+function buildFiscalXmlPayload(document, rawResult, data) {
+  return {
+    enviado: firstXmlContent(
+      document.xml_enviado_conteudo,
+      document.xmlEnviadoConteudo,
+      document.xml_enviado,
+      document.xmlEnviado,
+      document.xml_assinado,
+      document.xmlAssinado,
+      data.xmlAssinado,
+      data.xmlEnviado
+    ),
+    autorizado: firstXmlContent(
+      document.xml_autorizado_conteudo,
+      document.xmlAutorizadoConteudo,
+      document.xml_proc,
+      document.xmlProc,
+      data.xmlProc,
+      rawResult.xmlProc
+    ),
+  };
+}
+
+function buildFiscalXmlOriginalName(values, tipoXml) {
+  const modelo = values.modelo === '55' ? 'nfe' : 'nfce';
+  const serie = String(values.serie || 'sem-serie').padStart(3, '0');
+  const numero = String(values.numero || 'sem-numero').padStart(9, '0');
+
+  return `${modelo}-serie-${serie}-${numero}-${tipoXml}.xml`;
+}
+
+function getFiscalXmlContext(tipoXml) {
+  if (tipoXml === 'autorizado') {
+    return 'nf_xml_autorizado';
+  }
+
+  if (tipoXml === 'enviado') {
+    return 'nf_xml_enviado';
+  }
+
+  return `nf_xml_${tipoXml}`;
+}
+
+function getTerminalFiscalEventXmlType(status) {
+  if (status === 'cancelada') {
+    return 'cancelamento';
+  }
+
+  if (status === 'inutilizada') {
+    return 'inutilizacao';
+  }
+
+  return null;
+}
+
+async function createFiscalXmlArquivo({ usuarioId, values, tipoXml, xmlContent, transaction, createdFilePaths }) {
+  const mimeType = 'application/xml';
+  const originalName = buildFiscalXmlOriginalName(values, tipoXml);
+  const storageDirectory = buildStorageDirectory(usuarioId, mimeType);
+  const storedFileName = buildStoredFileName({ originalname: originalName, mimetype: mimeType });
+  const absolutePath = path.join(storageDirectory, storedFileName);
+  const buffer = Buffer.from(xmlContent, 'utf8');
+
+  ensureDirectory(storageDirectory);
+  await fs.promises.writeFile(absolutePath, buffer);
+  createdFilePaths.push(absolutePath);
+
+  return Arquivo.create(
+    {
+      usuario_id: usuarioId,
+      nome_original: originalName,
+      nome_armazenado: storedFileName,
+      mime_type: mimeType,
+      extensao: 'xml',
+      tamanho_bytes: buffer.length,
+      tipo: 'xml',
+      contexto: getFiscalXmlContext(tipoXml),
+      visibilidade: 'privado',
+      caminho_relativo: toRelativePath(absolutePath),
+      metadados: {
+        origem: 'pdv_sync',
+        nf_id: values.id,
+        venda_id: values.venda_id,
+        chave_acesso: values.chave_acesso,
+        modelo: values.modelo,
+        serie: values.serie,
+        numero: values.numero,
+        tipo_xml: tipoXml,
+      },
+    },
+    { transaction }
+  );
+}
+
 function buildFiscalEventSummary(eventData) {
   return {
     tipo: eventData.tipo,
     status: eventData.status,
     codigo_retorno_sefaz: eventData.codigo_retorno_sefaz || null,
     mensagem: eventData.mensagem || null,
+    arquivo_xml_id: eventData.arquivo_xml_id || null,
     ocorrido_em: eventData.ocorrido_em.toISOString(),
   };
 }
@@ -1133,7 +1496,8 @@ async function appendFiscalEvent(nf, eventData, transaction) {
     lastEvent.tipo === eventData.tipo &&
     lastEvent.status === eventData.status &&
     String(lastEvent.codigo_retorno_sefaz || '') === String(eventData.codigo_retorno_sefaz || '') &&
-    String(lastEvent.mensagem || '') === String(eventData.mensagem || '')
+    String(lastEvent.mensagem || '') === String(eventData.mensagem || '') &&
+    String(lastEvent.arquivo_xml_id || '') === String(eventData.arquivo_xml_id || '')
   ) {
     return false;
   }
@@ -1147,6 +1511,7 @@ async function appendFiscalEvent(nf, eventData, transaction) {
       status: eventData.status,
       codigo_retorno_sefaz: eventData.codigo_retorno_sefaz || null,
       mensagem: eventData.mensagem || null,
+      arquivo_xml_id: eventData.arquivo_xml_id || null,
       detalhes: eventData.detalhes && typeof eventData.detalhes === 'object' ? eventData.detalhes : {},
       ocorrido_em: eventData.ocorrido_em,
     },
@@ -1220,15 +1585,20 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
   const codigoRetorno = getFiscalCode(document.codigo_retorno_sefaz || rawResult.codigoRetornoSefaz || data.cStat || data.codigoRetornoSefaz);
   const mensagemRetorno = normalizeText(document.mensagem_sefaz || rawResult.mensagemSefaz || data.xMotivo || rawResult.friendlyMessage, 1000) || null;
   const retornoSefaz = buildFiscalReturnPayload(document, rawResult, data);
+  const xmlPayload = buildFiscalXmlPayload(document, rawResult, data);
   const now = new Date();
   const emittedAt = getFiscalDate(document.created_at || document.createdAt || payload.createdAt) || now;
   const authorizedAt = status === 'autorizada'
     ? getFiscalDate(data.autorizadaEm || data.autorizada_em || document.updated_at || document.updatedAt) || now
     : null;
   const transaction = await sequelize.transaction();
+  const createdXmlFilePaths = [];
+  const terminalEventXmlType = getTerminalFiscalEventXmlType(status);
 
   try {
     let caixaId = null;
+    let resolvedVendaId = vendaId;
+    let missingVendaId = null;
 
     if (vendaId) {
       const venda = await Venda.findOne({
@@ -1240,12 +1610,8 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
       });
 
       if (!venda) {
-        await transaction.rollback();
-        return {
-          id: documentId,
-          status: 'erro',
-          message: 'Venda ainda não sincronizada na API.',
-        };
+        resolvedVendaId = null;
+        missingVendaId = vendaId;
       }
     }
 
@@ -1264,7 +1630,7 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
     const values = {
       id: documentId,
       usuario_id: pdv.usuario_id,
-      venda_id: vendaId,
+      venda_id: resolvedVendaId,
       pdv_id: pdv.id,
       caixa_id: caixaId,
       ambiente,
@@ -1290,7 +1656,9 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
         documento: {
           id: documentId,
           command: normalizeText(document.command, 64) || null,
-          venda_id: vendaId,
+          venda_id: resolvedVendaId,
+          venda_id_original: missingVendaId || vendaId,
+          venda_nao_encontrada: Boolean(missingVendaId),
           caixa_id: caixaId,
           log_path: document.log_path || null,
         },
@@ -1307,11 +1675,83 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
       status,
       codigo_retorno_sefaz: codigoRetorno,
       mensagem: mensagemRetorno || values.ultimo_erro_tecnico || null,
-      detalhes: retornoSefaz,
+      detalhes: {
+        ...retornoSefaz,
+        venda_id_original: missingVendaId || vendaId,
+        venda_nao_encontrada: Boolean(missingVendaId),
+      },
       ocorrido_em: now,
     };
     const existing = await findExistingFiscalDocument(pdv, values, transaction);
     let nf = existing;
+    let xmlEnviadoArquivoId = existing?.xml_enviado_arquivo_id || null;
+    let xmlAutorizadoArquivoId = existing?.xml_autorizado_arquivo_id || null;
+
+    if (!xmlEnviadoArquivoId && xmlPayload.enviado) {
+      const arquivo = await createFiscalXmlArquivo({
+        usuarioId: pdv.usuario_id,
+        values,
+        tipoXml: 'enviado',
+        xmlContent: xmlPayload.enviado,
+        transaction,
+        createdFilePaths: createdXmlFilePaths,
+      });
+
+      xmlEnviadoArquivoId = arquivo.id;
+    }
+
+    if (!xmlAutorizadoArquivoId && xmlPayload.autorizado && !terminalEventXmlType) {
+      if (xmlPayload.autorizado === xmlPayload.enviado && xmlEnviadoArquivoId) {
+        xmlAutorizadoArquivoId = xmlEnviadoArquivoId;
+      } else {
+        const arquivo = await createFiscalXmlArquivo({
+          usuarioId: pdv.usuario_id,
+          values,
+          tipoXml: 'autorizado',
+          xmlContent: xmlPayload.autorizado,
+          transaction,
+          createdFilePaths: createdXmlFilePaths,
+        });
+
+        xmlAutorizadoArquivoId = arquivo.id;
+      }
+    }
+
+    if (terminalEventXmlType) {
+      const existingEventWithXml = nf
+        ? await NfEvento.findOne({
+            where: {
+              nf_id: nf.id,
+              usuario_id: pdv.usuario_id,
+              status,
+              tipo: eventData.tipo,
+              arquivo_xml_id: { [Op.not]: null },
+            },
+            order: [['ocorrido_em', 'DESC']],
+            transaction,
+          })
+        : null;
+      let eventXmlArquivoId = existingEventWithXml?.arquivo_xml_id || null;
+      const terminalXmlContent = xmlPayload.autorizado || xmlPayload.enviado;
+
+      if (!eventXmlArquivoId && terminalXmlContent) {
+        const arquivo = await createFiscalXmlArquivo({
+          usuarioId: pdv.usuario_id,
+          values,
+          tipoXml: terminalEventXmlType,
+          xmlContent: terminalXmlContent,
+          transaction,
+          createdFilePaths: createdXmlFilePaths,
+        });
+
+        eventXmlArquivoId = arquivo.id;
+      }
+
+      eventData.arquivo_xml_id = eventXmlArquivoId;
+    }
+
+    values.xml_enviado_arquivo_id = xmlEnviadoArquivoId;
+    values.xml_autorizado_arquivo_id = xmlAutorizadoArquivoId;
 
     if (nf) {
       Object.assign(nf, {
@@ -1336,6 +1776,7 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
           status: eventData.status,
           codigo_retorno_sefaz: eventData.codigo_retorno_sefaz,
           mensagem: eventData.mensagem,
+          arquivo_xml_id: eventData.arquivo_xml_id || null,
           detalhes: eventData.detalhes,
           ocorrido_em: eventData.ocorrido_em,
         },
@@ -1344,6 +1785,7 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
     }
 
     await transaction.commit();
+    createdXmlFilePaths.length = 0;
 
     return {
       id: documentId,
@@ -1352,6 +1794,7 @@ async function processDesktopFiscalDocument(pdv, rawDocument) {
     };
   } catch (error) {
     await transaction.rollback();
+    createdXmlFilePaths.forEach(removePhysicalFile);
 
     if (error.name === 'SequelizeUniqueConstraintError') {
       return {
@@ -1407,7 +1850,7 @@ module.exports = {
     try {
       const pdvs = await listUserPdvs(req.user.id);
 
-      return res.json(sanitizePdvList(pdvs));
+      return res.json(await sanitizePdvList(pdvs));
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao listar PDVs.', detail: error.message });
     }
@@ -1464,8 +1907,9 @@ module.exports = {
 
       await pdv.save();
       const identificacao = await getVirtualIdentificacao(req.user.id, pdv.id);
+      const registrosVinculados = await getPdvRegistrosVinculados(req.user.id, pdv.id);
 
-      return res.json(sanitizePdv(pdv, { identificacao }));
+      return res.json(sanitizePdv(pdv, { identificacao, registros_vinculados: registrosVinculados }));
     } catch (error) {
       return handlePdvError(res, error, 'Erro ao atualizar PDV.');
     }
@@ -1479,10 +1923,63 @@ module.exports = {
         return res.status(404).json({ message: 'PDV não encontrado.' });
       }
 
+      const registrosVinculados = await getPdvRegistrosVinculados(req.user.id, pdv.id);
+
+      if (registrosVinculados > 0) {
+        await pdv.update({
+          ativo: false,
+          status: 'inativo',
+          codigo_pareamento_hash: null,
+          codigo_pareamento_expira_em: null,
+          codigo_pareamento_usado_em: null,
+          credencial_hash: null,
+        });
+        const identificacao = await getVirtualIdentificacao(req.user.id, pdv.id);
+
+        return res.json({
+          action: 'deactivated',
+          pdv: sanitizePdv(pdv, { identificacao, registros_vinculados: registrosVinculados }),
+          message: 'PDV desativado para preservar os registros vinculados.',
+        });
+      }
+
       await pdv.destroy();
-      return res.status(204).send();
+
+      return res.json({
+        action: 'deleted',
+        id: pdv.id,
+        message: 'PDV excluído.',
+      });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao excluir PDV.', detail: error.message });
+    }
+  },
+
+  async activate(req, res) {
+    try {
+      const pdv = await findUserPdv(req.user.id, req.params.id);
+
+      if (!pdv) {
+        return res.status(404).json({ message: 'PDV não encontrado.' });
+      }
+
+      if (!pdv.ativo) {
+        await pdv.update({
+          ativo: true,
+          status: 'pendente',
+        });
+      }
+
+      const identificacao = await getVirtualIdentificacao(req.user.id, pdv.id);
+      const registrosVinculados = await getPdvRegistrosVinculados(req.user.id, pdv.id);
+
+      return res.json({
+        action: 'activated',
+        pdv: sanitizePdv(pdv, { identificacao, registros_vinculados: registrosVinculados }),
+        message: 'PDV ativado.',
+      });
+    } catch (error) {
+      return handlePdvError(res, error, 'Erro ao ativar PDV.');
     }
   },
 
@@ -1492,6 +1989,10 @@ module.exports = {
 
       if (!pdv) {
         return res.status(404).json({ message: 'PDV não encontrado.' });
+      }
+
+      if (!pdv.ativo) {
+        return res.status(409).json({ message: 'Ative o PDV antes de gerar um código de pareamento.' });
       }
 
       const pairing = createPairingCode();
@@ -1565,10 +2066,16 @@ module.exports = {
         }
       );
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
+      const [configuracoes, funcionarioSnapshot] = await Promise.all([
+        configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
+        loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+      ]);
 
       return res.json({
         pdv: sanitizePdv(pdv, { identificacao }),
         credencial_dispositivo: credencial,
+        configuracoes,
+        ...funcionarioSnapshot,
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao parear PDV.', detail: error.message });
@@ -1589,12 +2096,16 @@ module.exports = {
       await pdv.save();
 
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
-      const configuracoes = await configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id);
+      const [configuracoes, funcionarioSnapshot] = await Promise.all([
+        configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
+        loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+      ]);
 
       return res.json({
         autenticado: true,
         pdv: sanitizePdv(pdv, { identificacao }),
         configuracoes,
+        ...funcionarioSnapshot,
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao validar sessão do PDV.', detail: error.message });
@@ -1646,16 +2157,18 @@ module.exports = {
       pdv.ultima_sincronizacao_em = now;
       await pdv.save();
 
-      const [snapshot, configuracoes, convenioSnapshot] = await Promise.all([
-        produtoController.loadSnapshot(pdv.usuario_id),
+      const [snapshot, configuracoes, convenioSnapshot, funcionarioSnapshot] = await Promise.all([
+        produtoController.loadSnapshot(pdv.usuario_id, { onlyActive: true }),
         configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopConvenioSnapshot(pdv.usuario_id),
+        loadDesktopFuncionariosSnapshot(pdv.usuario_id),
       ]);
 
       return res.json({
         ...snapshot,
         configuracoes,
         ...convenioSnapshot,
+        ...funcionarioSnapshot,
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao carregar catálogo do PDV.', detail: error.message });

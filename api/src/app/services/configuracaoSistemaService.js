@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const forge = require('node-forge');
-const { Arquivo, ConfiguracaoSistema } = require('../models');
+const { Arquivo, ConfiguracaoSistema, Nf } = require('../models');
 const authConfig = require('../../config/auth');
 const { toAbsolutePath } = require('./fileStorageService');
 
@@ -20,6 +20,10 @@ const defaultExpenseSettings = {
 
 const defaultEmployeeControlSettings = {
   ativo: false,
+};
+
+const defaultCommandSettings = {
+  ativo: true,
 };
 
 const fiscalEnvironmentKeys = ['homologacao', 'producao'];
@@ -290,6 +294,12 @@ function normalizeExpenseSettings(value = {}) {
 function normalizeEmployeeControlSettings(value = {}) {
   return {
     ativo: normalizeBoolean(value?.ativo, defaultEmployeeControlSettings.ativo),
+  };
+}
+
+function normalizeCommandSettings(value = {}) {
+  return {
+    ativo: normalizeBoolean(value?.ativo, defaultCommandSettings.ativo),
   };
 }
 
@@ -743,10 +753,98 @@ function sanitizeConfiguracao(configuracao, options = {}) {
     formas_pagamento: normalizePaymentMethods(data.formas_pagamento),
     lancar_despesas: normalizeExpenseSettings(data.lancar_despesas),
     controle_funcionarios: normalizeEmployeeControlSettings(data.controle_funcionarios),
+    comandas: normalizeCommandSettings(data.comandas),
     fiscal: sanitizeFiscalSettings(data.fiscal, options.fiscal),
     integracoes: sanitizeIntegrationSettings(data.integracoes),
     updated_at: data.updated_at ?? data.updatedAt ?? null,
   };
+}
+
+async function resolveNextFiscalNumberFromHistory(usuarioId, { ambiente, modelo, serie, fallback }) {
+  const normalizedSerie = normalizeInteger(serie, 1, { min: 1, max: 999 });
+  const configuredNextNumber = normalizeInteger(fallback, 1, { min: 1, max: 999999999 });
+  const lastNumber = await Nf.max('numero', {
+    where: {
+      usuario_id: usuarioId,
+      ambiente,
+      modelo,
+      serie: normalizedSerie,
+    },
+  });
+  const lastNumberValue = Number(lastNumber);
+  const historyNextNumber = Number.isFinite(lastNumberValue) && lastNumberValue > 0
+    ? Math.min(Math.floor(lastNumberValue) + 1, 999999999)
+    : 1;
+
+  return Math.max(configuredNextNumber, historyNextNumber);
+}
+
+async function applyFiscalHistoryNextNumbers(usuarioId, configuracao) {
+  const fiscal = configuracao?.fiscal;
+
+  if (!fiscal?.ambientes) {
+    return configuracao;
+  }
+
+  await Promise.all(fiscalEnvironmentKeys.map(async ambiente => {
+    const environment = fiscal.ambientes[ambiente];
+
+    if (!environment) {
+      return;
+    }
+
+    const nfceSerie = normalizeInteger(environment.nfce?.serie, defaultFiscalEnvironmentSettings.nfce.serie, {
+      min: 1,
+      max: 999,
+    });
+    const nfeSerie = normalizeInteger(environment.nfe?.serie, defaultFiscalEnvironmentSettings.nfe.serie, {
+      min: 1,
+      max: 999,
+    });
+
+    const [nextNfceNumber, nextNfeNumber] = await Promise.all([
+      resolveNextFiscalNumberFromHistory(usuarioId, {
+        ambiente,
+        modelo: '65',
+        serie: nfceSerie,
+        fallback: environment.nfce?.proximo_numero,
+      }),
+      resolveNextFiscalNumberFromHistory(usuarioId, {
+        ambiente,
+        modelo: '55',
+        serie: nfeSerie,
+        fallback: environment.nfe?.proximo_numero,
+      }),
+    ]);
+
+    environment.nfce = {
+      ...environment.nfce,
+      serie: nfceSerie,
+      proximo_numero: nextNfceNumber,
+    };
+    environment.nfe = {
+      ...environment.nfe,
+      serie: nfeSerie,
+      proximo_numero: nextNfeNumber,
+    };
+  }));
+
+  const activeEnvironment = fiscal.ambientes[fiscal.ambiente];
+
+  if (activeEnvironment) {
+    fiscal.ativo = activeEnvironment.ativo;
+    fiscal.certificado = activeEnvironment.certificado;
+    fiscal.nfce = activeEnvironment.nfce;
+    fiscal.nfe = activeEnvironment.nfe;
+  }
+
+  return configuracao;
+}
+
+async function sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao, options = {}) {
+  const sanitized = sanitizeConfiguracao(configuracao, options);
+
+  return applyFiscalHistoryNextNumbers(usuarioId, sanitized);
 }
 
 async function getOrCreateConfiguracao(usuarioId, options = {}) {
@@ -759,6 +857,7 @@ async function getOrCreateConfiguracao(usuarioId, options = {}) {
       formas_pagamento: defaultPaymentMethods,
       lancar_despesas: defaultExpenseSettings,
       controle_funcionarios: defaultEmployeeControlSettings,
+      comandas: defaultCommandSettings,
       fiscal: {},
       integracoes: defaultIntegrationSettings,
     },
@@ -780,7 +879,7 @@ async function getConfiguracaoSnapshot(usuarioId, options = {}) {
     await configuracao.save();
   }
 
-  return sanitizeConfiguracao(configuracao, sanitize);
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao, sanitize);
 }
 
 async function updatePaymentMethods(usuarioId, paymentMethods) {
@@ -798,7 +897,7 @@ async function updatePaymentMethods(usuarioId, paymentMethods) {
   configuracao.formas_pagamento = nextPaymentMethods;
   await configuracao.save();
 
-  return sanitizeConfiguracao(configuracao);
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
 }
 
 async function updateFiscalSettings(usuarioId, fiscalSettings) {
@@ -809,7 +908,43 @@ async function updateFiscalSettings(usuarioId, fiscalSettings) {
   configuracao.fiscal = nextFiscalSettings;
   await configuracao.save();
 
-  return sanitizeConfiguracao(configuracao);
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
+async function updateCommandSettings(usuarioId, commandSettings) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextCommandSettings = normalizeCommandSettings(commandSettings);
+
+  configuracao.comandas = nextCommandSettings;
+  await configuracao.save();
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
+async function updateExpenseSettings(usuarioId, expenseSettings) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextExpenseSettings = normalizeExpenseSettings(expenseSettings);
+
+  configuracao.lancar_despesas = nextExpenseSettings;
+  await configuracao.save();
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
+async function updateEmployeeControlSettings(usuarioId, employeeControlSettings) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextEmployeeControlSettings = normalizeEmployeeControlSettings(employeeControlSettings);
+
+  configuracao.controle_funcionarios = nextEmployeeControlSettings;
+  await configuracao.save();
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
+async function getCommandSettings(usuarioId) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+
+  return normalizeCommandSettings(configuracao.comandas);
 }
 
 async function updateIntegrationSettings(usuarioId, integrationSettings) {
@@ -819,7 +954,7 @@ async function updateIntegrationSettings(usuarioId, integrationSettings) {
   configuracao.integracoes = nextIntegrationSettings;
   await configuracao.save();
 
-  return sanitizeConfiguracao(configuracao);
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
 }
 
 async function getCnpjaApiKey(usuarioId) {
@@ -834,18 +969,28 @@ async function getCnpjaApiKey(usuarioId) {
 }
 
 module.exports = {
+  defaultCommandSettings,
+  defaultEmployeeControlSettings,
+  defaultExpenseSettings,
   defaultFiscalSettings,
   defaultIntegrationSettings,
   defaultPaymentMethods,
   decryptSecret,
   getCnpjaApiKey,
+  getCommandSettings,
   getConfiguracaoSnapshot,
+  normalizeCommandSettings,
+  normalizeEmployeeControlSettings,
+  normalizeExpenseSettings,
   normalizeIntegrationSettings,
   normalizeFiscalSettings,
   normalizePaymentMethods,
   sanitizeConfiguracao,
   sanitizeFiscalSettings,
   sanitizeIntegrationSettings,
+  updateCommandSettings,
+  updateEmployeeControlSettings,
+  updateExpenseSettings,
   updateFiscalSettings,
   updateIntegrationSettings,
   updatePaymentMethods,

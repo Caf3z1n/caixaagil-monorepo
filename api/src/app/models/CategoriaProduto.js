@@ -33,6 +33,11 @@ CategoriaProduto.init(
       allowNull: false,
       defaultValue: 0,
     },
+    ativo: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
   },
   {
     sequelize,

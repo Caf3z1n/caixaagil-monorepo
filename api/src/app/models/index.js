@@ -19,6 +19,7 @@ const DespesaCaixa = require('./DespesaCaixa');
 const ConferenciaCaixa = require('./ConferenciaCaixa');
 const EventoPdv = require('./EventoPdv');
 const ConfiguracaoSistema = require('./ConfiguracaoSistema');
+const Funcionario = require('./Funcionario');
 
 Usuario.hasMany(Assinatura, {
   foreignKey: 'usuario_id',
@@ -390,6 +391,16 @@ ClienteConvenio.belongsTo(Usuario, {
   as: 'usuario',
 });
 
+Usuario.hasMany(Funcionario, {
+  foreignKey: 'usuario_id',
+  as: 'funcionarios',
+});
+
+Funcionario.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
 ClienteConvenio.hasMany(Venda, {
   foreignKey: 'cliente_convenio_id',
   as: 'vendas',
@@ -491,6 +502,7 @@ module.exports = {
   DespesaCaixa,
   Estoque,
   EventoPdv,
+  Funcionario,
   GrupoFiscal,
   MovimentacaoEstoque,
   Nf,

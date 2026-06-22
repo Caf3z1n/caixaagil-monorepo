@@ -21,7 +21,21 @@ DespesaCaixa.init(
     },
     caixa_id: {
       type: DataTypes.STRING(64),
+      allowNull: true,
+    },
+    origem: {
+      type: DataTypes.STRING(24),
       allowNull: false,
+      defaultValue: 'pdv',
+    },
+    lancado_por_email: {
+      type: DataTypes.STRING(160),
+    },
+    lancado_por_tipo: {
+      type: DataTypes.STRING(24),
+    },
+    lancado_por_subconta_id: {
+      type: DataTypes.INTEGER,
     },
     descricao: {
       type: DataTypes.STRING(160),

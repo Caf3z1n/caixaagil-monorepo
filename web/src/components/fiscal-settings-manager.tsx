@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   Building2,
-  CalendarCheck2,
   Check,
   Eye,
   EyeOff,
@@ -281,25 +280,6 @@ function formatFiscalDate(value?: string | null) {
   return fiscalDateFormatter.format(date);
 }
 
-function getFiscalValidityTone(value?: string | null) {
-  if (!value) {
-    return "pending";
-  }
-
-  const expiration = new Date(`${value}T23:59:59Z`).getTime();
-  const daysUntilExpiration = Math.ceil((expiration - Date.now()) / 86400000);
-
-  if (daysUntilExpiration < 0) {
-    return "expired";
-  }
-
-  if (daysUntilExpiration <= 30) {
-    return "warning";
-  }
-
-  return "ready";
-}
-
 function normalizePositiveInteger(value: unknown, fallback: number, max = 999999999) {
   const parsed = Number(value);
 
@@ -466,12 +446,6 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
   const submitLabel = isCompanyMode ? "Salvar cadastro fiscal" : "Salvar";
   const ambienteLabel = draft.ambiente === "producao" ? "Produção" : "Homologação";
   const certificateValidityLabel = formatFiscalDate(draft.certificado.validade);
-  const certificateValidityTone = getFiscalValidityTone(draft.certificado.validade);
-  const certificateStatusLabel = draft.certificado.arquivo_id || certificateFile
-    ? certificateValidityLabel
-      ? `Válido até ${certificateValidityLabel}`
-      : "Validade pendente"
-    : "A1 não enviado";
 
   function updateEmitente(patch: Partial<FiscalIssuerSettings>) {
     setDraft(current => normalizeFiscalSettings({
@@ -856,29 +830,9 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
               <strong>Emissão fiscal</strong>
               <small>{ambienteLabel} usa certificado, séries e CSC próprios.</small>
             </div>
-            <em className={draft.ativo ? "fiscal-env-pill fiscal-env-pill-active" : "fiscal-env-pill"}>
-              {draft.ativo ? "Ativa" : "Inativa"}
-            </em>
           </header>
 
-          <div className="fiscal-issuance-headline">
-            <button
-              aria-checked={draft.ativo}
-              className={draft.ativo ? "fiscal-settings-toggle fiscal-settings-toggle-active" : "fiscal-settings-toggle"}
-              disabled={isSaving}
-              role="switch"
-              type="button"
-              onClick={() => updateActiveEnvironment({ ativo: !draft.ativo })}
-            >
-              <span className="configuration-switch" aria-hidden="true">
-                <span />
-              </span>
-              <span>
-                <strong>Emissão fiscal</strong>
-                <small>{draft.ativo ? "Ativa neste ambiente" : "Inativa neste ambiente"}</small>
-              </span>
-            </button>
-
+          <div className="fiscal-issuance-headline fiscal-issuance-headline-single">
             <label className="fiscal-environment-field fiscal-environment-card">
               <span>Ambiente</span>
               <PlatformSelect
@@ -896,7 +850,7 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
               <ShieldCheck aria-hidden="true" size={20} />
               <div>
                 <strong>Emissão desativada para {ambienteLabel.toLowerCase()}</strong>
-                <span>Ative para liberar certificado, numeração e CSC deste ambiente.</span>
+                <span>Ative no menu de configurações para liberar certificado, numeração e CSC.</span>
               </div>
             </div>
           ) : null}
@@ -941,12 +895,12 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
           </label>
 
           <label className="fiscal-field-span-5">
-            <span>Razão social</span>
+            <span>Nome fantasia</span>
             <input
               disabled={isSaving}
               maxLength={160}
-              value={draft.emitente.razao_social}
-              onChange={event => updateEmitente({ razao_social: event.currentTarget.value })}
+              value={draft.emitente.nome_fantasia}
+              onChange={event => updateEmitente({ nome_fantasia: event.currentTarget.value })}
             />
           </label>
 
@@ -962,12 +916,12 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
           </label>
 
           <label className="fiscal-field-span-8">
-            <span>Nome fantasia</span>
+            <span>Razão social</span>
             <input
               disabled={isSaving}
               maxLength={160}
-              value={draft.emitente.nome_fantasia}
-              onChange={event => updateEmitente({ nome_fantasia: event.currentTarget.value })}
+              value={draft.emitente.razao_social}
+              onChange={event => updateEmitente({ razao_social: event.currentTarget.value })}
             />
           </label>
 
@@ -1108,6 +1062,44 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
           </header>
 
           <div className="fiscal-certificate-card">
+            <div className="fiscal-certificate-details">
+              <div className="fiscal-certificate-title-row">
+                <span aria-hidden="true">
+                  <FileKey2 size={18} />
+                </span>
+                <div>
+                  <strong>{draft.certificado.nome_arquivo || "Nenhum certificado selecionado"}</strong>
+                  <small className="fiscal-certificate-subtitle">
+                    <span>{draft.certificado.emitido_para || "Titular será identificado ao salvar o A1."}</span>
+                    <em>{certificateValidityLabel ? `Validade ${certificateValidityLabel}` : "Validade será identificada pelo arquivo e senha."}</em>
+                  </small>
+                </div>
+              </div>
+
+              <div className="fiscal-certificate-config-row">
+                <label className="fiscal-secret-field fiscal-certificate-password-field">
+                  <span>Senha do A1</span>
+                  <div className="fiscal-secret-input fiscal-secret-input-inline">
+                    <input
+                      autoComplete="new-password"
+                      disabled={isSaving}
+                      type={showCertificatePassword ? "text" : "password"}
+                      value={draft.certificado.senha_pfx ?? ""}
+                      onChange={event => updateCertificado({ senha_pfx: event.currentTarget.value })}
+                    />
+                    <button
+                      aria-label={showCertificatePassword ? "Ocultar senha do A1" : "Mostrar senha do A1"}
+                      disabled={isSaving}
+                      type="button"
+                      onClick={() => setShowCertificatePassword(current => !current)}
+                    >
+                      {showCertificatePassword ? <EyeOff aria-hidden="true" size={17} /> : <Eye aria-hidden="true" size={17} />}
+                    </button>
+                  </div>
+                </label>
+              </div>
+            </div>
+
             <label className="fiscal-certificate-picker">
               <span aria-hidden="true">
                 <Upload size={18} />
@@ -1123,106 +1115,34 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
                 }}
               />
             </label>
-
-            <div className="fiscal-certificate-details">
-              <div className="fiscal-certificate-title-row">
-                <strong>{draft.certificado.nome_arquivo || "Nenhum certificado selecionado"}</strong>
-                <em className={`fiscal-certificate-validity fiscal-certificate-validity-${certificateValidityTone}`}>
-                  {certificateStatusLabel}
-                </em>
-              </div>
-              <div className="fiscal-certificate-meta-grid">
-                <span>
-                  <FileKey2 aria-hidden="true" size={16} />
-                  <strong>Titular</strong>
-                  <small>{draft.certificado.emitido_para || "Será identificado ao salvar o A1."}</small>
-                </span>
-                <span>
-                  <CalendarCheck2 aria-hidden="true" size={16} />
-                  <strong>Validade</strong>
-                  <small>
-                    {certificateValidityLabel || "Será identificada pelo arquivo e senha."}
-                  </small>
-                </span>
-              </div>
-            </div>
           </div>
-
-          <label className="fiscal-secret-field fiscal-certificate-password-field">
-            <span>Senha do A1</span>
-            <div className="fiscal-secret-input">
-              <input
-                autoComplete="new-password"
-                disabled={isSaving}
-                type={showCertificatePassword ? "text" : "password"}
-                value={draft.certificado.senha_pfx ?? ""}
-                onChange={event => updateCertificado({ senha_pfx: event.currentTarget.value })}
-              />
-              <button
-                aria-label={showCertificatePassword ? "Ocultar senha do A1" : "Mostrar senha do A1"}
-                disabled={isSaving}
-                type="button"
-                onClick={() => setShowCertificatePassword(current => !current)}
-              >
-                {showCertificatePassword ? <EyeOff aria-hidden="true" size={17} /> : <Eye aria-hidden="true" size={17} />}
-              </button>
-            </div>
-          </label>
         </section>
       ) : null}
 
       {isIssuanceMode && draft.ativo ? (
-        <section className="fiscal-form-section fiscal-settings-section fiscal-numbering-section">
+        <section className="fiscal-form-section fiscal-settings-section fiscal-csc-section">
           <header className="fiscal-settings-section-head">
             <span aria-hidden="true">
-              <Hash size={18} />
+              <KeyRound size={18} />
             </span>
-            <strong>Numeração e CSC</strong>
+            <strong>CSC da NFC-e</strong>
           </header>
 
-          <div className="fiscal-numbering-group">
-            <div className="fiscal-numbering-label">
-              <ReceiptText aria-hidden="true" size={17} />
-              <strong>NFC-e</strong>
+          <div className="fiscal-csc-card">
+            <div className="fiscal-number-card-head fiscal-csc-card-head">
+              <span aria-hidden="true">
+                <ReceiptText size={18} />
+              </span>
+              <div>
+                <strong>Token do consumidor</strong>
+                <small>QR Code e consulta da NFC-e.</small>
+              </div>
             </div>
-            <div className="fiscal-form-grid fiscal-numbering-grid fiscal-numbering-grid-nfce">
-              <label>
-                <span>Série</span>
-                <input
-                  disabled={isSaving}
-                  inputMode="numeric"
-                  min={1}
-                  type="number"
-                  value={draft.nfce.serie}
-                  onChange={event => updateNfce({ serie: normalizePositiveInteger(event.currentTarget.value, 1, 999) })}
-                />
-              </label>
 
-              <label>
-                <span>Próxima nota</span>
-                <input
-                  disabled={isSaving}
-                  inputMode="numeric"
-                  min={1}
-                  type="number"
-                  value={draft.nfce.proximo_numero}
-                  onChange={event => updateNfce({ proximo_numero: normalizePositiveInteger(event.currentTarget.value, 1) })}
-                />
-              </label>
-
-              <label>
-                <span>ID CSC</span>
-                <input
-                  disabled={isSaving}
-                  maxLength={12}
-                  value={draft.nfce.csc_id}
-                  onChange={event => updateNfce({ csc_id: event.currentTarget.value.trim() })}
-                />
-              </label>
-
-              <label className="fiscal-secret-field">
+            <div className="fiscal-form-grid fiscal-csc-grid">
+              <label className="fiscal-secret-field fiscal-csc-token-field">
                 <span>Chave CSC</span>
-                <div className="fiscal-secret-input">
+                <div className="fiscal-secret-input fiscal-secret-input-inline">
                   <input
                     autoComplete="new-password"
                     disabled={isSaving}
@@ -1240,38 +1160,103 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
                   </button>
                 </div>
               </label>
+
+              <label>
+                <span>ID CSC</span>
+                <input
+                  disabled={isSaving}
+                  maxLength={12}
+                  value={draft.nfce.csc_id}
+                  onChange={event => updateNfce({ csc_id: event.currentTarget.value.trim() })}
+                />
+              </label>
             </div>
           </div>
+        </section>
+      ) : null}
 
-          <div className="fiscal-numbering-group fiscal-numbering-group-nfe">
-            <div className="fiscal-numbering-label">
-              <KeyRound aria-hidden="true" size={17} />
-              <strong>NF-e</strong>
+      {isIssuanceMode && draft.ativo ? (
+        <section className="fiscal-form-section fiscal-settings-section fiscal-numbering-section">
+          <header className="fiscal-settings-section-head">
+            <span aria-hidden="true">
+              <Hash size={18} />
+            </span>
+            <strong>Numeração</strong>
+          </header>
+
+          <div className="fiscal-numbering-cards">
+            <div className="fiscal-number-card">
+              <div className="fiscal-number-card-head">
+                <span aria-hidden="true">
+                  <ReceiptText size={18} />
+                </span>
+                <div>
+                  <strong>NFC-e</strong>
+                  <small>Documento fiscal para pessoa física.</small>
+                </div>
+              </div>
+              <div className="fiscal-form-grid fiscal-numbering-grid fiscal-numbering-grid-nfce">
+                <label>
+                  <span>Série</span>
+                  <input
+                    disabled={isSaving}
+                    inputMode="numeric"
+                    min={1}
+                    type="number"
+                    value={draft.nfce.serie}
+                    onChange={event => updateNfce({ serie: normalizePositiveInteger(event.currentTarget.value, 1, 999) })}
+                  />
+                </label>
+
+                <label>
+                  <span>Próxima nota</span>
+                  <input
+                    disabled={isSaving}
+                    inputMode="numeric"
+                    min={1}
+                    type="number"
+                    value={draft.nfce.proximo_numero}
+                    onChange={event => updateNfce({ proximo_numero: normalizePositiveInteger(event.currentTarget.value, 1) })}
+                  />
+                </label>
+              </div>
             </div>
-            <div className="fiscal-form-grid fiscal-numbering-grid fiscal-numbering-grid-nfe">
-              <label>
-                <span>Série</span>
-                <input
-                  disabled={isSaving}
-                  inputMode="numeric"
-                  min={1}
-                  type="number"
-                  value={draft.nfe.serie}
-                  onChange={event => updateNfe({ serie: normalizePositiveInteger(event.currentTarget.value, 1, 999) })}
-                />
-              </label>
 
-              <label>
-                <span>Próxima nota</span>
-                <input
-                  disabled={isSaving}
-                  inputMode="numeric"
-                  min={1}
-                  type="number"
-                  value={draft.nfe.proximo_numero}
-                  onChange={event => updateNfe({ proximo_numero: normalizePositiveInteger(event.currentTarget.value, 1) })}
-                />
-              </label>
+            <div className="fiscal-number-card">
+              <div className="fiscal-number-card-head">
+                <span aria-hidden="true">
+                  <FileKey2 size={18} />
+                </span>
+                <div>
+                  <strong>NF-e</strong>
+                  <small>Documento fiscal para pessoa jurídica.</small>
+                </div>
+              </div>
+              <div className="fiscal-form-grid fiscal-numbering-grid fiscal-numbering-grid-nfe">
+                <label>
+                  <span>Série</span>
+                  <input
+                    disabled={isSaving}
+                    inputMode="numeric"
+                    min={1}
+                    type="number"
+                    value={draft.nfe.serie}
+                    onChange={event => updateNfe({ serie: normalizePositiveInteger(event.currentTarget.value, 1, 999) })}
+                  />
+                </label>
+
+                <label>
+                  <span>Próxima nota</span>
+                  <input
+                    disabled={isSaving}
+                    inputMode="numeric"
+                    min={1}
+                    type="number"
+                    value={draft.nfe.proximo_numero}
+                    onChange={event => updateNfe({ proximo_numero: normalizePositiveInteger(event.currentTarget.value, 1) })}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </section>

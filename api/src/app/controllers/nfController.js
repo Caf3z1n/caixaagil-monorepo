@@ -1,5 +1,7 @@
 const { ulid } = require('ulid');
 const { Op } = require('sequelize');
+const fs = require('fs');
+const path = require('path');
 const {
   Arquivo,
   Caixa,
@@ -9,6 +11,13 @@ const {
   Venda,
 } = require('../models');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
+const {
+  buildStorageDirectory,
+  buildStoredFileName,
+  ensureDirectory,
+  removePhysicalFile,
+  toRelativePath,
+} = require('../services/fileStorageService');
 
 const allowedStatuses = new Set([
   'rascunho',
@@ -100,6 +109,26 @@ function sanitizeDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function sanitizeDateFilter(value, boundary = 'start') {
+  const rawValue = normalizeText(value, 24);
+
+  if (!rawValue) {
+    return null;
+  }
+
+  const dateOnlyMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (dateOnlyMatch) {
+    const [, year, month, day] = dateOnlyMatch;
+
+    return boundary === 'end'
+      ? new Date(Number(year), Number(month) - 1, Number(day), 23, 59, 59, 999)
+      : new Date(Number(year), Number(month) - 1, Number(day), 0, 0, 0, 0);
+  }
+
+  return sanitizeDate(rawValue);
+}
+
 function toIso(value) {
   if (!value) {
     return null;
@@ -127,6 +156,212 @@ function sanitizeArquivoResumo(arquivo) {
   };
 }
 
+const maxFiscalXmlBytes = 8 * 1024 * 1024;
+
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function normalizeXmlContent(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const content = value.trim();
+
+  if (!content || !content.includes('<') || Buffer.byteLength(content, 'utf8') > maxFiscalXmlBytes) {
+    return null;
+  }
+
+  return content;
+}
+
+function firstXmlContent(...values) {
+  for (const value of values) {
+    const content = normalizeXmlContent(value);
+
+    if (content) {
+      return content;
+    }
+  }
+
+  return null;
+}
+
+function buildNfXmlPayload(nfData) {
+  const retornoSefaz = asObject(nfData.retorno_sefaz);
+  const resposta = asObject(retornoSefaz.resposta);
+  const responseData = asObject(resposta.data);
+  const payload = asObject(nfData.payload);
+
+  return {
+    enviado: firstXmlContent(
+      responseData.xmlAssinado,
+      responseData.xmlEnviado,
+      resposta.xmlAssinado,
+      resposta.xmlEnviado,
+      payload.xmlAssinado,
+      payload.xmlEnviado
+    ),
+    autorizado: firstXmlContent(
+      responseData.xmlProc,
+      responseData.xmlAutorizado,
+      resposta.xmlProc,
+      resposta.xmlAutorizado,
+      retornoSefaz.xmlProc,
+      payload.xmlProc
+    ),
+  };
+}
+
+function buildNfXmlOriginalName(nfData, tipoXml) {
+  const modelo = nfData.modelo === '55' ? 'nfe' : 'nfce';
+  const serie = String(nfData.serie || 'sem-serie').padStart(3, '0');
+  const numero = String(nfData.numero || 'sem-numero').padStart(9, '0');
+
+  return `${modelo}-serie-${serie}-${numero}-${tipoXml}.xml`;
+}
+
+function getNfXmlContext(tipoXml) {
+  if (tipoXml === 'autorizado') {
+    return 'nf_xml_autorizado';
+  }
+
+  if (tipoXml === 'enviado') {
+    return 'nf_xml_enviado';
+  }
+
+  return `nf_xml_${tipoXml}`;
+}
+
+function getTerminalNfEventXmlType(status) {
+  if (status === 'cancelada') {
+    return 'cancelamento';
+  }
+
+  if (status === 'inutilizada') {
+    return 'inutilizacao';
+  }
+
+  return null;
+}
+
+async function createNfXmlArquivo(usuarioId, nfData, tipoXml, xmlContent) {
+  const mimeType = 'application/xml';
+  const originalName = buildNfXmlOriginalName(nfData, tipoXml);
+  const storageDirectory = buildStorageDirectory(usuarioId, mimeType);
+  const storedFileName = buildStoredFileName({ originalname: originalName, mimetype: mimeType });
+  const absolutePath = path.join(storageDirectory, storedFileName);
+  const buffer = Buffer.from(xmlContent, 'utf8');
+
+  ensureDirectory(storageDirectory);
+  await fs.promises.writeFile(absolutePath, buffer);
+
+  try {
+    return await Arquivo.create({
+      usuario_id: usuarioId,
+      nome_original: originalName,
+      nome_armazenado: storedFileName,
+      mime_type: mimeType,
+      extensao: 'xml',
+      tamanho_bytes: buffer.length,
+      tipo: 'xml',
+      contexto: getNfXmlContext(tipoXml),
+      visibilidade: 'privado',
+      caminho_relativo: toRelativePath(absolutePath),
+      metadados: {
+        origem: 'nf_backfill',
+        nf_id: nfData.id,
+        venda_id: nfData.venda_id || null,
+        chave_acesso: nfData.chave_acesso || null,
+        modelo: nfData.modelo,
+        serie: nfData.serie,
+        numero: nfData.numero,
+        tipo_xml: tipoXml,
+      },
+    });
+  } catch (error) {
+    removePhysicalFile(absolutePath);
+    throw error;
+  }
+}
+
+async function ensureNfXmlArquivos(nf) {
+  const nfData = getPlain(nf);
+  const xmlPayload = buildNfXmlPayload(nfData);
+  let xmlEnviadoArquivoId = nfData.xml_enviado_arquivo_id || null;
+  let xmlAutorizadoArquivoId = nfData.xml_autorizado_arquivo_id || null;
+  let changed = false;
+  const terminalXmlType = getTerminalNfEventXmlType(nfData.status);
+
+  if (!xmlEnviadoArquivoId && xmlPayload.enviado) {
+    const arquivo = await createNfXmlArquivo(nf.usuario_id, nfData, 'enviado', xmlPayload.enviado);
+    xmlEnviadoArquivoId = arquivo.id;
+    changed = true;
+  }
+
+  if (!xmlAutorizadoArquivoId && xmlPayload.autorizado && !terminalXmlType) {
+    if (xmlPayload.autorizado === xmlPayload.enviado && xmlEnviadoArquivoId) {
+      xmlAutorizadoArquivoId = xmlEnviadoArquivoId;
+    } else {
+      const arquivo = await createNfXmlArquivo(nf.usuario_id, nfData, 'autorizado', xmlPayload.autorizado);
+      xmlAutorizadoArquivoId = arquivo.id;
+    }
+
+    changed = true;
+  }
+
+  if (changed) {
+    nf.xml_enviado_arquivo_id = xmlEnviadoArquivoId;
+    nf.xml_autorizado_arquivo_id = xmlAutorizadoArquivoId;
+    await nf.save();
+  }
+
+  if (terminalXmlType) {
+    const existingTerminalEvent = await NfEvento.findOne({
+      where: {
+        nf_id: nf.id,
+        usuario_id: nf.usuario_id,
+        status: nfData.status,
+        arquivo_xml_id: { [Op.not]: null },
+      },
+      order: [['ocorrido_em', 'DESC']],
+    });
+    const terminalXmlContent = xmlPayload.autorizado || xmlPayload.enviado;
+
+    if (!existingTerminalEvent && terminalXmlContent) {
+      const arquivo = await createNfXmlArquivo(nf.usuario_id, nfData, terminalXmlType, terminalXmlContent);
+      const now = new Date();
+      const eventSummary = {
+        tipo: terminalXmlType,
+        status: nfData.status,
+        codigo_retorno_sefaz: nfData.codigo_retorno_sefaz || null,
+        mensagem: nfData.mensagem_retorno_sefaz || nfData.ultimo_erro_tecnico || null,
+        arquivo_xml_id: arquivo.id,
+        ocorrido_em: now.toISOString(),
+      };
+
+      nf.eventos = [...(Array.isArray(nfData.eventos) ? nfData.eventos : []), eventSummary].slice(-80);
+      await NfEvento.create({
+        nf_id: nf.id,
+        usuario_id: nf.usuario_id,
+        tipo: terminalXmlType,
+        status: nfData.status,
+        codigo_retorno_sefaz: nfData.codigo_retorno_sefaz || null,
+        mensagem: nfData.mensagem_retorno_sefaz || nfData.ultimo_erro_tecnico || null,
+        arquivo_xml_id: arquivo.id,
+        detalhes: { origem: 'nf_xml_backfill' },
+        ocorrido_em: now,
+      });
+      await nf.save();
+
+      return true;
+    }
+  }
+
+  return changed;
+}
+
 function sanitizeEvento(evento) {
   const data = getPlain(evento);
 
@@ -138,10 +373,46 @@ function sanitizeEvento(evento) {
     codigo_retorno_sefaz: data.codigo_retorno_sefaz || null,
     mensagem: data.mensagem || null,
     arquivo_xml_id: data.arquivo_xml_id || null,
+    arquivo_xml: sanitizeArquivoResumo(data.arquivo_xml),
     detalhes: data.detalhes && typeof data.detalhes === 'object' ? data.detalhes : {},
     ocorrido_em: toIso(data.ocorrido_em),
     created_at: toIso(data.created_at),
   };
+}
+
+function getNfEventoInclude() {
+  return {
+    model: NfEvento,
+    as: 'historico',
+    required: false,
+    include: [{ model: Arquivo, as: 'arquivo_xml', required: false }],
+  };
+}
+
+async function attachHistoricoToNfs(nfs, usuarioId) {
+  if (!nfs.length) {
+    return;
+  }
+
+  const eventos = await NfEvento.findAll({
+    where: {
+      usuario_id: usuarioId,
+      nf_id: nfs.map(nf => nf.id),
+    },
+    include: [{ model: Arquivo, as: 'arquivo_xml', required: false }],
+    order: [['ocorrido_em', 'DESC']],
+  });
+  const eventosByNfId = new Map();
+
+  for (const evento of eventos) {
+    const list = eventosByNfId.get(evento.nf_id) || [];
+    list.push(evento);
+    eventosByNfId.set(evento.nf_id, list);
+  }
+
+  for (const nf of nfs) {
+    nf.setDataValue('historico', eventosByNfId.get(nf.id) || []);
+  }
 }
 
 function sanitizeNf(nf, { includePayload = false } = {}) {
@@ -189,6 +460,14 @@ function createNfId() {
   return `nf-${ulid().toLowerCase()}`;
 }
 
+function getNfArquivoIncludes() {
+  return [
+    { model: Arquivo, as: 'xml_enviado', required: false },
+    { model: Arquivo, as: 'xml_autorizado', required: false },
+    { model: Arquivo, as: 'danfe_pdf', required: false },
+  ];
+}
+
 function getFiscalDefaults(fiscal, modelo, ambiente) {
   const targetAmbiente = normalizeAmbiente(ambiente, fiscal?.ambiente);
   const environmentConfig = fiscal?.ambientes?.[targetAmbiente] || fiscal || {};
@@ -220,6 +499,7 @@ async function appendNfEvent(nf, eventData) {
     status: eventData.status,
     codigo_retorno_sefaz: eventData.codigo_retorno_sefaz || null,
     mensagem: eventData.mensagem || null,
+    arquivo_xml_id: eventData.arquivo_xml_id || null,
     ocorrido_em: now.toISOString(),
   };
 
@@ -252,6 +532,9 @@ module.exports = {
     const modelo = normalizeModelo(req.query.modelo, '');
     const ambiente = normalizeText(req.query.ambiente, 20);
     const termo = normalizeText(req.query.q, 80);
+    const dataInicio = sanitizeDateFilter(req.query.data_inicio || req.query.dataInicio, 'start');
+    const dataFim = sanitizeDateFilter(req.query.data_fim || req.query.dataFim, 'end');
+    const andConditions = [];
 
     if (status && allowedStatuses.has(status)) {
       where.status = status;
@@ -267,27 +550,55 @@ module.exports = {
 
     if (termo) {
       const numero = Number(termo);
-
-      where[Op.or] = [
+      const searchConditions = [
         { chave_acesso: { [Op.iLike]: `%${termo}%` } },
         { protocolo_autorizacao: { [Op.iLike]: `%${termo}%` } },
       ];
 
       if (Number.isInteger(numero)) {
-        where[Op.or].push({ numero });
+        searchConditions.push({ numero });
       }
+
+      andConditions.push({ [Op.or]: searchConditions });
+    }
+
+    if (dataInicio || dataFim) {
+      const dateRange = {};
+
+      if (dataInicio) {
+        dateRange[Op.gte] = dataInicio;
+      }
+
+      if (dataFim) {
+        dateRange[Op.lte] = dataFim;
+      }
+
+      andConditions.push({
+        [Op.or]: [
+          { emitida_em: dateRange },
+          { emitida_em: null, created_at: dateRange },
+        ],
+      });
+    }
+
+    if (andConditions.length > 0) {
+      where[Op.and] = andConditions;
     }
 
     const { rows, count } = await Nf.findAndCountAll({
       where,
-      include: [
-        { model: Arquivo, as: 'xml_autorizado', required: false },
-        { model: Arquivo, as: 'danfe_pdf', required: false },
-      ],
+      include: getNfArquivoIncludes(),
       order: [['created_at', 'DESC']],
       limit,
       offset,
     });
+    const materializedXml = await Promise.all(rows.map(nf => ensureNfXmlArquivos(nf).catch(() => false)));
+
+    if (materializedXml.some(Boolean)) {
+      await Promise.all(rows.map(nf => nf.reload({ include: getNfArquivoIncludes() })));
+    }
+
+    await attachHistoricoToNfs(rows, req.user.id);
 
     return res.json({
       items: rows.map(nf => sanitizeNf(nf)),
@@ -386,16 +697,27 @@ module.exports = {
         { model: Venda, as: 'venda', required: false },
         { model: Pdv, as: 'pdv', required: false },
         { model: Caixa, as: 'caixa', required: false },
-        { model: Arquivo, as: 'xml_enviado', required: false },
-        { model: Arquivo, as: 'xml_autorizado', required: false },
-        { model: Arquivo, as: 'danfe_pdf', required: false },
-        { model: NfEvento, as: 'historico', required: false },
+        ...getNfArquivoIncludes(),
+        getNfEventoInclude(),
       ],
       order: [[{ model: NfEvento, as: 'historico' }, 'ocorrido_em', 'DESC']],
     });
 
     if (!nf) {
       return res.status(404).json({ message: 'Nota fiscal não encontrada.' });
+    }
+
+    if (await ensureNfXmlArquivos(nf).catch(() => false)) {
+      await nf.reload({
+        include: [
+          { model: Venda, as: 'venda', required: false },
+          { model: Pdv, as: 'pdv', required: false },
+          { model: Caixa, as: 'caixa', required: false },
+          ...getNfArquivoIncludes(),
+          getNfEventoInclude(),
+        ],
+        order: [[{ model: NfEvento, as: 'historico' }, 'ocorrido_em', 'DESC']],
+      });
     }
 
     return res.json(sanitizeNf(nf, { includePayload: true }));

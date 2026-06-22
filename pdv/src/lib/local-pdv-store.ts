@@ -65,11 +65,13 @@ export type FiscalDocumentRecord = {
   protocolo: string | null;
   xml_enviado_path: string | null;
   xml_autorizado_path: string | null;
+  xml_enviado_conteudo?: string | null;
+  xml_autorizado_conteudo?: string | null;
   pdf_path: string | null;
   impressao_status: string | null;
   raw_result: unknown;
   log_path: string | null;
-  sync_status?: "pending" | "synced" | "failed" | string | null;
+  sync_status?: "pending" | "synced" | "failed" | "ignored" | string | null;
   sync_attempts?: number | null;
   sync_error?: string | null;
   synced_at?: string | null;
@@ -97,6 +99,10 @@ export type LocalPdvStoreBridge = {
     eventIds: string[];
     error?: string;
   }): Promise<{ ok: true; updated: number }>;
+  ignoreEvents?(payload: {
+    scope: string;
+    eventIds: string[];
+  }): Promise<{ ok: true; updated: number }>;
   getFailedEvents?(payload: { scope: string; limit?: number }): Promise<LocalPdvStorePendingEvent[]>;
   retryFailedEvents(payload: { scope: string }): Promise<{ ok: true; pending: number }>;
   getPendingFiscalDocuments?(payload: { scope: string; limit?: number }): Promise<FiscalDocumentRecord[]>;
@@ -110,6 +116,10 @@ export type LocalPdvStoreBridge = {
     scope: string;
     documentIds: string[];
     error?: string;
+  }): Promise<{ ok: true; updated: number }>;
+  ignoreFiscalDocuments?(payload: {
+    scope: string;
+    documentIds: string[];
   }): Promise<{ ok: true; updated: number }>;
   getShiftPreview(payload: { scope: string; dateKey: string; minimumShiftNumber?: number }): Promise<{ shiftNumber: number }>;
   reserveShiftNumber(payload: { scope: string; dateKey: string; minimumShiftNumber?: number }): Promise<{ shiftNumber: number }>;
@@ -137,7 +147,7 @@ declare global {
 }
 
 type StoredFallbackEvent = LocalPdvStorePendingEvent & {
-  status: "pending" | "synced" | "failed";
+  status: "pending" | "synced" | "failed" | "ignored";
 };
 
 const fallbackStatePrefix = "caixaagil:pdv:fallback:state:";
@@ -204,6 +214,33 @@ function createFallbackId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function hashFallbackText(value: string) {
+  let primaryHash = 2166136261;
+  let secondaryHash = 2166136261 ^ value.length;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const charCode = value.charCodeAt(index);
+    primaryHash ^= charCode;
+    primaryHash = Math.imul(primaryHash, 16777619);
+    secondaryHash ^= charCode + index;
+    secondaryHash = Math.imul(secondaryHash, 16777619);
+  }
+
+  return `${(primaryHash >>> 0).toString(36).padStart(7, "0")}${(secondaryHash >>> 0).toString(36).padStart(7, "0")}`;
+}
+
+function normalizeLocalEventId(value: unknown, prefix: string) {
+  const rawValue = typeof value === "string" ? value.trim() : "";
+  const eventId = rawValue || createFallbackId(prefix);
+
+  if (eventId.length <= 64) {
+    return eventId;
+  }
+
+  const digest = hashFallbackText(eventId).slice(0, 12);
+  return `${eventId.slice(0, 63 - digest.length)}-${digest}`;
+}
+
 function sanitizeEventIds(eventIds: string[]) {
   return Array.isArray(eventIds) ? eventIds.filter(Boolean) : [];
 }
@@ -258,7 +295,7 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
     async enqueueEvent({ scope, eventType, aggregateType, aggregateId, payload }) {
       const events = readEvents(scope);
       const createdAt = new Date().toISOString();
-      const id = payload?.eventId || createFallbackId("evento");
+      const id = normalizeLocalEventId(payload?.eventId, "evento");
       const idempotencyKey = `${scope}:${eventType}:${aggregateId}:${id}`;
 
       if (!events.some((event) => event.id === id || event.idempotency_key === idempotencyKey)) {
@@ -340,7 +377,7 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
       let updated = 0;
 
       const nextEvents = events.map((event) => {
-        if (!ids.includes(event.id)) {
+        if (!ids.includes(event.id) || event.status === "synced" || event.status === "ignored") {
           return event;
         }
 
@@ -376,6 +413,31 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
           attempts: event.attempts + 1,
           updated_at: updatedAt,
           last_error: String(error || "Falha ao sincronizar evento.")
+        };
+      });
+
+      writeEvents(scope, nextEvents);
+
+      return { ok: true, updated };
+    },
+
+    async ignoreEvents({ scope, eventIds }) {
+      const ids = sanitizeEventIds(eventIds);
+      const updatedAt = new Date().toISOString();
+      const events = readEvents(scope);
+      let updated = 0;
+
+      const nextEvents = events.map((event) => {
+        if (!ids.includes(event.id)) {
+          return event;
+        }
+
+        updated += 1;
+        return {
+          ...event,
+          status: "ignored" as const,
+          updated_at: updatedAt,
+          last_error: event.last_error || "Ignorado pelo operador."
         };
       });
 
@@ -497,7 +559,9 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
       let updated = 0;
 
       const nextDocuments = readJson<FiscalDocumentRecord[]>(getFiscalDocumentsKey(scope), []).map((document) => {
-        if (!ids.has(document.id)) {
+        const syncStatus = document.sync_status ?? "pending";
+
+        if (!ids.has(document.id) || syncStatus === "synced" || syncStatus === "ignored") {
           return document;
         }
 
@@ -532,6 +596,29 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
           sync_status: "failed",
           sync_attempts: Number(document.sync_attempts || 0) + 1,
           sync_error: String(error || "Falha ao sincronizar documento fiscal."),
+          updated_at: updatedAt
+        };
+      });
+
+      writeJson(getFiscalDocumentsKey(scope), nextDocuments);
+      return { ok: true, updated };
+    },
+
+    async ignoreFiscalDocuments({ scope, documentIds }) {
+      const ids = new Set(documentIds.filter(Boolean));
+      const updatedAt = new Date().toISOString();
+      let updated = 0;
+
+      const nextDocuments = readJson<FiscalDocumentRecord[]>(getFiscalDocumentsKey(scope), []).map((document) => {
+        if (!ids.has(document.id)) {
+          return document;
+        }
+
+        updated += 1;
+        return {
+          ...document,
+          sync_status: "ignored",
+          sync_error: document.sync_error || "Ignorado pelo operador.",
           updated_at: updatedAt
         };
       });

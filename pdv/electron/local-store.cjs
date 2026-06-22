@@ -194,6 +194,33 @@ function createLocalPdvStore(app) {
     return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
+  function hashText(value) {
+    let primaryHash = 2166136261;
+    let secondaryHash = 2166136261 ^ value.length;
+
+    for (let index = 0; index < value.length; index += 1) {
+      const charCode = value.charCodeAt(index);
+      primaryHash ^= charCode;
+      primaryHash = Math.imul(primaryHash, 16777619);
+      secondaryHash ^= charCode + index;
+      secondaryHash = Math.imul(secondaryHash, 16777619);
+    }
+
+    return `${(primaryHash >>> 0).toString(36).padStart(7, "0")}${(secondaryHash >>> 0).toString(36).padStart(7, "0")}`;
+  }
+
+  function normalizeEventId(value, prefix) {
+    const rawValue = typeof value === "string" ? value.trim() : "";
+    const eventId = rawValue || createId(prefix);
+
+    if (eventId.length <= 64) {
+      return eventId;
+    }
+
+    const digest = hashText(eventId).slice(0, 12);
+    return `${eventId.slice(0, 63 - digest.length)}-${digest}`;
+  }
+
   async function loadState({ scope }) {
     return withRead((database) => {
       const row = getOne(database, "SELECT value FROM pdv_state WHERE scope = ?", [scope]);
@@ -414,6 +441,46 @@ function createLocalPdvStore(app) {
     });
   }
 
+  async function ignoreEvents({ scope, eventIds }) {
+    return withWrite((database) => {
+      const ids = Array.isArray(eventIds) ? eventIds.filter(Boolean) : [];
+      const updatedAt = new Date().toISOString();
+
+      if (ids.length === 0) {
+        return { ok: true, updated: 0 };
+      }
+
+      const placeholders = ids.map(() => "?").join(", ");
+      const countRow = getOne(
+        database,
+        `
+          SELECT COUNT(*) AS total
+          FROM sync_outbox
+          WHERE scope = ? AND status = 'failed' AND id IN (${placeholders})
+        `,
+        [scope, ...ids]
+      );
+      const updated = Number(countRow?.total ?? 0);
+
+      if (updated === 0) {
+        return { ok: true, updated: 0 };
+      }
+
+      database.run(
+        `
+          UPDATE sync_outbox
+          SET status = 'ignored',
+            updated_at = ?,
+            last_error = COALESCE(last_error, 'Ignorado pelo operador.')
+          WHERE scope = ? AND status = 'failed' AND id IN (${placeholders})
+        `,
+        [updatedAt, scope, ...ids]
+      );
+
+      return { ok: true, updated };
+    });
+  }
+
   async function getFailedEvents({ scope, limit = 10 }) {
     return withRead((database) => {
       const rows = getAll(
@@ -509,10 +576,7 @@ function createLocalPdvStore(app) {
         [scope, Math.min(Math.max(Number(limit) || 100, 1), 250)]
       );
 
-      return rows.map((row) => ({
-        ...row,
-        raw_result: row.raw_result ? JSON.parse(row.raw_result) : {}
-      }));
+      return rows.map(enrichFiscalDocumentForSync);
     });
   }
 
@@ -609,10 +673,50 @@ function createLocalPdvStore(app) {
     });
   }
 
+  async function ignoreFiscalDocuments({ scope, documentIds }) {
+    return withWrite((database) => {
+      const ids = Array.isArray(documentIds) ? documentIds.filter(Boolean) : [];
+      const updatedAt = new Date().toISOString();
+
+      if (ids.length === 0) {
+        return { ok: true, updated: 0 };
+      }
+
+      const placeholders = ids.map(() => "?").join(", ");
+      const countRow = getOne(
+        database,
+        `
+          SELECT COUNT(*) AS total
+          FROM fiscal_documents
+          WHERE scope = ? AND sync_status = 'failed' AND id IN (${placeholders})
+        `,
+        [scope, ...ids]
+      );
+      const updated = Number(countRow?.total ?? 0);
+
+      if (updated === 0) {
+        return { ok: true, updated: 0 };
+      }
+
+      database.run(
+        `
+          UPDATE fiscal_documents
+          SET sync_status = 'ignored',
+            updated_at = ?,
+            sync_error = COALESCE(sync_error, 'Ignorado pelo operador.')
+          WHERE scope = ? AND sync_status = 'failed' AND id IN (${placeholders})
+        `,
+        [updatedAt, scope, ...ids]
+      );
+
+      return { ok: true, updated };
+    });
+  }
+
   async function enqueueEvent({ scope, eventType, aggregateType, aggregateId, payload }) {
     return withWrite((database) => {
       const createdAt = new Date().toISOString();
-      const id = payload?.eventId || createId("evento");
+      const id = normalizeEventId(payload?.eventId, "evento");
       const idempotencyKey = `${scope}:${eventType}:${aggregateId}:${id}`;
       const eventPayload = {
         ...payload,
@@ -741,6 +845,60 @@ function createLocalPdvStore(app) {
     return normalized || null;
   }
 
+  const maxFiscalXmlSyncBytes = 8 * 1024 * 1024;
+
+  function readFiscalXmlContent(filePath) {
+    const normalizedPath = normalizeOptionalString(filePath);
+
+    if (!normalizedPath) {
+      return null;
+    }
+
+    try {
+      const stats = fs.statSync(normalizedPath);
+
+      if (!stats.isFile() || stats.size > maxFiscalXmlSyncBytes) {
+        return null;
+      }
+
+      return normalizeOptionalString(fs.readFileSync(normalizedPath, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  function parseFiscalRawResult(rawResult) {
+    if (!rawResult) {
+      return {};
+    }
+
+    try {
+      return JSON.parse(rawResult);
+    } catch {
+      return {};
+    }
+  }
+
+  function enrichFiscalDocumentForSync(row) {
+    const rawResult = parseFiscalRawResult(row.raw_result);
+    const data = rawResult?.data && typeof rawResult.data === "object" ? rawResult.data : {};
+    const xmlAutorizadoConteudo = normalizeOptionalString(data.xmlProc) ||
+      readFiscalXmlContent(row.xml_autorizado_path || data.xmlAutorizadoPath);
+    const xmlEnviadoConteudo = readFiscalXmlContent(
+      data.xmlAssinadoPath ||
+        data.xmlEnviadoPath ||
+        row.xml_enviado_path ||
+        data.xmlPath
+    );
+
+    return {
+      ...row,
+      raw_result: rawResult,
+      xml_autorizado_conteudo: xmlAutorizadoConteudo,
+      xml_enviado_conteudo: xmlEnviadoConteudo
+    };
+  }
+
   function normalizeOptionalInteger(value) {
     const parsed = Number(value);
 
@@ -845,7 +1003,7 @@ function createLocalPdvStore(app) {
           ON CONFLICT(id) DO UPDATE SET
             venda_id = COALESCE(excluded.venda_id, fiscal_documents.venda_id),
             command = CASE
-              WHEN excluded.command IN ('imprimir-danfe', 'reimprimir-danfe', 'transmitir-nfce-contingencia') THEN fiscal_documents.command
+              WHEN excluded.command IN ('imprimir-danfe', 'reimprimir-danfe', 'transmitir-nfce-contingencia', 'transmitir-nfe-contingencia') THEN fiscal_documents.command
               ELSE excluded.command
             END,
             ambiente = COALESCE(excluded.ambiente, fiscal_documents.ambiente),
@@ -872,14 +1030,17 @@ function createLocalPdvStore(app) {
             END,
             log_path = COALESCE(excluded.log_path, fiscal_documents.log_path),
             sync_status = CASE
+              WHEN fiscal_documents.sync_status = 'ignored' THEN fiscal_documents.sync_status
               WHEN excluded.command IN ('imprimir-danfe', 'reimprimir-danfe') THEN fiscal_documents.sync_status
               ELSE 'pending'
             END,
             sync_error = CASE
+              WHEN fiscal_documents.sync_status = 'ignored' THEN fiscal_documents.sync_error
               WHEN excluded.command IN ('imprimir-danfe', 'reimprimir-danfe') THEN fiscal_documents.sync_error
               ELSE NULL
             END,
             synced_at = CASE
+              WHEN fiscal_documents.sync_status = 'ignored' THEN fiscal_documents.synced_at
               WHEN excluded.command IN ('imprimir-danfe', 'reimprimir-danfe') THEN fiscal_documents.synced_at
               ELSE NULL
             END,
@@ -939,7 +1100,7 @@ function createLocalPdvStore(app) {
         "serie = ?",
         "numero IS NOT NULL",
         "numero > 0",
-        "command IN ('emitir-nfce', 'emitir-nfce-contingencia', 'transmitir-nfce-contingencia', 'emitir-nfe', 'registrar-pendente')"
+        "command IN ('emitir-nfce', 'emitir-nfce-contingencia', 'transmitir-nfce-contingencia', 'emitir-nfe', 'emitir-nfe-contingencia', 'transmitir-nfe-contingencia', 'registrar-pendente')"
       ];
       const params = [normalizedScope, normalizedModelo, normalizedSerie];
 
@@ -1020,12 +1181,14 @@ function createLocalPdvStore(app) {
     ipcMain.handle("pdv-store:get-pending-events", (_event, payload) => getPendingEvents(payload));
     ipcMain.handle("pdv-store:mark-events-synced", (_event, payload) => markEventsSynced(payload));
     ipcMain.handle("pdv-store:mark-events-failed", (_event, payload) => markEventsFailed(payload));
+    ipcMain.handle("pdv-store:ignore-events", (_event, payload) => ignoreEvents(payload));
     ipcMain.handle("pdv-store:get-failed-events", (_event, payload) => getFailedEvents(payload));
     ipcMain.handle("pdv-store:retry-failed-events", (_event, payload) => retryFailedEvents(payload));
     ipcMain.handle("pdv-store:get-pending-fiscal-documents", (_event, payload) => getPendingFiscalDocuments(payload));
     ipcMain.handle("pdv-store:get-failed-fiscal-documents", (_event, payload) => getFailedFiscalDocuments(payload));
     ipcMain.handle("pdv-store:mark-fiscal-documents-synced", (_event, payload) => markFiscalDocumentsSynced(payload));
     ipcMain.handle("pdv-store:mark-fiscal-documents-failed", (_event, payload) => markFiscalDocumentsFailed(payload));
+    ipcMain.handle("pdv-store:ignore-fiscal-documents", (_event, payload) => ignoreFiscalDocuments(payload));
     ipcMain.handle("pdv-store:get-shift-preview", (_event, payload) => getShiftPreview(payload));
     ipcMain.handle("pdv-store:reserve-shift-number", (_event, payload) => reserveShiftNumber(payload));
     ipcMain.handle("pdv-store:get-fiscal-config", (_event, payload) => getFiscalConfig(payload));
@@ -1040,10 +1203,12 @@ function createLocalPdvStore(app) {
     recordFiscalDocument,
     getFiscalNumberGuard,
     getFailedEvents,
+    ignoreEvents,
     getPendingFiscalDocuments,
     getFailedFiscalDocuments,
     markFiscalDocumentsSynced,
     markFiscalDocumentsFailed,
+    ignoreFiscalDocuments,
     listFiscalDocuments
   };
 }

@@ -12,6 +12,8 @@ import {
   ReceiptText,
   Settings2,
   ShieldCheck,
+  UsersRound,
+  WalletCards,
   Warehouse
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -24,13 +26,29 @@ type SystemMenuItem = {
   title: string;
   href?: string;
   icon: LucideIcon;
-  requiresConvenio?: boolean;
+  requiredFeature?: OptionalSystemFeature;
 };
+
+type OptionalSystemFeature = "convenio" | "expenses" | "employees";
 
 type ConfiguracaoSistema = {
   formas_pagamento?: {
     convenio?: boolean;
   } | null;
+  lancar_despesas?: {
+    ativo?: boolean;
+  } | null;
+  controle_funcionarios?: {
+    ativo?: boolean;
+  } | null;
+};
+
+type EnabledSystemFeatures = Record<OptionalSystemFeature, boolean>;
+
+const defaultEnabledSystemFeatures: EnabledSystemFeatures = {
+  convenio: false,
+  expenses: false,
+  employees: false
 };
 
 const menuItems: SystemMenuItem[] = [
@@ -60,13 +78,26 @@ const menuItems: SystemMenuItem[] = [
     icon: Settings2
   },
   {
+    title: "Funcionários",
+    href: "/meu-sistema/funcionarios",
+    icon: UsersRound,
+    requiredFeature: "employees"
+  },
+  {
+    title: "Despesas",
+    href: "/meu-sistema/despesas",
+    icon: WalletCards,
+    requiredFeature: "expenses"
+  },
+  {
     title: "Convênios",
     href: "/meu-sistema/convenios",
     icon: HandCoins,
-    requiresConvenio: true
+    requiredFeature: "convenio"
   },
   {
     title: "Documentos fiscais",
+    href: "/meu-sistema/documentos-fiscais",
     icon: ReceiptText
   }
 ];
@@ -150,7 +181,7 @@ function renderMenuItem(item: SystemMenuItem, featured = false) {
 }
 
 export default function MeuSistemaPage() {
-  const [isConvenioEnabled, setIsConvenioEnabled] = useState(false);
+  const [enabledFeatures, setEnabledFeatures] = useState<EnabledSystemFeatures>(defaultEnabledSystemFeatures);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,11 +196,15 @@ export default function MeuSistemaPage() {
         const configuracao = await apiGet<ConfiguracaoSistema>("/configuracoes", { token });
 
         if (!cancelled) {
-          setIsConvenioEnabled(Boolean(configuracao.formas_pagamento?.convenio));
+          setEnabledFeatures({
+            convenio: Boolean(configuracao.formas_pagamento?.convenio),
+            expenses: configuracao.lancar_despesas?.ativo !== false,
+            employees: configuracao.controle_funcionarios?.ativo === true
+          });
         }
       } catch {
         if (!cancelled) {
-          setIsConvenioEnabled(false);
+          setEnabledFeatures(defaultEnabledSystemFeatures);
         }
       }
     }
@@ -182,8 +217,8 @@ export default function MeuSistemaPage() {
   }, []);
 
   const routineItems = useMemo(
-    () => baseRoutineItems.filter((item) => !item.requiresConvenio || isConvenioEnabled),
-    [isConvenioEnabled]
+    () => baseRoutineItems.filter((item) => !item.requiredFeature || enabledFeatures[item.requiredFeature]),
+    [enabledFeatures]
   );
 
   return (

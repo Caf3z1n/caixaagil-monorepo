@@ -39,6 +39,13 @@ ConfiguracaoSistema.init(
         ativo: false,
       },
     },
+    comandas: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {
+        ativo: true,
+      },
+    },
     fiscal: {
       type: DataTypes.JSONB,
       allowNull: false,

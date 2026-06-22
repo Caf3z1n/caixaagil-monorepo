@@ -27,14 +27,46 @@ type PdvSession = {
   ultima_sincronizacao_em?: string | null;
 };
 
+type CommandSettings = {
+  ativo?: boolean;
+};
+
+type ExpenseSettings = {
+  ativo?: boolean;
+};
+
+type EmployeeControlSettings = {
+  ativo?: boolean;
+};
+
+type ApiPdvSettings = {
+  comandas?: CommandSettings | null;
+  lancar_despesas?: ExpenseSettings | null;
+  controle_funcionarios?: EmployeeControlSettings | null;
+  formas_pagamento?: Record<string, boolean> | null;
+  fiscal?: Record<string, unknown> | null;
+};
+
+type ApiEmployee = {
+  id: number;
+  nome: string;
+  codigo_hash: string;
+  ativo?: boolean;
+  updated_at?: string | null;
+};
+
 type PairResponse = {
   credencial_dispositivo: string;
   pdv: PdvSession;
+  configuracoes?: ApiPdvSettings | null;
+  funcionarios?: ApiEmployee[];
 };
 
 type SessionResponse = {
   autenticado: boolean;
   pdv: PdvSession;
+  configuracoes?: ApiPdvSettings | null;
+  funcionarios?: ApiEmployee[];
 };
 
 const progressSteps: Array<{ id: PdvStep; label: string }> = [
@@ -152,6 +184,8 @@ export default function PdvActivationPage() {
   const [isActivating, setIsActivating] = useState(false);
   const [isUnpairing, setIsUnpairing] = useState(false);
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
+  const [initialPdvSettings, setInitialPdvSettings] = useState<ApiPdvSettings | null>(null);
+  const [initialEmployees, setInitialEmployees] = useState<ApiEmployee[]>([]);
   const [stageHeight, setStageHeight] = useState<number | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const activeIndex = Math.max(0, progressSteps.findIndex((item) => item.id === step));
@@ -163,6 +197,8 @@ export default function PdvActivationPage() {
 
     if (!storedCredential || !storedPdv) {
       clearDesktopSession();
+      setInitialPdvSettings(null);
+      setInitialEmployees([]);
       setAppState("activation");
       return;
     }
@@ -176,6 +212,8 @@ export default function PdvActivationPage() {
       .then((response) => {
         saveDesktopSession(storedCredential, response.pdv);
         setActivatedPdv(response.pdv);
+        setInitialPdvSettings(response.configuracoes ?? null);
+        setInitialEmployees(response.funcionarios ?? []);
         setConnectivity("online");
         setSystemMessage("");
         setAppState("system");
@@ -184,6 +222,8 @@ export default function PdvActivationPage() {
         if (error instanceof ApiError && (error.status === 400 || error.status === 401 || error.status === 403)) {
           clearDesktopSession();
           setActivatedPdv(null);
+          setInitialPdvSettings(null);
+          setInitialEmployees([]);
           setStep("intro");
           setAppState("activation");
           return;
@@ -194,6 +234,69 @@ export default function PdvActivationPage() {
         setAppState("system");
       });
   }, []);
+
+  useEffect(() => {
+    if (appState !== "system" || connectivity !== "offline") {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function retryDesktopSession() {
+      const storedCredential = getStoredCredential();
+      const storedPdv = getStoredPdv();
+
+      if (!storedCredential || !storedPdv) {
+        clearDesktopSession();
+        setActivatedPdv(null);
+        setInitialPdvSettings(null);
+        setInitialEmployees([]);
+        setStep("intro");
+        setAppState("activation");
+        return;
+      }
+
+      try {
+        const response = await apiPost<SessionResponse>("/pdvs/sessao", {
+          credencial_dispositivo: storedCredential,
+          dispositivo_id: getDeviceId()
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        saveDesktopSession(storedCredential, response.pdv);
+        setActivatedPdv(response.pdv);
+        setInitialPdvSettings(response.configuracoes ?? null);
+        setInitialEmployees(response.funcionarios ?? []);
+        setConnectivity("online");
+        setSystemMessage("");
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof ApiError && (error.status === 400 || error.status === 401 || error.status === 403)) {
+          clearDesktopSession();
+          setActivatedPdv(null);
+          setInitialPdvSettings(null);
+          setInitialEmployees([]);
+          setStep("intro");
+          setAppState("activation");
+        }
+      }
+    }
+
+    const intervalId = window.setInterval(() => void retryDesktopSession(), 15000);
+    window.addEventListener("online", retryDesktopSession);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("online", retryDesktopSession);
+    };
+  }, [appState, connectivity]);
 
   useLayoutEffect(() => {
     if (appState !== "activation") {
@@ -247,6 +350,8 @@ export default function PdvActivationPage() {
 
       saveDesktopSession(response.credencial_dispositivo, response.pdv);
       setActivatedPdv(response.pdv);
+      setInitialPdvSettings(response.configuracoes ?? null);
+      setInitialEmployees(response.funcionarios ?? []);
       setConnectivity("online");
       goToStep("success");
     } catch (error) {
@@ -278,6 +383,8 @@ export default function PdvActivationPage() {
 
       clearDesktopSession();
       setActivatedPdv(null);
+      setInitialPdvSettings(null);
+      setInitialEmployees([]);
       setActivationCode("");
       setStep("intro");
       setAppState("activation");
@@ -285,6 +392,8 @@ export default function PdvActivationPage() {
       if (error instanceof ApiError && (error.status === 400 || error.status === 401 || error.status === 403)) {
         clearDesktopSession();
         setActivatedPdv(null);
+        setInitialPdvSettings(null);
+        setInitialEmployees([]);
         setActivationCode("");
         setStep("intro");
         setAppState("activation");
@@ -425,7 +534,10 @@ export default function PdvActivationPage() {
           deviceCredential={getStoredCredential()}
           deviceId={getDeviceId()}
           isUnpairing={isUnpairing}
+          initialSettings={initialPdvSettings}
+          initialEmployees={initialEmployees}
           lastAccessLabel={formatDateTime(activatedPdv?.ultimo_acesso_em)}
+          onConnectivityChange={setConnectivity}
           onUnpair={unpairPdv}
           onSystemMessage={setSystemMessage}
           pdvIdentity={pdvIdentity}

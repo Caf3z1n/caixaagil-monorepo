@@ -32,10 +32,23 @@ import {
 } from "@/components/fiscal-settings-manager";
 import { PlatformFrame } from "@/components/platform-frame";
 import { ApiError, apiGet, apiPut } from "@/lib/api-client";
+import { useModalDismiss } from "@/lib/use-modal-dismiss";
+import { useModalPresence } from "@/lib/use-modal-presence";
+import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 
 type PaymentMethodKey = "dinheiro" | "pix" | "cartao" | "convenio";
+type StandardPaymentMethodKey = Exclude<PaymentMethodKey, "convenio">;
 type PaymentSettings = Record<PaymentMethodKey, boolean>;
+type CommandSettings = {
+  ativo: boolean;
+};
+type ExpenseSettings = {
+  ativo: boolean;
+};
+type EmployeeSettings = {
+  ativo: boolean;
+};
 type ConfigurationFlowStep = "menu" | "payments" | "integrations" | "cnpjaIntegration" | "fiscalCompany" | "fiscalIssuance";
 type ConfigurationFlowMotion = "forward" | "backward";
 
@@ -48,6 +61,9 @@ type IntegrationSettings = {
 
 type ConfiguracaoSistema = {
   formas_pagamento: Partial<PaymentSettings>;
+  comandas?: Partial<CommandSettings> | null;
+  lancar_despesas?: Partial<ExpenseSettings> | null;
+  controle_funcionarios?: Partial<EmployeeSettings> | null;
   fiscal?: Partial<FiscalSettings> | null;
   integracoes?: Partial<IntegrationSettings> | null;
   updated_at?: string | null;
@@ -57,6 +73,7 @@ type ConfigurationArea = {
   title: string;
   description: string;
   icon: LucideIcon;
+  feature?: "commands" | "convenios" | "employees" | "expenses";
   step?: ConfigurationFlowStep;
 };
 
@@ -78,6 +95,18 @@ const defaultPaymentSettings: PaymentSettings = {
   convenio: false
 };
 
+const defaultCommandSettings: CommandSettings = {
+  ativo: true
+};
+
+const defaultExpenseSettings: ExpenseSettings = {
+  ativo: true
+};
+
+const defaultEmployeeSettings: EmployeeSettings = {
+  ativo: false
+};
+
 const defaultIntegrationSettings: IntegrationSettings = {
   cnpja: {
     ativo: false,
@@ -85,8 +114,10 @@ const defaultIntegrationSettings: IntegrationSettings = {
   }
 };
 
+const standardPaymentMethodKeys: StandardPaymentMethodKey[] = ["dinheiro", "pix", "cartao"];
+
 const paymentMethodOptions: Array<{
-  id: PaymentMethodKey;
+  id: StandardPaymentMethodKey;
   title: string;
   description: string;
   icon: LucideIcon;
@@ -108,12 +139,6 @@ const paymentMethodOptions: Array<{
     title: "Cartão",
     description: "Maquininha do caixa.",
     icon: CreditCard
-  },
-  {
-    id: "convenio",
-    title: "Convênio",
-    description: "Cliente para receber depois.",
-    icon: HandCoins
   }
 ];
 
@@ -139,6 +164,24 @@ function normalizePaymentSettings(value?: Partial<PaymentSettings> | null): Paym
   return nextSettings;
 }
 
+function normalizeCommandSettings(value?: Partial<CommandSettings> | null): CommandSettings {
+  return {
+    ativo: value?.ativo !== false
+  };
+}
+
+function normalizeExpenseSettings(value?: Partial<ExpenseSettings> | null): ExpenseSettings {
+  return {
+    ativo: value?.ativo !== false
+  };
+}
+
+function normalizeEmployeeSettings(value?: Partial<EmployeeSettings> | null): EmployeeSettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
 function normalizeIntegrationSettings(value?: Partial<IntegrationSettings> | null): IntegrationSettings {
   return {
     cnpja: {
@@ -149,7 +192,24 @@ function normalizeIntegrationSettings(value?: Partial<IntegrationSettings> | nul
 }
 
 function countActivePaymentMethods(settings: PaymentSettings) {
-  return Object.values(settings).filter(Boolean).length;
+  return standardPaymentMethodKeys.filter(method => settings[method]).length;
+}
+
+function withFiscalEmissionStatus(settings: FiscalSettings, active: boolean) {
+  const normalizedSettings = normalizeFiscalSettings(settings);
+  const activeEnvironment = {
+    ...normalizedSettings.ambientes[normalizedSettings.ambiente],
+    ativo: active
+  };
+
+  return normalizeFiscalSettings({
+    ...normalizedSettings,
+    ambientes: {
+      ...normalizedSettings.ambientes,
+      [normalizedSettings.ambiente]: activeEnvironment
+    },
+    ...activeEnvironment
+  });
 }
 
 function getFlowStepIndex(step: ConfigurationFlowStep) {
@@ -331,14 +391,24 @@ export default function MeuSistemaConfiguracoesPage() {
   const [flowStep, setFlowStep] = useState<ConfigurationFlowStep>("menu");
   const [flowMotion, setFlowMotion] = useState<ConfigurationFlowMotion>("forward");
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
+  const [commandSettings, setCommandSettings] = useState<CommandSettings>(defaultCommandSettings);
+  const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(defaultExpenseSettings);
+  const [employeeSettings, setEmployeeSettings] = useState<EmployeeSettings>(defaultEmployeeSettings);
   const [fiscalSettings, setFiscalSettings] = useState<FiscalSettings>(defaultFiscalSettings);
   const [integrationSettings, setIntegrationSettings] = useState<IntegrationSettings>(defaultIntegrationSettings);
   const [isLoading, setIsLoading] = useState(true);
   const [savingMethod, setSavingMethod] = useState<PaymentMethodKey | null>(null);
+  const [isSavingCommands, setIsSavingCommands] = useState(false);
+  const [isSavingExpenses, setIsSavingExpenses] = useState(false);
+  const [isSavingEmployees, setIsSavingEmployees] = useState(false);
+  const [isSavingFiscalEmission, setIsSavingFiscalEmission] = useState(false);
+  const [pendingFiscalDeactivation, setPendingFiscalDeactivation] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const activePaymentCount = useMemo(() => countActivePaymentMethods(paymentSettings), [paymentSettings]);
   const activeProgressIndex = getFlowStepIndex(flowStep);
   const progressStepCount = getFlowStepCount(flowStep);
+  const fiscalDeactivationPresence = useModalPresence(pendingFiscalDeactivation);
+  const hasVisibleModal = fiscalDeactivationPresence.isPresent;
   const flowPanelClassName = `platform-flow-panel platform-flow-panel-${flowMotion}`;
   const isFiscalStep = isFiscalFlowStep(flowStep);
   const hasInlineFlowActions = isFiscalStep || flowStep === "cnpjaIntegration";
@@ -361,19 +431,28 @@ export default function MeuSistemaConfiguracoesPage() {
           step: "payments"
         },
         {
-          title: "Lançar despesas",
-          description: "Saídas rápidas no fechamento.",
-          icon: ReceiptText
-        },
-        {
           title: "Funcionários",
           description: "Permissões e identificação no caixa.",
-          icon: BadgeCheck
+          icon: BadgeCheck,
+          feature: "employees"
         },
         {
-          title: "Preferências do PDV",
-          description: "Impressão e comportamento no caixa.",
-          icon: WalletCards
+          title: "Comandas",
+          description: "Criação de comandas no PDV.",
+          icon: ReceiptText,
+          feature: "commands"
+        },
+        {
+          title: "Despesas",
+          description: "Saídas de dinheiro no PDV.",
+          icon: WalletCards,
+          feature: "expenses"
+        },
+        {
+          title: "Convênios",
+          description: "Clientes para receber depois.",
+          icon: HandCoins,
+          feature: "convenios"
         },
         {
           title: "APIs externas",
@@ -401,6 +480,8 @@ export default function MeuSistemaConfiguracoesPage() {
       ]
     }
   ];
+  usePlatformModalScrollLock(hasVisibleModal);
+  const fiscalDeactivationDismiss = useModalDismiss(pendingFiscalDeactivation, closeFiscalDeactivationModal);
 
   useEffect(() => {
     let cancelled = false;
@@ -424,6 +505,9 @@ export default function MeuSistemaConfiguracoesPage() {
         }
 
         setPaymentSettings(normalizePaymentSettings(configuracao.formas_pagamento));
+        setCommandSettings(normalizeCommandSettings(configuracao.comandas));
+        setExpenseSettings(normalizeExpenseSettings(configuracao.lancar_despesas));
+        setEmployeeSettings(normalizeEmployeeSettings(configuracao.controle_funcionarios));
         setFiscalSettings(normalizeFiscalSettings(configuracao.fiscal));
         setIntegrationSettings(normalizeIntegrationSettings(configuracao.integracoes));
         setFeedback(null);
@@ -507,7 +591,7 @@ export default function MeuSistemaConfiguracoesPage() {
       [method]: active
     };
 
-    if (countActivePaymentMethods(nextSettings) === 0) {
+    if (method !== "convenio" && countActivePaymentMethods(nextSettings) === 0) {
       setFeedback({
         tone: "warning",
         message: "Mantenha pelo menos uma forma de pagamento ativa."
@@ -533,7 +617,12 @@ export default function MeuSistemaConfiguracoesPage() {
       setPaymentSettings(normalizePaymentSettings(configuracao.formas_pagamento));
       setFeedback({
         tone: "success",
-        message: "Formas de pagamento salvas."
+        message:
+          method === "convenio"
+            ? active
+              ? "Convênios ativados."
+              : "Convênios desativados."
+            : "Formas de pagamento salvas."
       });
     } catch (error) {
       setPaymentSettings(previousSettings);
@@ -542,7 +631,9 @@ export default function MeuSistemaConfiguracoesPage() {
         message:
           error instanceof ApiError || error instanceof Error
             ? error.message
-            : "Não foi possível salvar as formas de pagamento."
+            : method === "convenio"
+              ? "Não foi possível alterar convênios."
+              : "Não foi possível salvar as formas de pagamento."
       });
     } finally {
       setSavingMethod(null);
@@ -568,6 +659,210 @@ export default function MeuSistemaConfiguracoesPage() {
     setFiscalSettings(normalizedSettings);
 
     return normalizedSettings;
+  }
+
+  async function updateCommandSettings(active: boolean) {
+    if (isSavingCommands) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const previousSettings = commandSettings;
+    const nextSettings = { ativo: active };
+
+    setCommandSettings(nextSettings);
+    setIsSavingCommands(true);
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/comandas",
+        {
+          comandas: nextSettings
+        },
+        { token }
+      );
+
+      setCommandSettings(normalizeCommandSettings(configuracao.comandas));
+      setFeedback({
+        tone: "success",
+        message: active ? "Comandas ativadas." : "Comandas desativadas."
+      });
+    } catch (error) {
+      setCommandSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar comandas."
+      });
+    } finally {
+      setIsSavingCommands(false);
+    }
+  }
+
+  async function updateExpenseSettings(active: boolean) {
+    if (isSavingExpenses) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const previousSettings = expenseSettings;
+    const nextSettings = { ativo: active };
+
+    setExpenseSettings(nextSettings);
+    setIsSavingExpenses(true);
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/despesas",
+        {
+          lancar_despesas: nextSettings
+        },
+        { token }
+      );
+
+      setExpenseSettings(normalizeExpenseSettings(configuracao.lancar_despesas));
+      setFeedback({
+        tone: "success",
+        message: active ? "Despesas ativadas." : "Despesas desativadas."
+      });
+    } catch (error) {
+      setExpenseSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar despesas."
+      });
+    } finally {
+      setIsSavingExpenses(false);
+    }
+  }
+
+  async function updateEmployeeSettings(active: boolean) {
+    if (isSavingEmployees) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const previousSettings = employeeSettings;
+    const nextSettings = { ativo: active };
+
+    setEmployeeSettings(nextSettings);
+    setIsSavingEmployees(true);
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/funcionarios",
+        {
+          controle_funcionarios: nextSettings
+        },
+        { token }
+      );
+
+      setEmployeeSettings(normalizeEmployeeSettings(configuracao.controle_funcionarios));
+      setFeedback({
+        tone: "success",
+        message: active ? "Funcionários ativados." : "Funcionários desativados."
+      });
+    } catch (error) {
+      setEmployeeSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar funcionários."
+      });
+    } finally {
+      setIsSavingEmployees(false);
+    }
+  }
+
+  function closeFiscalDeactivationModal() {
+    if (!isSavingFiscalEmission) {
+      setPendingFiscalDeactivation(false);
+    }
+  }
+
+  async function confirmFiscalDeactivation() {
+    const updated = await updateFiscalEmissionStatus(false);
+
+    if (updated) {
+      setPendingFiscalDeactivation(false);
+    }
+  }
+
+  async function updateFiscalEmissionStatus(active: boolean) {
+    if (isSavingFiscalEmission) {
+      return false;
+    }
+
+    const previousSettings = fiscalSettings;
+    const nextSettings = withFiscalEmissionStatus(fiscalSettings, active);
+
+    setFiscalSettings(nextSettings);
+    setIsSavingFiscalEmission(true);
+    setFeedback(null);
+
+    try {
+      await updateFiscalSettings(nextSettings);
+      setFeedback({
+        tone: "success",
+        message: active ? "Emissão fiscal ativada." : "Emissão fiscal desativada."
+      });
+
+      if (!active && flowStep === "fiscalIssuance") {
+        moveToFlowStep("menu");
+      }
+
+      return true;
+    } catch (error) {
+      setFiscalSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar a emissão fiscal."
+      });
+
+      return false;
+    } finally {
+      setIsSavingFiscalEmission(false);
+    }
   }
 
   async function updateIntegrationSettings(nextSettings: IntegrationSettings, cnpjaToken: string) {
@@ -616,6 +911,21 @@ export default function MeuSistemaConfiguracoesPage() {
                   <p>Preferências que mudam o caixa.</p>
                 </header>
 
+                {feedback ? (
+                  <div className={`auth-feedback auth-feedback-${feedback.tone} configuration-feedback`} role="status">
+                    <span className="auth-feedback-marker">
+                      {feedback.tone === "success" ? (
+                        <Check aria-hidden="true" size={17} />
+                      ) : (
+                        <AlertTriangle aria-hidden="true" size={17} />
+                      )}
+                    </span>
+                    <span className="auth-feedback-copy">
+                      <strong>{feedback.message}</strong>
+                    </span>
+                  </div>
+                ) : null}
+
                 <div className="configuration-setting-groups" aria-label="Áreas de configuração">
                   {configurationSections.map(section => (
                     <section className="configuration-setting-group" key={section.title}>
@@ -628,6 +938,313 @@ export default function MeuSistemaConfiguracoesPage() {
                         {section.areas.map(area => {
                           const Icon = area.icon;
                           const targetStep = area.step;
+                          const isCommandsArea = area.feature === "commands";
+                          const isEmployeesArea = area.feature === "employees";
+                          const isExpensesArea = area.feature === "expenses";
+                          const isConveniosArea = area.feature === "convenios";
+                          const isFiscalIssuanceArea = targetStep === "fiscalIssuance";
+
+                          if (isEmployeesArea) {
+                            const isEmployeesActive = employeeSettings.ativo;
+                            const employeeEntryClassName = isEmployeesActive
+                              ? "configuration-setting-fiscal-entry"
+                              : "configuration-setting-fiscal-entry configuration-setting-fiscal-entry-disabled";
+                            const employeeEntryContent = (
+                              <>
+                                <span className="configuration-setting-icon" aria-hidden="true">
+                                  <Icon size={19} />
+                                </span>
+
+                                <span className="configuration-setting-copy">
+                                  <strong>{area.title}</strong>
+                                  <small>{area.description}</small>
+                                </span>
+                              </>
+                            );
+
+                            return (
+                              <article
+                                className={
+                                  isEmployeesActive
+                                    ? "configuration-setting-row configuration-setting-fiscal-option"
+                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                                }
+                                key={area.title}
+                                onBlur={stopConfigurationWave}
+                                onPointerEnter={startConfigurationPointerWave}
+                                onPointerLeave={stopConfigurationWave}
+                              >
+                                {isEmployeesActive ? (
+                                  <Link className={employeeEntryClassName} href="/meu-sistema/funcionarios">
+                                    {employeeEntryContent}
+                                  </Link>
+                                ) : (
+                                  <span className={`${employeeEntryClassName} configuration-setting-fiscal-entry-static`}>
+                                    {employeeEntryContent}
+                                  </span>
+                                )}
+
+                                <button
+                                  aria-checked={isEmployeesActive}
+                                  aria-label={isEmployeesActive ? "Desativar funcionários" : "Ativar funcionários"}
+                                  className={
+                                    isEmployeesActive
+                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                                      : "configuration-setting-fiscal-toggle"
+                                  }
+                                  disabled={isLoading || isSavingEmployees}
+                                  role="switch"
+                                  type="button"
+                                  onClick={() => void updateEmployeeSettings(!isEmployeesActive)}
+                                >
+                                  <span className="configuration-switch" aria-hidden="true">
+                                    {isSavingEmployees ? (
+                                      <LoaderCircle className="configuration-switch-loader" size={15} />
+                                    ) : (
+                                      <span />
+                                    )}
+                                  </span>
+                                </button>
+                              </article>
+                            );
+                          }
+
+                          if (isCommandsArea) {
+                            const isCommandsActive = commandSettings.ativo;
+
+                            return (
+                              <article
+                                className={
+                                  isCommandsActive
+                                    ? "configuration-setting-row configuration-setting-fiscal-option"
+                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                                }
+                                key={area.title}
+                                onBlur={stopConfigurationWave}
+                                onPointerEnter={startConfigurationPointerWave}
+                                onPointerLeave={stopConfigurationWave}
+                              >
+                                <span className="configuration-setting-fiscal-entry configuration-setting-fiscal-entry-static">
+                                  <span className="configuration-setting-icon" aria-hidden="true">
+                                    <Icon size={19} />
+                                  </span>
+
+                                  <span className="configuration-setting-copy">
+                                    <strong>{area.title}</strong>
+                                    <small>{area.description}</small>
+                                  </span>
+                                </span>
+
+                                <button
+                                  aria-checked={isCommandsActive}
+                                  aria-label={isCommandsActive ? "Desativar comandas" : "Ativar comandas"}
+                                  className={
+                                    isCommandsActive
+                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                                      : "configuration-setting-fiscal-toggle"
+                                  }
+                                  disabled={isLoading || isSavingCommands}
+                                  role="switch"
+                                  type="button"
+                                  onClick={() => void updateCommandSettings(!isCommandsActive)}
+                                >
+                                  <span className="configuration-switch" aria-hidden="true">
+                                    {isSavingCommands ? (
+                                      <LoaderCircle className="configuration-switch-loader" size={15} />
+                                    ) : (
+                                      <span />
+                                    )}
+                                  </span>
+                                </button>
+                              </article>
+                            );
+                          }
+
+                          if (isExpensesArea) {
+                            const isExpensesActive = expenseSettings.ativo;
+                            const expenseEntryClassName = isExpensesActive
+                              ? "configuration-setting-fiscal-entry"
+                              : "configuration-setting-fiscal-entry configuration-setting-fiscal-entry-disabled";
+                            const expenseEntryContent = (
+                              <>
+                                <span className="configuration-setting-icon" aria-hidden="true">
+                                  <Icon size={19} />
+                                </span>
+
+                                <span className="configuration-setting-copy">
+                                  <strong>{area.title}</strong>
+                                  <small>{area.description}</small>
+                                </span>
+                              </>
+                            );
+
+                            return (
+                              <article
+                                className={
+                                  isExpensesActive
+                                    ? "configuration-setting-row configuration-setting-fiscal-option"
+                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                                }
+                                key={area.title}
+                                onBlur={stopConfigurationWave}
+                                onPointerEnter={startConfigurationPointerWave}
+                                onPointerLeave={stopConfigurationWave}
+                              >
+                                {isExpensesActive ? (
+                                  <Link className={expenseEntryClassName} href="/meu-sistema/despesas">
+                                    {expenseEntryContent}
+                                  </Link>
+                                ) : (
+                                  <span className={`${expenseEntryClassName} configuration-setting-fiscal-entry-static`}>
+                                    {expenseEntryContent}
+                                  </span>
+                                )}
+
+                                <button
+                                  aria-checked={isExpensesActive}
+                                  aria-label={isExpensesActive ? "Desativar despesas" : "Ativar despesas"}
+                                  className={
+                                    isExpensesActive
+                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                                      : "configuration-setting-fiscal-toggle"
+                                  }
+                                  disabled={isLoading || isSavingExpenses}
+                                  role="switch"
+                                  type="button"
+                                  onClick={() => void updateExpenseSettings(!isExpensesActive)}
+                                >
+                                  <span className="configuration-switch" aria-hidden="true">
+                                    {isSavingExpenses ? (
+                                      <LoaderCircle className="configuration-switch-loader" size={15} />
+                                    ) : (
+                                      <span />
+                                    )}
+                                  </span>
+                                </button>
+                              </article>
+                            );
+                          }
+
+                          if (isConveniosArea) {
+                            const isConvenioActive = paymentSettings.convenio;
+                            const isSavingConvenio = savingMethod === "convenio";
+
+                            return (
+                              <article
+                                className={
+                                  isConvenioActive
+                                    ? "configuration-setting-row configuration-setting-fiscal-option"
+                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                                }
+                                key={area.title}
+                                onBlur={stopConfigurationWave}
+                                onPointerEnter={startConfigurationPointerWave}
+                                onPointerLeave={stopConfigurationWave}
+                              >
+                                <Link className="configuration-setting-fiscal-entry" href="/meu-sistema/convenios">
+                                  <span className="configuration-setting-icon" aria-hidden="true">
+                                    <Icon size={19} />
+                                  </span>
+
+                                  <span className="configuration-setting-copy">
+                                    <strong>{area.title}</strong>
+                                    <small>{area.description}</small>
+                                  </span>
+                                </Link>
+
+                                <button
+                                  aria-checked={isConvenioActive}
+                                  aria-label={isConvenioActive ? "Desativar convênios" : "Ativar convênios"}
+                                  className={
+                                    isConvenioActive
+                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                                      : "configuration-setting-fiscal-toggle"
+                                  }
+                                  disabled={isLoading || Boolean(savingMethod)}
+                                  role="switch"
+                                  type="button"
+                                  onClick={() => void updatePaymentMethod("convenio", !isConvenioActive)}
+                                >
+                                  <span className="configuration-switch" aria-hidden="true">
+                                    {isSavingConvenio ? (
+                                      <LoaderCircle className="configuration-switch-loader" size={15} />
+                                    ) : (
+                                      <span />
+                                    )}
+                                  </span>
+                                </button>
+                              </article>
+                            );
+                          }
+
+                          if (isFiscalIssuanceArea) {
+                            const isFiscalEmissionActive = fiscalSettings.ativo;
+                            const canOpenFiscalIssuance = isFiscalEmissionActive && !isLoading && !isSavingFiscalEmission;
+
+                            return (
+                              <article
+                                className={
+                                  isFiscalEmissionActive
+                                    ? "configuration-setting-row configuration-setting-fiscal-option"
+                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                                }
+                                key={area.title}
+                                onBlur={stopConfigurationWave}
+                                onPointerEnter={startConfigurationPointerWave}
+                                onPointerLeave={stopConfigurationWave}
+                              >
+                                <button
+                                  aria-disabled={!canOpenFiscalIssuance}
+                                  className={
+                                    isFiscalEmissionActive
+                                      ? "configuration-setting-fiscal-entry"
+                                      : "configuration-setting-fiscal-entry configuration-setting-fiscal-entry-disabled"
+                                  }
+                                  disabled={!canOpenFiscalIssuance}
+                                  type="button"
+                                  onClick={() => canOpenFiscalIssuance && moveToFlowStep("fiscalIssuance")}
+                                >
+                                  <span className="configuration-setting-icon" aria-hidden="true">
+                                    <Icon size={19} />
+                                  </span>
+
+                                  <span className="configuration-setting-copy">
+                                    <strong>{area.title}</strong>
+                                    <small>{area.description}</small>
+                                  </span>
+                                </button>
+
+                                <button
+                                  aria-checked={isFiscalEmissionActive}
+                                  aria-label={isFiscalEmissionActive ? "Desativar emissão fiscal" : "Ativar emissão fiscal"}
+                                  className={
+                                    isFiscalEmissionActive
+                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                                      : "configuration-setting-fiscal-toggle"
+                                  }
+                                  disabled={isLoading || isSavingFiscalEmission}
+                                  role="switch"
+                                  type="button"
+                                  onClick={() => {
+                                    if (isFiscalEmissionActive) {
+                                      setPendingFiscalDeactivation(true);
+                                      return;
+                                    }
+
+                                    void updateFiscalEmissionStatus(true);
+                                  }}
+                                >
+                                  <span className="configuration-switch" aria-hidden="true">
+                                    {isSavingFiscalEmission ? (
+                                      <LoaderCircle className="configuration-switch-loader" size={15} />
+                                    ) : (
+                                      <span />
+                                    )}
+                                  </span>
+                                </button>
+                              </article>
+                            );
+                          }
 
                           if (targetStep) {
                             return (
@@ -877,6 +1494,55 @@ export default function MeuSistemaConfiguracoesPage() {
           </section>
         </div>
       </main>
+
+      {fiscalDeactivationPresence.isPresent ? (
+        <div
+          className="platform-modal-backdrop fiscal-confirm-backdrop"
+          data-modal-state={fiscalDeactivationPresence.state}
+          role="presentation"
+          {...fiscalDeactivationDismiss.backdropProps}
+        >
+          <section
+            aria-labelledby="fiscal-deactivation-confirm-title"
+            aria-modal="true"
+            className="platform-modal platform-modal-compact fiscal-delete-confirm-modal"
+            role="dialog"
+          >
+            <div className="platform-modal-head">
+              <span className="platform-modal-kicker">Emissão fiscal</span>
+              <h2 id="fiscal-deactivation-confirm-title">Desativar emissão fiscal?</h2>
+              <p>
+                Ao confirmar, o sistema deixa de emitir notas e o módulo fiscal fica inativo até ser ativado novamente.
+              </p>
+            </div>
+
+            <div className="platform-modal-actions fiscal-delete-confirm-actions">
+              <button
+                className="platform-secondary-button"
+                disabled={isSavingFiscalEmission}
+                type="button"
+                onClick={closeFiscalDeactivationModal}
+              >
+                Cancelar
+              </button>
+
+              <button
+                className="fiscal-danger-button fiscal-edit-delete-button"
+                disabled={isSavingFiscalEmission}
+                type="button"
+                onClick={() => void confirmFiscalDeactivation()}
+              >
+                {isSavingFiscalEmission ? (
+                  <LoaderCircle aria-hidden="true" className="configuration-switch-loader" size={16} />
+                ) : (
+                  <AlertTriangle aria-hidden="true" size={16} />
+                )}
+                Desativar fiscal
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </PlatformFrame>
   );
 }

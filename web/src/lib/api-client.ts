@@ -84,8 +84,8 @@ export async function apiPut<TResponse>(path: string, body: unknown, options: Pi
   });
 }
 
-export async function apiDelete(path: string, options: Pick<ApiRequestOptions, "token"> = {}) {
-  return apiRequest<null>(path, {
+export async function apiDelete<TResponse = null>(path: string, options: Pick<ApiRequestOptions, "token"> = {}) {
+  return apiRequest<TResponse>(path, {
     method: "DELETE",
     token: options.token
   });

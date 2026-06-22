@@ -14,6 +14,7 @@ router.post('/transferencias', controller.registrarTransferencia);
 router.post('/movimentacoes/lancamentos/:id/reverter', controller.reverterLancamento);
 router.post('/movimentacoes/:id/reverter', controller.reverterMovimentacao);
 router.put('/saldos', controller.updateSaldo);
+router.post('/:id/ativar', controller.activateEstoque);
 router.put('/:id', controller.updateEstoque);
 router.delete('/:id', controller.deleteEstoque);
 

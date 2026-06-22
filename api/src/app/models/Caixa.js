@@ -49,6 +49,12 @@ Caixa.init(
     funcionario_abertura_nome: {
       type: DataTypes.STRING(120),
     },
+    funcionario_fechamento_id: {
+      type: DataTypes.STRING(64),
+    },
+    funcionario_fechamento_nome: {
+      type: DataTypes.STRING(120),
+    },
   },
   {
     sequelize,

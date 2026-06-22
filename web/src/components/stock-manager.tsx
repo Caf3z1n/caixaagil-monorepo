@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   ArrowLeftRight,
   ArrowRight,
+  Ban,
   Beef,
   Beer,
   BookOpen,
@@ -120,6 +121,7 @@ type ArquivoResumo = {
 type Estoque = {
   id: number;
   nome: string;
+  ativo: boolean;
   principal_venda: boolean;
   permite_venda: boolean;
   tipo: "principal" | "reposicao";
@@ -127,6 +129,27 @@ type Estoque = {
   ordem: number;
   produtos_count: number;
   total_quantidade: number;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
+};
+
+type DeleteStockResponse =
+  | {
+      action: "deleted";
+      id: number;
+      message?: string;
+    }
+  | {
+      action: "deactivated";
+      estoque: Estoque;
+      message?: string;
+    };
+
+type ActivateStockResponse = {
+  action: "activated";
+  estoque: Estoque;
+  message?: string;
 };
 
 type ProdutoEstoque = {
@@ -550,8 +573,9 @@ export function StockManager() {
   const stocks = snapshot.estoques;
   const products = snapshot.produtos;
   const movements = snapshot.movimentacoes;
-  const defaultStock = stocks.find(stock => stock.principal_venda) ?? stocks[0] ?? null;
-  const replenishmentStocks = stocks.filter(stock => !stock.principal_venda);
+  const activeStocks = stocks.filter(stock => stock.ativo);
+  const defaultStock = activeStocks.find(stock => stock.principal_venda) ?? activeStocks[0] ?? null;
+  const replenishmentStocks = activeStocks.filter(stock => !stock.principal_venda);
   const editingStock = editingStockId
     ? stocks.find(stock => stock.id === editingStockId) ?? null
     : null;
@@ -759,11 +783,19 @@ export function StockManager() {
   }
 
   function firstStockId() {
-    return defaultStock ? String(defaultStock.id) : stocks[0] ? String(stocks[0].id) : "";
+    return defaultStock ? String(defaultStock.id) : activeStocks[0] ? String(activeStocks[0].id) : "";
   }
 
   function firstReplenishmentOrDefaultStockId() {
     return replenishmentStocks[0] ? String(replenishmentStocks[0].id) : firstStockId();
+  }
+
+  function resolveActiveStockId(stockId: number | null | undefined, fallbackId: string) {
+    if (stockId && activeStocks.some(stock => stock.id === stockId)) {
+      return String(stockId);
+    }
+
+    return fallbackId;
   }
 
   function runFlowTransition(motion: StockFlowMotion, update: () => void) {
@@ -914,9 +946,7 @@ export function StockManager() {
     const firstMovement = sourceMovements[0] ?? null;
 
     setPurchaseStockId(
-      firstMovement?.estoque_destino_id
-        ? String(firstMovement.estoque_destino_id)
-        : firstReplenishmentOrDefaultStockId()
+      resolveActiveStockId(firstMovement?.estoque_destino_id, firstReplenishmentOrDefaultStockId())
     );
     setPurchaseItems(
       sourceMovements
@@ -937,9 +967,7 @@ export function StockManager() {
     const firstMovement = sourceMovements[0] ?? null;
 
     setAdjustmentStockId(
-      firstMovement?.estoque_destino_id
-        ? String(firstMovement.estoque_destino_id)
-        : firstStockId()
+      resolveActiveStockId(firstMovement?.estoque_destino_id, firstStockId())
     );
     setAdjustmentItems(
       sourceMovements
@@ -959,16 +987,16 @@ export function StockManager() {
     const sourceMovements = getSourceMovements(source);
     const firstMovement = sourceMovements[0] ?? null;
     const originId = firstMovement?.estoque_origem_id
-      ? String(firstMovement.estoque_origem_id)
+      ? resolveActiveStockId(firstMovement.estoque_origem_id, firstReplenishmentOrDefaultStockId())
       : firstReplenishmentOrDefaultStockId();
     const fallbackDestination = defaultStock && String(defaultStock.id) !== originId
       ? String(defaultStock.id)
-      : stocks.find(stock => String(stock.id) !== originId)?.id;
+      : activeStocks.find(stock => String(stock.id) !== originId)?.id;
 
     setTransferOriginId(originId);
     setTransferDestinationId(
       firstMovement?.estoque_destino_id
-        ? String(firstMovement.estoque_destino_id)
+        ? resolveActiveStockId(firstMovement.estoque_destino_id, fallbackDestination ? String(fallbackDestination) : "")
         : fallbackDestination
           ? String(fallbackDestination)
           : ""
@@ -1178,7 +1206,7 @@ export function StockManager() {
     setIsSubmitting(true);
 
     try {
-      await apiDelete(`/estoques/${pendingDeleteStock.id}`, { token });
+      await apiDelete<DeleteStockResponse>(`/estoques/${pendingDeleteStock.id}`, { token });
       setPendingDeleteStock(null);
       closeStockModal();
       setSelectedStockId("all");
@@ -1186,6 +1214,31 @@ export function StockManager() {
     } catch (error) {
       setPendingDeleteStock(null);
       setSubmitError(getErrorMessage(error, "Não foi possível excluir o estoque."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function executeActivateStock() {
+    if (!editingStock || editingStock.ativo || isSubmitting) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setSubmitError("Sessão expirada. Entre novamente para continuar.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      await apiPost<ActivateStockResponse>(`/estoques/${editingStock.id}/ativar`, {}, { token });
+      await loadStock();
+    } catch (error) {
+      setSubmitError(getErrorMessage(error, "Não foi possível ativar o estoque."));
     } finally {
       setIsSubmitting(false);
     }
@@ -1852,12 +1905,12 @@ export function StockManager() {
                     type="button"
                     className={
                       isSelected
-                        ? "product-category-filter-chip product-category-filter-chip-active"
-                        : "product-category-filter-chip"
+                        ? `product-category-filter-chip product-category-filter-chip-active${stock.ativo ? "" : " platform-record-inactive"}`
+                        : `product-category-filter-chip${stock.ativo ? "" : " platform-record-inactive"}`
                     }
                     onClick={() => setSelectedStockId(stock.id)}
                   >
-                    {stock.nome}
+                    {stock.nome}{stock.ativo ? "" : " · Desativado"}
                   </button>
                   {isSelected && !stock.bloqueado ? (
                     <button
@@ -1901,6 +1954,7 @@ export function StockManager() {
 
                 {group.products.map(product => {
                   const displayedBalance = getDisplayedProductBalance(product);
+                  const adjustmentStock = selectedStock?.ativo ? selectedStock : defaultStock;
 
                   return (
                     <button
@@ -1916,14 +1970,14 @@ export function StockManager() {
                           produto_nome: product.nome,
                           estoque_origem_id: null,
                           estoque_origem_nome: null,
-                          estoque_destino_id: selectedStock?.id ?? defaultStock?.id ?? null,
-                          estoque_destino_nome: selectedStock?.nome ?? defaultStock?.nome ?? null,
+                          estoque_destino_id: adjustmentStock?.id ?? null,
+                          estoque_destino_nome: adjustmentStock?.nome ?? null,
                           tipo: "acerto",
-                          quantidade: getProductBalance(product, selectedStock?.id ?? defaultStock?.id ?? 0),
+                          quantidade: getProductBalance(product, adjustmentStock?.id ?? 0),
                           saldo_origem_antes: null,
                           saldo_origem_depois: null,
                           saldo_destino_antes: null,
-                          saldo_destino_depois: getProductBalance(product, selectedStock?.id ?? defaultStock?.id ?? 0),
+                          saldo_destino_depois: getProductBalance(product, adjustmentStock?.id ?? 0),
                           created_at: new Date().toISOString()
                         });
                       }}
@@ -2040,15 +2094,15 @@ export function StockManager() {
                 <button
                   className={
                     stockFilter.value === stock.id
-                      ? "product-category-filter-chip product-category-filter-chip-active"
-                      : "product-category-filter-chip"
+                      ? `product-category-filter-chip product-category-filter-chip-active${stock.ativo ? "" : " platform-record-inactive"}`
+                      : `product-category-filter-chip${stock.ativo ? "" : " platform-record-inactive"}`
                   }
                   key={stock.id}
                   title={`${stockPurchaseCount} lançamento${stockPurchaseCount === 1 ? "" : "s"}`}
                   type="button"
                   onClick={() => stockFilter.onChange(stock.id)}
                 >
-                  {stock.nome}
+                  {stock.nome}{stock.ativo ? "" : " · Desativado"}
                 </button>
               );
             })}
@@ -2122,7 +2176,7 @@ export function StockManager() {
     title,
     description,
     onSelect,
-    options = stocks
+    options = activeStocks
   }: {
     title: string;
     description: string;
@@ -2668,7 +2722,7 @@ export function StockManager() {
       });
     }
 
-    const availableDestinationStocks = stocks.filter(stock => String(stock.id) !== transferOriginId);
+    const availableDestinationStocks = activeStocks.filter(stock => String(stock.id) !== transferOriginId);
 
     return (
       <div className={flowPanelClassName}>
@@ -3244,7 +3298,7 @@ export function StockManager() {
 
             <div
               className={
-                editingStockId
+                editingStockId && editingStock?.ativo !== false
                   ? "platform-modal-actions product-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete"
                   : "platform-modal-actions product-modal-actions platform-item-modal-actions"
               }
@@ -3252,26 +3306,37 @@ export function StockManager() {
               <button className="platform-secondary-button" type="button" onClick={closeStockModal}>
                 Cancelar
               </button>
-              {editingStockId ? (
+              {editingStockId && editingStock?.ativo === false ? (
+                <button
+                  className="platform-primary-button platform-save-button"
+                  type="button"
+                  onClick={() => void executeActivateStock()}
+                  disabled={isSubmitting}
+                >
+                  <RotateCcw size={16} />
+                  Ativar
+                </button>
+              ) : editingStockId ? (
                 <button
                   className="fiscal-danger-button fiscal-edit-delete-button"
-                  disabled={Boolean(editingStock?.produtos_count)}
                   title={
-                    editingStock?.produtos_count
-                      ? "Zere os produtos deste estoque antes de excluir."
+                    editingStock?.acao_remocao === "desativar"
+                      ? "Desativar estoque"
                       : "Excluir estoque"
                   }
                   type="button"
                   onClick={() => editingStock && setPendingDeleteStock(editingStock)}
                 >
-                  <Trash2 size={16} />
-                  Excluir
+                  {editingStock?.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                  {editingStock?.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
                 </button>
               ) : null}
-              <button className="platform-primary-button platform-save-button" type="submit" form="stock-form" disabled={!canSaveStockDraft(stockDraft) || isSubmitting}>
-                {isSubmitting ? <LoaderCircle className="platform-spin" size={16} /> : <Warehouse size={16} />}
-                {editingStockId ? "Salvar estoque" : "Criar estoque"}
-              </button>
+              {editingStockId && editingStock?.ativo === false ? null : (
+                <button className="platform-primary-button platform-save-button" type="submit" form="stock-form" disabled={!canSaveStockDraft(stockDraft) || isSubmitting}>
+                  {isSubmitting ? <LoaderCircle className="platform-spin" size={16} /> : <Warehouse size={16} />}
+                  {editingStockId ? "Salvar estoque" : "Criar estoque"}
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -3459,8 +3524,14 @@ export function StockManager() {
             role="dialog"
           >
             <div className="platform-modal-head">
-              <h2 id="stock-delete-confirm-title">Excluir estoque?</h2>
-              <p>Confirme para excluir "{visiblePendingDeleteStock.nome}". Essa ação não poderá ser desfeita.</p>
+              <h2 id="stock-delete-confirm-title">
+                {visiblePendingDeleteStock.acao_remocao === "desativar" ? "Desativar estoque?" : "Excluir estoque?"}
+              </h2>
+              <p>
+                {visiblePendingDeleteStock.acao_remocao === "desativar"
+                  ? `"${visiblePendingDeleteStock.nome}" ficará fora de novas operações, mas saldos e movimentações antigas continuam preservados.`
+                  : `Confirme para excluir "${visiblePendingDeleteStock.nome}". Essa ação não poderá ser desfeita.`}
+              </p>
             </div>
 
             <div className="platform-modal-actions fiscal-delete-confirm-actions">
@@ -3468,8 +3539,8 @@ export function StockManager() {
                 Cancelar
               </button>
               <button className="fiscal-danger-button fiscal-edit-delete-button" type="button" onClick={executeDeleteStock}>
-                <Trash2 size={16} />
-                Excluir
+                {visiblePendingDeleteStock.acao_remocao === "desativar" ? <Ban size={16} /> : <Trash2 size={16} />}
+                {visiblePendingDeleteStock.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
               </button>
             </div>
           </section>

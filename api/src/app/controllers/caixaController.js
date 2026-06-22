@@ -125,6 +125,8 @@ function mapSession(record) {
     situacao: normalizeKey(session.situacao) === 'closed' ? 'fechado' : session.situacao,
     funcionario_abertura_id: session.funcionario_abertura_id || null,
     funcionario_abertura_nome: session.funcionario_abertura_nome || null,
+    funcionario_fechamento_id: session.funcionario_fechamento_id || null,
+    funcionario_fechamento_nome: session.funcionario_fechamento_nome || null,
   };
 }
 

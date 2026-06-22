@@ -31,6 +31,7 @@ function isMainAccountOnlyRoute(req) {
     baseUrl.startsWith('/usuarios') ||
     baseUrl.startsWith('/assinaturas') ||
     baseUrl.startsWith('/configuracoes') ||
+    baseUrl.startsWith('/funcionarios') ||
     baseUrl.startsWith('/nf')
   );
 }

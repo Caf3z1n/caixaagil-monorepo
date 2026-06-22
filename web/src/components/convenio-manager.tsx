@@ -2,15 +2,19 @@
 
 import Link from "next/link";
 import { flushSync } from "react-dom";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
   Banknote,
+  Ban,
+  Building2,
   Check,
   CreditCard,
   HandCoins,
   LoaderCircle,
+  MapPin,
+  MonitorCheck,
   Pencil,
   Plus,
   QrCode,
@@ -23,6 +27,7 @@ import {
   X
 } from "lucide-react";
 
+import { PlatformSelect, type PlatformSelectOption } from "@/components/platform-select";
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
@@ -35,15 +40,54 @@ type ConvenioFlowMotion = "forward" | "backward";
 type RecebimentoStatusFilter = "todos" | "pendente" | "pago";
 type ConvenioChargeStep = "notas" | "pagamento";
 type RecebimentoPaymentMethod = "dinheiro" | "pix" | "cartao";
+type ClienteTipoPessoa = "fisica" | "juridica";
+type ClientLookupTarget = "cnpj" | "cep" | null;
 
 type ClienteConvenio = {
   id: number;
-  tipo_pessoa: "fisica" | "juridica";
+  tipo_pessoa: ClienteTipoPessoa;
   nome: string;
   ativo: boolean;
   permite_pagamento_frente_caixa: boolean;
+  dados_fiscais: FiscalClientData | null;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
   created_at: string | null;
   updated_at: string | null;
+};
+
+type FiscalAddressData = {
+  logradouro: string;
+  numero: string;
+  complemento: string;
+  bairro: string;
+  codigo_municipio: string;
+  municipio: string;
+  uf: string;
+  cep: string;
+};
+
+type FiscalClientData = {
+  cnpj_cpf: string;
+  razao_social: string;
+  nome_fantasia: string;
+  inscricao_estadual: string;
+  inscricao_municipal: string;
+  crt: string;
+  cnae: string;
+  email: string;
+  telefone: string;
+  endereco: FiscalAddressData;
+};
+
+type FiscalCompanyPrefill = {
+  uf?: string;
+  emitente?: Partial<FiscalClientData>;
+};
+
+type FiscalZipPrefill = {
+  endereco?: Partial<FiscalAddressData>;
 };
 
 type CaixaReferencia = {
@@ -98,10 +142,34 @@ type ClientModalState =
 type DeleteClientState = {
   id: number;
   nome: string;
+  action: "excluir" | "desativar";
+};
+
+type DeleteClientResponse =
+  | {
+      action: "deleted";
+      id: number;
+      message?: string;
+    }
+  | {
+      action: "deactivated";
+      cliente: ClienteConvenio;
+      message?: string;
+    };
+
+type ActivateClientResponse = {
+  action: "activated";
+  cliente: ClienteConvenio;
+  message?: string;
 };
 
 type Feedback = {
   tone: "success" | "error";
+  message: string;
+};
+
+type ClientLookupFeedback = {
+  tone: "warning" | "error";
   message: string;
 };
 
@@ -127,6 +195,214 @@ const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
 });
+
+const clientTypeOptions: ReadonlyArray<PlatformSelectOption<ClienteTipoPessoa>> = [
+  { value: "fisica", label: "Pessoa física", leading: <UserRound size={16} /> },
+  { value: "juridica", label: "Pessoa jurídica", leading: <Building2 size={16} /> }
+];
+
+const ufOptions: ReadonlyArray<PlatformSelectOption<string>> = [
+  "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG",
+  "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
+].map(uf => ({ value: uf, label: uf }));
+
+const defaultFiscalAddressData: FiscalAddressData = {
+  logradouro: "",
+  numero: "",
+  complemento: "",
+  bairro: "",
+  codigo_municipio: "",
+  municipio: "",
+  uf: "",
+  cep: ""
+};
+
+const defaultFiscalClientData: FiscalClientData = {
+  cnpj_cpf: "",
+  razao_social: "",
+  nome_fantasia: "",
+  inscricao_estadual: "",
+  inscricao_municipal: "",
+  crt: "",
+  cnae: "",
+  email: "",
+  telefone: "",
+  endereco: defaultFiscalAddressData
+};
+
+const fiscalClientTextKeys: Array<Exclude<keyof FiscalClientData, "endereco">> = [
+  "cnpj_cpf",
+  "razao_social",
+  "nome_fantasia",
+  "inscricao_estadual",
+  "inscricao_municipal",
+  "crt",
+  "cnae",
+  "email",
+  "telefone"
+];
+
+const fiscalAddressKeys: Array<keyof FiscalAddressData> = [
+  "logradouro",
+  "numero",
+  "complemento",
+  "bairro",
+  "codigo_municipio",
+  "municipio",
+  "uf",
+  "cep"
+];
+
+function createDefaultFiscalClientData(): FiscalClientData {
+  return {
+    ...defaultFiscalClientData,
+    endereco: { ...defaultFiscalAddressData }
+  };
+}
+
+function digitsOnly(value: string, maxLength: number) {
+  return value.replace(/\D/g, "").slice(0, maxLength);
+}
+
+function formatCnpj(value: string) {
+  const digits = digitsOnly(value, 14);
+  const part1 = digits.slice(0, 2);
+  const part2 = digits.slice(2, 5);
+  const part3 = digits.slice(5, 8);
+  const part4 = digits.slice(8, 12);
+  const part5 = digits.slice(12, 14);
+
+  if (digits.length <= 2) {
+    return part1;
+  }
+
+  if (digits.length <= 5) {
+    return `${part1}.${part2}`;
+  }
+
+  if (digits.length <= 8) {
+    return `${part1}.${part2}.${part3}`;
+  }
+
+  if (digits.length <= 12) {
+    return `${part1}.${part2}.${part3}/${part4}`;
+  }
+
+  return `${part1}.${part2}.${part3}/${part4}-${part5}`;
+}
+
+function formatCep(value: string) {
+  const digits = digitsOnly(value, 8);
+
+  if (digits.length <= 5) {
+    return digits;
+  }
+
+  return `${digits.slice(0, 5)}-${digits.slice(5, 8)}`;
+}
+
+function normalizeFiscalClientData(value?: Partial<FiscalClientData> | null): FiscalClientData {
+  const endereco = value?.endereco ?? defaultFiscalAddressData;
+
+  return {
+    cnpj_cpf: digitsOnly(String(value?.cnpj_cpf ?? ""), 14),
+    razao_social: String(value?.razao_social ?? ""),
+    nome_fantasia: String(value?.nome_fantasia ?? ""),
+    inscricao_estadual: digitsOnly(String(value?.inscricao_estadual ?? ""), 20),
+    inscricao_municipal: digitsOnly(String(value?.inscricao_municipal ?? ""), 20),
+    crt: digitsOnly(String(value?.crt ?? ""), 1),
+    cnae: digitsOnly(String(value?.cnae ?? ""), 7),
+    email: String(value?.email ?? ""),
+    telefone: digitsOnly(String(value?.telefone ?? ""), 14),
+    endereco: {
+      logradouro: String(endereco.logradouro ?? ""),
+      numero: String(endereco.numero ?? ""),
+      complemento: String(endereco.complemento ?? ""),
+      bairro: String(endereco.bairro ?? ""),
+      codigo_municipio: digitsOnly(String(endereco.codigo_municipio ?? ""), 7),
+      municipio: String(endereco.municipio ?? ""),
+      uf: String(endereco.uf ?? "").toUpperCase().slice(0, 2),
+      cep: digitsOnly(String(endereco.cep ?? ""), 8)
+    }
+  };
+}
+
+function compactTextPatch<TKey extends string>(value: Partial<Record<TKey, unknown>> | undefined, keys: TKey[]) {
+  const patch: Partial<Record<TKey, string>> = {};
+
+  keys.forEach(key => {
+    const nextValue = value?.[key];
+
+    if (typeof nextValue === "string" && nextValue.trim()) {
+      patch[key] = nextValue.trim();
+    }
+  });
+
+  return patch;
+}
+
+function getLegalClientMissingFields(fiscalData: FiscalClientData) {
+  const missing: string[] = [];
+  const endereco = fiscalData.endereco;
+
+  if (fiscalData.cnpj_cpf.length !== 14) {
+    missing.push("CNPJ");
+  }
+
+  if (fiscalData.razao_social.trim().length < 2) {
+    missing.push("razão social");
+  }
+
+  if (fiscalData.nome_fantasia.trim().length < 2) {
+    missing.push("nome fantasia");
+  }
+
+  if (endereco.cep.length !== 8) {
+    missing.push("CEP");
+  }
+
+  if (!endereco.municipio.trim()) {
+    missing.push("município");
+  }
+
+  if (endereco.uf.length !== 2) {
+    missing.push("UF");
+  }
+
+  if (endereco.codigo_municipio.length !== 7) {
+    missing.push("código IBGE");
+  }
+
+  if (!endereco.logradouro.trim()) {
+    missing.push("logradouro");
+  }
+
+  if (!endereco.numero.trim()) {
+    missing.push("número");
+  }
+
+  if (!endereco.bairro.trim()) {
+    missing.push("bairro");
+  }
+
+  return missing;
+}
+
+function getClientDraftName(tipoPessoa: ClienteTipoPessoa, name: string, fiscalData: FiscalClientData) {
+  if (tipoPessoa === "juridica") {
+    return fiscalData.nome_fantasia.trim();
+  }
+
+  return name.trim();
+}
+
+function getClientDisplayName(cliente: ClienteConvenio) {
+  if (cliente.tipo_pessoa === "juridica") {
+    return cliente.dados_fiscais?.nome_fantasia || cliente.nome;
+  }
+
+  return cliente.nome;
+}
 
 function formatCurrencyFromCents(value: number) {
   return currencyFormatter.format(value / 100);
@@ -169,11 +445,17 @@ function normalizeClientNameKey(value: string) {
 }
 
 function getClienteTipoPessoaLabel(tipoPessoa: ClienteConvenio["tipo_pessoa"]) {
-  return tipoPessoa === "juridica" ? "Cliente pessoa jurídica" : "Cliente pessoa física";
+  return tipoPessoa === "juridica" ? "Pessoa jurídica" : "Pessoa física";
 }
 
 function sortClientes(clientes: ClienteConvenio[]) {
-  return [...clientes].sort((left, right) => left.nome.localeCompare(right.nome, "pt-BR"));
+  return [...clientes].sort((left, right) => {
+    if (left.ativo !== right.ativo) {
+      return left.ativo ? -1 : 1;
+    }
+
+    return getClientDisplayName(left).localeCompare(getClientDisplayName(right), "pt-BR");
+  });
 }
 
 function getFlowStepIndex(step: ConvenioFlowStep) {
@@ -277,8 +559,12 @@ export function ConvenioManager() {
   const [isLoadingClients, setIsLoadingClients] = useState(false);
   const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
   const [clientModal, setClientModal] = useState<ClientModalState | null>(null);
+  const [clientDraftType, setClientDraftType] = useState<ClienteTipoPessoa>("fisica");
   const [clientDraftName, setClientDraftName] = useState("");
+  const [clientDraftFiscal, setClientDraftFiscal] = useState<FiscalClientData>(() => createDefaultFiscalClientData());
   const [clientDraftFrontPayment, setClientDraftFrontPayment] = useState(false);
+  const [clientLookupFeedback, setClientLookupFeedback] = useState<ClientLookupFeedback | null>(null);
+  const [clientLookupTarget, setClientLookupTarget] = useState<ClientLookupTarget>(null);
   const [deleteClientRequest, setDeleteClientRequest] = useState<DeleteClientState | null>(null);
   const [cancelReceiptRequest, setCancelReceiptRequest] = useState<RecebimentoConvenio | null>(null);
   const [chargeGroupKey, setChargeGroupKey] = useState<string | null>(null);
@@ -288,6 +574,10 @@ export function ConvenioManager() {
   const [chargePaymentMethod, setChargePaymentMethod] = useState<RecebimentoPaymentMethod | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const lastClientCnpjLookupRef = useRef("");
+  const lastClientCepLookupRef = useRef("");
+  const clientCnpjChangedByUserRef = useRef(false);
+  const clientCepChangedByUserRef = useRef(false);
   const activeProgressIndex = getFlowStepIndex(flowStep);
   const flowPanelClassName = `platform-flow-panel platform-flow-panel-${flowMotion}`;
   const SectionIcon = flowStep === "clientes" ? UsersRound : flowStep === "recebimentos" ? ReceiptText : HandCoins;
@@ -299,7 +589,18 @@ export function ConvenioManager() {
       return clientes;
     }
 
-    return clientes.filter((cliente) => normalizeSearch(cliente.nome).includes(query));
+    return clientes.filter((cliente) => {
+      const searchable = [
+        cliente.nome,
+        getClientDisplayName(cliente),
+        cliente.dados_fiscais?.razao_social,
+        cliente.dados_fiscais?.cnpj_cpf
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return normalizeSearch(searchable).includes(query);
+    });
   }, [clientSearch, clientes]);
   const filteredReceipts = useMemo(() => {
     const query = normalizeSearch(receiptSearch);
@@ -402,12 +703,20 @@ export function ConvenioManager() {
   const allPendingChargeReceiptsSelected =
     pendingChargeReceipts.length > 0 &&
     pendingChargeReceipts.every((recebimento) => selectedChargeReceiptIds.includes(recebimento.id));
+  const clientDraftResolvedName = useMemo(
+    () => getClientDraftName(clientDraftType, clientDraftName, clientDraftFiscal),
+    [clientDraftFiscal, clientDraftName, clientDraftType]
+  );
+  const legalClientMissingFields = useMemo(
+    () => clientDraftType === "juridica" ? getLegalClientMissingFields(clientDraftFiscal) : [],
+    [clientDraftFiscal, clientDraftType]
+  );
   const clientNameConflict = useMemo(() => {
     if (!clientModal) {
       return null;
     }
 
-    const nameKey = normalizeClientNameKey(clientDraftName);
+    const nameKey = normalizeClientNameKey(clientDraftResolvedName);
 
     if (nameKey.length < 2) {
       return null;
@@ -420,10 +729,14 @@ export function ConvenioManager() {
         return false;
       }
 
-      return normalizeClientNameKey(cliente.nome) === nameKey;
+      if (!cliente.ativo) {
+        return false;
+      }
+
+      return normalizeClientNameKey(getClientDisplayName(cliente)) === nameKey;
     }) ?? null;
-  }, [clientes, clientDraftName, clientModal]);
-  const canSubmitClient = clientDraftName.trim().length >= 2 && !clientNameConflict;
+  }, [clientes, clientDraftResolvedName, clientModal]);
+  const canSubmitClient = clientDraftResolvedName.length >= 2 && legalClientMissingFields.length === 0 && !clientNameConflict;
   const clientModalPresence = useModalPresence(clientModal);
   const deleteClientPresence = useModalPresence(deleteClientRequest);
   const chargePresence = useModalPresence(chargeReceiptGroup);
@@ -545,6 +858,46 @@ export function ConvenioManager() {
     }
   }, [chargeGroupKey, chargeReceiptGroup, flowStep]);
 
+  useEffect(() => {
+    if (!clientModal || clientDraftType !== "juridica") {
+      return undefined;
+    }
+
+    const cnpj = clientDraftFiscal.cnpj_cpf;
+
+    if (!clientCnpjChangedByUserRef.current || cnpj.length !== 14 || cnpj === lastClientCnpjLookupRef.current) {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => {
+      lastClientCnpjLookupRef.current = cnpj;
+      clientCnpjChangedByUserRef.current = false;
+      void lookupClientCnpj(cnpj);
+    }, 520);
+
+    return () => window.clearTimeout(timeout);
+  }, [clientDraftFiscal.cnpj_cpf, clientDraftType, clientModal]);
+
+  useEffect(() => {
+    if (!clientModal || clientDraftType !== "juridica") {
+      return undefined;
+    }
+
+    const cep = clientDraftFiscal.endereco.cep;
+
+    if (!clientCepChangedByUserRef.current || cep.length !== 8 || cep === lastClientCepLookupRef.current) {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => {
+      lastClientCepLookupRef.current = cep;
+      clientCepChangedByUserRef.current = false;
+      void lookupClientCep(cep);
+    }, 520);
+
+    return () => window.clearTimeout(timeout);
+  }, [clientDraftFiscal.endereco.cep, clientDraftType, clientModal]);
+
   function moveToFlowStep(nextStep: ConvenioFlowStep) {
     if (nextStep === flowStep) {
       return;
@@ -584,17 +937,167 @@ export function ConvenioManager() {
     }, 430);
   }
 
-  function openCreateClientModal() {
+  function resetClientLookupRefs(fiscalData: FiscalClientData) {
+    lastClientCnpjLookupRef.current = fiscalData.cnpj_cpf;
+    lastClientCepLookupRef.current = fiscalData.endereco.cep;
+    clientCnpjChangedByUserRef.current = false;
+    clientCepChangedByUserRef.current = false;
+    setClientLookupFeedback(null);
+    setClientLookupTarget(null);
+  }
+
+  function updateClientFiscal(patch: Partial<FiscalClientData>) {
+    setClientDraftFiscal(current => normalizeFiscalClientData({
+      ...current,
+      ...patch
+    }));
+  }
+
+  function updateClientFiscalAddress(patch: Partial<FiscalAddressData>) {
+    setClientDraftFiscal(current => normalizeFiscalClientData({
+      ...current,
+      endereco: {
+        ...current.endereco,
+        ...patch
+      }
+    }));
+  }
+
+  function changeClientType(tipoPessoa: ClienteTipoPessoa) {
+    setClientDraftType(tipoPessoa);
+    setClientLookupFeedback(null);
     setFeedback(null);
+
+    if (tipoPessoa === "juridica") {
+      setClientDraftFiscal(current => normalizeFiscalClientData({
+        ...current,
+        nome_fantasia: current.nome_fantasia || clientDraftName
+      }));
+    }
+  }
+
+  function applyClientCompanyPrefill(prefill: FiscalCompanyPrefill) {
+    const emitentePatch = compactTextPatch(prefill.emitente, fiscalClientTextKeys);
+    const enderecoPatch = compactTextPatch(prefill.emitente?.endereco, fiscalAddressKeys);
+
+    setClientDraftFiscal(current => normalizeFiscalClientData({
+      ...current,
+      ...emitentePatch,
+      endereco: {
+        ...current.endereco,
+        ...enderecoPatch,
+        uf: enderecoPatch.uf || prefill.uf || current.endereco.uf
+      }
+    }));
+  }
+
+  function applyClientZipPrefill(prefill: FiscalZipPrefill) {
+    const enderecoPatch = compactTextPatch(prefill.endereco, fiscalAddressKeys);
+
+    setClientDraftFiscal(current => normalizeFiscalClientData({
+      ...current,
+      endereco: {
+        ...current.endereco,
+        ...enderecoPatch
+      }
+    }));
+  }
+
+  async function lookupClientCnpj(cnpj: string) {
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setClientLookupFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para consultar CNPJ."
+      });
+      return;
+    }
+
+    setClientLookupTarget("cnpj");
+    setClientLookupFeedback(null);
+
+    try {
+      const prefill = await apiGet<FiscalCompanyPrefill>(`/configuracoes/integracoes/cnpja/cnpj/${cnpj}`, { token });
+      applyClientCompanyPrefill(prefill);
+      setClientLookupFeedback(null);
+    } catch (error) {
+      setClientLookupFeedback({
+        tone: "warning",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível consultar o CNPJ."
+      });
+    } finally {
+      setClientLookupTarget(null);
+    }
+  }
+
+  async function lookupClientCep(cep: string) {
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setClientLookupFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para consultar CEP."
+      });
+      return;
+    }
+
+    setClientLookupTarget("cep");
+    setClientLookupFeedback(null);
+
+    try {
+      const prefill = await apiGet<FiscalZipPrefill>(`/configuracoes/integracoes/cnpja/cep/${cep}`, { token });
+      applyClientZipPrefill(prefill);
+      setClientLookupFeedback(null);
+    } catch (error) {
+      setClientLookupFeedback({
+        tone: "warning",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível consultar o CEP."
+      });
+    } finally {
+      setClientLookupTarget(null);
+    }
+  }
+
+  function openCreateClientModal() {
+    const emptyFiscalData = createDefaultFiscalClientData();
+
+    setFeedback(null);
+    setClientLookupFeedback(null);
+    setClientLookupTarget(null);
+    setClientDraftType("fisica");
     setClientDraftName("");
+    setClientDraftFiscal(emptyFiscalData);
     setClientDraftFrontPayment(false);
+    resetClientLookupRefs(emptyFiscalData);
     setClientModal({ mode: "create" });
   }
 
   function openEditClientModal(cliente: ClienteConvenio) {
+    const tipoPessoa = cliente.tipo_pessoa === "juridica" ? "juridica" : "fisica";
+    const fiscalData = normalizeFiscalClientData(
+      tipoPessoa === "juridica"
+        ? {
+            ...(cliente.dados_fiscais ?? {}),
+            nome_fantasia: cliente.dados_fiscais?.nome_fantasia || cliente.nome
+          }
+        : null
+    );
+
     setFeedback(null);
+    setClientLookupFeedback(null);
+    setClientLookupTarget(null);
+    setClientDraftType(tipoPessoa);
     setClientDraftName(cliente.nome);
+    setClientDraftFiscal(fiscalData);
     setClientDraftFrontPayment(Boolean(cliente.permite_pagamento_frente_caixa));
+    resetClientLookupRefs(fiscalData);
     setClientModal({ mode: "edit", cliente });
   }
 
@@ -607,7 +1110,8 @@ export function ConvenioManager() {
     setClientModal(null);
     setDeleteClientRequest({
       id: clientModal.cliente.id,
-      nome: clientModal.cliente.nome
+      nome: getClientDisplayName(clientModal.cliente),
+      action: clientModal.cliente.acao_remocao ?? "excluir"
     });
   }
 
@@ -662,10 +1166,21 @@ export function ConvenioManager() {
       return;
     }
 
-    const nome = clientDraftName.trim();
+    const nome = clientDraftResolvedName;
 
     if (nome.length < 2) {
-      setFeedback({ tone: "error", message: "Informe o nome do cliente." });
+      setFeedback({
+        tone: "error",
+        message: clientDraftType === "juridica" ? "Informe o nome fantasia do cliente." : "Informe o nome do cliente."
+      });
+      return;
+    }
+
+    if (clientDraftType === "juridica" && legalClientMissingFields.length > 0) {
+      setFeedback({
+        tone: "error",
+        message: `Informe ${legalClientMissingFields.join(", ")} do cliente pessoa jurídica.`
+      });
       return;
     }
 
@@ -679,7 +1194,9 @@ export function ConvenioManager() {
 
     try {
       const payload = {
+        tipo_pessoa: clientDraftType,
         nome,
+        dados_fiscais: clientDraftType === "juridica" ? clientDraftFiscal : null,
         permite_pagamento_frente_caixa: clientDraftFrontPayment
       };
       const saved =
@@ -725,11 +1242,23 @@ export function ConvenioManager() {
     setFeedback(null);
 
     try {
-      await apiDelete(`/convenios/clientes/${deleteClientRequest.id}`, { token });
-      setClientes((currentClientes) => currentClientes.filter((cliente) => cliente.id !== deleteClientRequest.id));
+      const result = await apiDelete<DeleteClientResponse>(`/convenios/clientes/${deleteClientRequest.id}`, { token });
+
+      if (result?.action === "deactivated") {
+        setClientes((currentClientes) => {
+          const withoutClient = currentClientes.filter((cliente) => cliente.id !== result.cliente.id);
+          return sortClientes([...withoutClient, result.cliente]);
+        });
+      } else {
+        setClientes((currentClientes) => currentClientes.filter((cliente) => cliente.id !== deleteClientRequest.id));
+      }
+
       setClientModal(null);
       setDeleteClientRequest(null);
-      setFeedback({ tone: "success", message: "Cliente removido." });
+      setFeedback({
+        tone: "success",
+        message: result?.action === "deactivated" ? "Cliente desativado." : "Cliente excluído."
+      });
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -737,6 +1266,47 @@ export function ConvenioManager() {
           error instanceof ApiError || error instanceof Error
             ? error.message
             : "Não foi possível remover o cliente."
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function activateClientFromModal() {
+    if (!clientModal || clientModal.mode !== "edit" || clientModal.cliente.ativo || isSubmitting) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({ tone: "error", message: "Sessão expirada. Entre novamente." });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setFeedback(null);
+
+    try {
+      const result = await apiPost<ActivateClientResponse>(
+        `/convenios/clientes/${clientModal.cliente.id}/ativar`,
+        {},
+        { token }
+      );
+
+      setClientes((currentClientes) => {
+        const withoutClient = currentClientes.filter((cliente) => cliente.id !== result.cliente.id);
+        return sortClientes([...withoutClient, result.cliente]);
+      });
+      setClientModal({ mode: "edit", cliente: result.cliente });
+      setFeedback({ tone: "success", message: "Cliente ativado." });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível ativar o cliente."
       });
     } finally {
       setIsSubmitting(false);
@@ -895,7 +1465,7 @@ export function ConvenioManager() {
             <div className={`${flowPanelClassName} convenio-section-panel`} key="clientes">
               <header className="platform-flow-head convenio-flow-head">
                 <h1>Clientes</h1>
-                <p>Pessoa física.</p>
+                <p>Pessoas físicas e jurídicas.</p>
               </header>
 
               <div className="convenio-toolbar">
@@ -925,29 +1495,34 @@ export function ConvenioManager() {
                     <span className="convenio-row-skeleton" key={index} />
                   ))
                 ) : filteredClients.length > 0 ? (
-                  filteredClients.map((cliente) => (
-                    <button
-                      className="convenio-row convenio-client-row"
-                      key={cliente.id}
-                      type="button"
-                      onClick={() => openEditClientModal(cliente)}
-                    >
-                      <span className="convenio-row-icon" aria-hidden="true">
-                        <UserRound size={18} />
-                      </span>
-                      <span className="convenio-row-main">
-                        <strong>{cliente.nome}</strong>
-                        <small>
-                          {getClienteTipoPessoaLabel(cliente.tipo_pessoa)}
-                          {cliente.permite_pagamento_frente_caixa ? " · Recebe no caixa" : ""}
-                        </small>
-                      </span>
-                      <span className="convenio-row-action" aria-hidden="true">
-                        <Pencil size={15} />
-                        Editar
-                      </span>
-                    </button>
-                  ))
+                  filteredClients.map((cliente) => {
+                    const ClienteIcon = cliente.tipo_pessoa === "juridica" ? Building2 : UserRound;
+
+                    return (
+                      <button
+                        className={cliente.ativo ? "convenio-row convenio-client-row" : "convenio-row convenio-client-row platform-record-inactive"}
+                        key={cliente.id}
+                        type="button"
+                        onClick={() => openEditClientModal(cliente)}
+                      >
+                        <span className="convenio-row-icon" aria-hidden="true">
+                          <ClienteIcon size={18} />
+                        </span>
+                        <span className="convenio-row-main">
+                          <strong>{getClientDisplayName(cliente)}</strong>
+                          <small>
+                            {getClienteTipoPessoaLabel(cliente.tipo_pessoa)}
+                            {cliente.permite_pagamento_frente_caixa ? " · Recebe no caixa" : ""}
+                            {!cliente.ativo ? " · Desativado" : ""}
+                          </small>
+                        </span>
+                        <span className="convenio-row-action" aria-hidden="true">
+                          <Pencil size={15} />
+                          Editar
+                        </span>
+                      </button>
+                    );
+                  })
                 ) : (
                   <div className="convenio-empty">
                     <UsersRound aria-hidden="true" size={26} />
@@ -1116,7 +1691,16 @@ export function ConvenioManager() {
           data-modal-state={clientModalPresence.state}
           {...clientModalDismiss.backdropProps}
         >
-          <section className="platform-modal convenio-client-modal" role="dialog" aria-modal="true" aria-labelledby="convenio-client-title">
+          <section
+            className={
+              clientDraftType === "juridica"
+                ? "platform-modal convenio-client-modal convenio-client-modal-legal"
+                : "platform-modal convenio-client-modal"
+            }
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="convenio-client-title"
+          >
             <button className="platform-modal-close" type="button" aria-label="Fechar" onClick={closeClientModal}>
               <X aria-hidden="true" size={19} />
             </button>
@@ -1124,7 +1708,11 @@ export function ConvenioManager() {
               <h2 id="convenio-client-title">
                 {clientModalPresence.presentValue.mode === "edit" ? "Editar cliente" : "Novo cliente"}
               </h2>
-              <p>Cadastro de cliente pessoa física.</p>
+              <p>
+                {clientDraftType === "juridica"
+                  ? "Cadastro fiscal do cliente pessoa jurídica."
+                  : "Cadastro de cliente pessoa física."}
+              </p>
             </header>
             {feedback?.tone === "error" ? (
               <div className="auth-feedback auth-feedback-error platform-modal-feedback" role="alert">
@@ -1132,24 +1720,246 @@ export function ConvenioManager() {
                 <span className="auth-feedback-copy">{feedback.message}</span>
               </div>
             ) : null}
-            <form className="convenio-client-form" id="convenio-client-form" onSubmit={submitClient}>
-              <label className="convenio-client-field">
-                <span>Nome</span>
-                <input
-                  autoFocus
-                  value={clientDraftName}
-                  onChange={(event) => {
-                    setClientDraftName(capitalizeFirstTextLetter(event.target.value));
-                    if (feedback?.tone === "error") {
-                      setFeedback(null);
-                    }
-                  }}
-                  placeholder="Nome do cliente"
+            {clientLookupFeedback ? (
+              <div className={`auth-feedback auth-feedback-${clientLookupFeedback.tone} platform-modal-feedback`} role="status">
+                <span className="auth-feedback-marker" aria-hidden="true" />
+                <span className="auth-feedback-copy">{clientLookupFeedback.message}</span>
+              </div>
+            ) : null}
+            <form className="convenio-client-form fiscal-group-form" data-client-type={clientDraftType} id="convenio-client-form" onSubmit={submitClient}>
+              <div className="convenio-client-field convenio-client-type-field">
+                <span>Tipo do cliente</span>
+                <PlatformSelect
+                  ariaLabel="Tipo do cliente"
+                  disabled={isSubmitting}
+                  options={clientTypeOptions}
+                  value={clientDraftType}
+                  onChange={changeClientType}
                 />
-                {clientNameConflict ? (
-                  <small className="convenio-client-field-error">Já existe um cliente com esse nome.</small>
-                ) : null}
-              </label>
+              </div>
+
+              {clientDraftType === "fisica" ? (
+                <label className="convenio-client-field">
+                  <span>Nome</span>
+                  <input
+                    autoFocus
+                    disabled={isSubmitting}
+                    value={clientDraftName}
+                    onChange={(event) => {
+                      setClientDraftName(capitalizeFirstTextLetter(event.target.value));
+                      if (feedback?.tone === "error") {
+                        setFeedback(null);
+                      }
+                    }}
+                    placeholder="Nome do cliente"
+                  />
+                  {clientNameConflict ? (
+                    <small className="convenio-client-field-error">Já existe um cliente com esse nome.</small>
+                  ) : null}
+                </label>
+              ) : (
+                <>
+                  <section className="fiscal-form-section fiscal-settings-section fiscal-settings-section-company convenio-client-fiscal-section">
+                    <header className="fiscal-settings-section-head">
+                      <span aria-hidden="true">
+                        <Building2 size={18} />
+                      </span>
+                      <strong>Empresa</strong>
+                    </header>
+
+                    <div className="fiscal-form-grid fiscal-company-grid">
+                      <label className="fiscal-field-span-4 fiscal-autofill-field">
+                        <span className="fiscal-field-label-row">
+                          <span>CNPJ</span>
+                          <em className={clientLookupTarget === "cnpj" ? "fiscal-autofill-badge fiscal-autofill-badge-loading" : "fiscal-autofill-badge"}>
+                            {clientLookupTarget === "cnpj" ? "Buscando" : "CNPJá"}
+                          </em>
+                        </span>
+                        <input
+                          autoFocus
+                          autoComplete="off"
+                          disabled={isSubmitting || clientLookupTarget === "cnpj"}
+                          inputMode="numeric"
+                          maxLength={18}
+                          type="text"
+                          value={formatCnpj(clientDraftFiscal.cnpj_cpf)}
+                          onChange={(event) => {
+                            clientCnpjChangedByUserRef.current = true;
+                            setClientLookupFeedback(null);
+                            setFeedback(null);
+                            updateClientFiscal({ cnpj_cpf: digitsOnly(event.currentTarget.value, 14) });
+                          }}
+                        />
+                        {clientLookupTarget === "cnpj" ? (
+                          <small className="fiscal-lookup-hint">Consultando CNPJá.</small>
+                        ) : (
+                          <small className="fiscal-lookup-muted">Preenche dados ao completar.</small>
+                        )}
+                      </label>
+
+                      <label className="fiscal-field-span-5">
+                        <span>Nome fantasia</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          value={clientDraftFiscal.nome_fantasia}
+                          onChange={(event) => updateClientFiscal({ nome_fantasia: event.currentTarget.value })}
+                        />
+                        {clientNameConflict ? (
+                          <small className="convenio-client-field-error">Já existe um cliente com esse nome.</small>
+                        ) : null}
+                      </label>
+
+                      <label className="fiscal-field-span-3">
+                        <span>IE</span>
+                        <input
+                          disabled={isSubmitting}
+                          inputMode="numeric"
+                          maxLength={20}
+                          value={clientDraftFiscal.inscricao_estadual}
+                          onChange={(event) => updateClientFiscal({ inscricao_estadual: digitsOnly(event.currentTarget.value, 20) })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-8">
+                        <span>Razão social</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          value={clientDraftFiscal.razao_social}
+                          onChange={(event) => {
+                            setFeedback(null);
+                            updateClientFiscal({ razao_social: event.currentTarget.value });
+                          }}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-4">
+                        <span>CNAE</span>
+                        <input
+                          disabled={isSubmitting}
+                          inputMode="numeric"
+                          maxLength={7}
+                          value={clientDraftFiscal.cnae}
+                          onChange={(event) => updateClientFiscal({ cnae: digitsOnly(event.currentTarget.value, 7) })}
+                        />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section className="fiscal-form-section fiscal-settings-section fiscal-settings-section-address convenio-client-fiscal-section">
+                    <header className="fiscal-settings-section-head">
+                      <span aria-hidden="true">
+                        <MapPin size={18} />
+                      </span>
+                      <strong>Endereço</strong>
+                    </header>
+
+                    <div className="fiscal-form-grid fiscal-address-grid">
+                      <label className="fiscal-field-span-3 fiscal-autofill-field">
+                        <span className="fiscal-field-label-row">
+                          <span>CEP</span>
+                          <em className={clientLookupTarget === "cep" ? "fiscal-autofill-badge fiscal-autofill-badge-loading" : "fiscal-autofill-badge"}>
+                            {clientLookupTarget === "cep" ? "Buscando" : "CNPJá"}
+                          </em>
+                        </span>
+                        <input
+                          autoComplete="postal-code"
+                          disabled={isSubmitting || clientLookupTarget === "cep"}
+                          inputMode="numeric"
+                          maxLength={9}
+                          type="text"
+                          value={formatCep(clientDraftFiscal.endereco.cep)}
+                          onChange={(event) => {
+                            clientCepChangedByUserRef.current = true;
+                            setClientLookupFeedback(null);
+                            setFeedback(null);
+                            updateClientFiscalAddress({ cep: digitsOnly(event.currentTarget.value, 8) });
+                          }}
+                        />
+                        {clientLookupTarget === "cep" ? (
+                          <small className="fiscal-lookup-hint">Consultando CNPJá.</small>
+                        ) : (
+                          <small className="fiscal-lookup-muted">Preenche endereço ao completar.</small>
+                        )}
+                      </label>
+
+                      <label className="fiscal-field-span-5">
+                        <span>Município</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.municipio}
+                          onChange={(event) => updateClientFiscalAddress({ municipio: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-2">
+                        <span>UF</span>
+                        <PlatformSelect
+                          ariaLabel="UF do endereço"
+                          disabled={isSubmitting}
+                          options={ufOptions}
+                          placeholder="UF"
+                          value={clientDraftFiscal.endereco.uf}
+                          onChange={uf => updateClientFiscalAddress({ uf })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-2">
+                        <span>Código IBGE</span>
+                        <input
+                          disabled={isSubmitting}
+                          inputMode="numeric"
+                          maxLength={7}
+                          value={clientDraftFiscal.endereco.codigo_municipio}
+                          onChange={(event) => updateClientFiscalAddress({ codigo_municipio: digitsOnly(event.currentTarget.value, 7) })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-6">
+                        <span>Logradouro</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          value={clientDraftFiscal.endereco.logradouro}
+                          onChange={(event) => updateClientFiscalAddress({ logradouro: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-2">
+                        <span>Número</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={20}
+                          value={clientDraftFiscal.endereco.numero}
+                          onChange={(event) => updateClientFiscalAddress({ numero: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-4">
+                        <span>Bairro</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.bairro}
+                          onChange={(event) => updateClientFiscalAddress({ bairro: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-12">
+                        <span>Complemento</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.complemento}
+                          onChange={(event) => updateClientFiscalAddress({ complemento: event.currentTarget.value })}
+                        />
+                      </label>
+                    </div>
+                  </section>
+                </>
+              )}
               <button
                 className={
                   clientDraftFrontPayment
@@ -1159,11 +1969,15 @@ export function ConvenioManager() {
                 type="button"
                 role="switch"
                 aria-checked={clientDraftFrontPayment}
+                disabled={isSubmitting}
                 onClick={() => setClientDraftFrontPayment(currentValue => !currentValue)}
               >
+                <span className="convenio-front-payment-icon" aria-hidden="true">
+                  <MonitorCheck size={15} />
+                </span>
                 <span className="convenio-front-payment-copy">
-                  <strong>Pagamento na frente de caixa</strong>
-                  <small>Permite receber pendências deste cliente no PDV.</small>
+                  <strong>Recebimento no PDV</strong>
+                  <small>Liberar recebimento no caixa?</small>
                 </span>
                 <span className="configuration-switch" aria-hidden="true">
                   <span />
@@ -1172,7 +1986,7 @@ export function ConvenioManager() {
             </form>
             <div
               className={
-                clientModalPresence.presentValue.mode === "edit"
+                clientModalPresence.presentValue.mode === "edit" && clientModalPresence.presentValue.cliente.ativo
                   ? "platform-modal-actions platform-item-modal-actions platform-item-modal-actions-with-delete convenio-client-modal-actions"
                   : "platform-modal-actions platform-item-modal-actions convenio-client-modal-actions"
               }
@@ -1180,21 +1994,37 @@ export function ConvenioManager() {
               <button className="platform-secondary-button" type="button" onClick={closeClientModal}>
                 Cancelar
               </button>
-              {clientModalPresence.presentValue.mode === "edit" ? (
+              {clientModalPresence.presentValue.mode === "edit" && !clientModalPresence.presentValue.cliente.ativo ? (
                 <button
-                  className="convenio-client-remove-button"
+                  className="platform-primary-button platform-save-button"
+                  type="button"
+                  onClick={() => void activateClientFromModal()}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? <LoaderCircle className="configuration-switch-loader" aria-hidden="true" size={16} /> : <RotateCcw aria-hidden="true" size={16} />}
+                  Ativar
+                </button>
+              ) : clientModalPresence.presentValue.mode === "edit" ? (
+                <button
+                  className="fiscal-danger-button fiscal-edit-delete-button"
                   type="button"
                   onClick={requestDeleteClientFromModal}
                   disabled={isSubmitting}
                 >
-                  <Trash2 aria-hidden="true" size={16} />
-                  Remover
+                  {clientModalPresence.presentValue.cliente.acao_remocao === "desativar" ? (
+                    <Ban aria-hidden="true" size={16} />
+                  ) : (
+                    <Trash2 aria-hidden="true" size={16} />
+                  )}
+                  {clientModalPresence.presentValue.cliente.acao_remocao === "desativar" ? "Desativar" : "Excluir"}
                 </button>
               ) : null}
-              <button className="platform-primary-button platform-save-button" type="submit" form="convenio-client-form" disabled={isSubmitting || !canSubmitClient}>
-                {isSubmitting ? <LoaderCircle className="configuration-switch-loader" aria-hidden="true" size={16} /> : <Check aria-hidden="true" size={16} />}
-                {clientModalPresence.presentValue.mode === "edit" ? "Salvar" : "Cadastrar"}
-              </button>
+              {clientModalPresence.presentValue.mode === "edit" && !clientModalPresence.presentValue.cliente.ativo ? null : (
+                <button className="platform-primary-button platform-save-button" type="submit" form="convenio-client-form" disabled={isSubmitting || Boolean(clientLookupTarget) || !canSubmitClient}>
+                  {isSubmitting ? <LoaderCircle className="configuration-switch-loader" aria-hidden="true" size={16} /> : <Check aria-hidden="true" size={16} />}
+                  {clientModalPresence.presentValue.mode === "edit" ? "Salvar" : "Cadastrar"}
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -1211,8 +2041,14 @@ export function ConvenioManager() {
               <X aria-hidden="true" size={19} />
             </button>
             <header className="platform-modal-head">
-              <h2 id="delete-client-title">Remover cliente?</h2>
-              <p>O cadastro deixa de aparecer nas próximas vendas.</p>
+              <h2 id="delete-client-title">
+                {deleteClientPresence.presentValue.action === "desativar" ? "Desativar cliente?" : "Excluir cliente?"}
+              </h2>
+              <p>
+                {deleteClientPresence.presentValue.action === "desativar"
+                  ? "Ele deixa de aparecer nas próximas vendas, mas segue nos registros já lançados."
+                  : "Sem registros vinculados, esse cadastro será removido definitivamente."}
+              </p>
             </header>
             {feedback?.tone === "error" ? (
               <div className="auth-feedback auth-feedback-error platform-modal-feedback" role="alert">
@@ -1224,9 +2060,13 @@ export function ConvenioManager() {
               <button className="platform-secondary-button" type="button" onClick={closeDeleteClientModal}>
                 Cancelar
               </button>
-              <button className="fiscal-danger-button" type="button" onClick={() => void confirmDeleteClient()} disabled={isSubmitting}>
-                <Trash2 aria-hidden="true" size={16} />
-                Remover
+              <button className="fiscal-danger-button fiscal-edit-delete-button" type="button" onClick={() => void confirmDeleteClient()} disabled={isSubmitting}>
+                {deleteClientPresence.presentValue.action === "desativar" ? (
+                  <Ban aria-hidden="true" size={16} />
+                ) : (
+                  <Trash2 aria-hidden="true" size={16} />
+                )}
+                {deleteClientPresence.presentValue.action === "desativar" ? "Desativar" : "Excluir"}
               </button>
             </div>
           </section>

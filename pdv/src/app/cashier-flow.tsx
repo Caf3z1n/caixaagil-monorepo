@@ -3,11 +3,13 @@
 import {
   useEffect,
   useCallback,
+  useId,
   useMemo,
   useRef,
   useState,
   type FocusEvent as ReactFocusEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type CSSProperties,
   type ReactNode
@@ -22,16 +24,21 @@ import {
   Beef,
   Beer,
   BookOpen,
+  Building2,
   BriefcaseBusiness,
+  Ban,
   Check,
+  ChevronDown,
   Cloud,
   Coffee,
+  Copy,
   CreditCard,
   CupSoda,
   Dumbbell,
   Gift,
   HandCoins,
   History,
+  KeyRound,
   LoaderCircle,
   LogOut,
   Minus,
@@ -63,6 +70,7 @@ import { apiPost, getApiBaseUrl } from "@/lib/api-client";
 import {
   getLocalPdvStore,
   type FiscalDocumentRecord,
+  type FiscalWorkerResponse,
   type LocalPdvStoreEventPayload,
   type LocalPdvStorePendingEvent,
   type LocalPdvStoreSummary
@@ -79,8 +87,10 @@ type Product = {
   categoryId?: string | null;
   category: string;
   barcode: string;
+  ncm: string;
   priceCents: number;
   stockQuantity: number | null;
+  active?: boolean;
   categoryIcon: string;
   categoryColor: string;
   categoryAccent?: string;
@@ -113,9 +123,11 @@ type ApiCatalogProduct = {
   categoria_id?: number | null;
   codigo_barras?: string | null;
   ncm?: string | null;
+  grupo_fiscal_id?: number | null;
   preco_custo_centavos?: number;
   preco_venda_centavos?: number;
   quantidade_estoque?: number | null;
+  ativo?: boolean;
   categoria?: ApiCatalogCategory | null;
   grupo_fiscal?: Record<string, unknown> | null;
   grupoFiscal?: Record<string, unknown> | null;
@@ -130,11 +142,23 @@ type ApiCatalogResponse = {
   configuracoes?: ApiPdvSettings | null;
   clientes_convenio?: ApiAgreementClient[];
   recebimentos_convenio?: ApiAgreementReceipt[];
+  funcionarios?: ApiEmployee[];
 };
 
 type ApiPdvSettings = {
+  comandas?: Partial<CommandSettings> | null;
+  lancar_despesas?: Partial<ExpenseSettings> | null;
+  controle_funcionarios?: Partial<EmployeeControlSettings> | null;
   formas_pagamento?: Partial<Record<PaymentMethod, boolean>> | null;
   fiscal?: Record<string, unknown> | null;
+};
+
+type ApiEmployee = {
+  id: number;
+  nome: string;
+  codigo_hash: string;
+  ativo?: boolean;
+  updated_at?: string | null;
 };
 
 type ApiFiscalCertificateDownload = {
@@ -149,6 +173,7 @@ type ApiAgreementClient = {
   id: number;
   nome: string;
   tipo_pessoa?: "fisica" | "juridica" | string | null;
+  dados_fiscais?: Record<string, unknown> | null;
   ativo?: boolean;
   permite_pagamento_frente_caixa?: boolean;
   updated_at?: string | null;
@@ -160,11 +185,13 @@ type ApiAgreementReceipt = {
   titulo?: string | null;
   cliente_convenio_id?: number | null;
   cliente_nome?: string | null;
+  cliente_tipo_pessoa?: "fisica" | "juridica" | string | null;
   itens_count?: number;
   itens?: unknown[];
   total_centavos?: number;
   status_convenio?: "pendente" | "pago" | string | null;
   metodo_pagamento_recebimento?: string | null;
+  caixa_recebimento_id?: string | null;
   registrado_em?: string | null;
   recebido_em?: string | null;
 };
@@ -207,22 +234,31 @@ type CashierSession = {
   id: string;
   shiftNumber: number;
   openedAt: string;
+  openedByEmployeeId?: number | null;
+  openedByEmployeeName?: string | null;
+  closedByEmployeeId?: number | null;
+  closedByEmployeeName?: string | null;
 };
 
 type SaleRecord = {
   id: string;
   createdAt: string;
+  sessionId?: string | null;
   items: CartItem[];
   paymentMethod: PaymentMethod;
   totalCents: number;
   originCommandTitle?: string | null;
   clienteConvenioId?: number | null;
+  clienteConvenioTipoPessoa?: "fisica" | "juridica" | null;
+  clienteConvenioDadosFiscais?: Record<string, unknown> | null;
   clientName?: string | null;
   status?: "completed" | "canceled";
   canceledAt?: string | null;
 };
 
+type FiscalModel = "55" | "65";
 type FiscalEmissionModalTone = "pending" | "queued" | "success" | "error";
+type FiscalPrintMode = "initial" | "reprint";
 
 type FiscalEmissionModalState = {
   tone: FiscalEmissionModalTone;
@@ -235,6 +271,7 @@ type FiscalEmissionModalState = {
   fiscalStatus?: string | null;
   fiscalProtocol?: string | null;
   fiscalKey?: string | null;
+  fiscalModel?: FiscalModel | null;
   xmlPath?: string | null;
   logPath?: string | null;
 };
@@ -243,6 +280,8 @@ type AgreementClient = {
   id: number;
   name: string;
   personType: "fisica" | "juridica";
+  fiscalData?: Record<string, unknown> | null;
+  active: boolean;
   allowFrontPayment: boolean;
 };
 
@@ -252,11 +291,13 @@ type AgreementReceiptRecord = {
   title: string;
   clientId: number | null;
   clientName: string;
+  clientPersonType: "fisica" | "juridica";
   itemsCount: number;
   items: CartItem[];
   totalCents: number;
   status: "pendente" | "pago";
   paymentMethod?: ReceiptPaymentMethod | null;
+  receivedSessionId?: string | null;
   createdAt: string;
   receivedAt?: string | null;
 };
@@ -316,7 +357,9 @@ type CashExpenseRecord = {
   id: string;
   title: string;
   createdAt: string;
+  updatedAt?: string | null;
   amountCents: number;
+  sessionId?: string | null;
 };
 
 type PaymentBreakdownItem = {
@@ -326,6 +369,26 @@ type PaymentBreakdownItem = {
   count: number;
 };
 
+type HistoryMovement =
+  | {
+      type: "sale";
+      id: string;
+      occurredAt: string;
+      sale: SaleRecord;
+    }
+  | {
+      type: "agreement-receipt";
+      id: string;
+      occurredAt: string;
+      clientName: string;
+      clientPersonType: "fisica" | "juridica";
+      receiptCount: number;
+      itemsCount: number;
+      totalCents: number;
+      paymentMethod?: ReceiptPaymentMethod | null;
+      receipts: AgreementReceiptRecord[];
+    };
+
 type LocalCashierState = {
   version: 1;
   savedAt: string;
@@ -334,10 +397,14 @@ type LocalCashierState = {
   sales: SaleRecord[];
   commands: CommandRecord[];
   expenses: CashExpenseRecord[];
+  employees?: EmployeeRecord[];
   agreementClients?: AgreementClient[];
   agreementReceipts?: AgreementReceiptRecord[];
   catalogProducts: Product[];
   catalogCategories: ProductCategory[];
+  commandSettings?: CommandSettings;
+  expenseSettings?: ExpenseSettings;
+  employeeControlSettings?: EmployeeControlSettings;
   paymentSettings?: PaymentSettings;
 };
 
@@ -347,9 +414,12 @@ type DesktopCashierFlowProps = {
   deviceId: string;
   pdvIdentity: string;
   shiftSequenceScope: string;
+  initialSettings?: ApiPdvSettings | null;
+  initialEmployees?: ApiEmployee[];
   lastAccessLabel: string;
   systemMessage?: string;
   isUnpairing: boolean;
+  onConnectivityChange: (state: ConnectivityState) => void;
   onUnpair: () => void | Promise<void>;
   onSystemMessage: (message: string) => void;
 };
@@ -411,6 +481,32 @@ const paymentOptions: Array<{
 
 type PaymentSettings = Record<PaymentMethod, boolean>;
 
+type CommandSettings = {
+  ativo: boolean;
+};
+
+type ExpenseSettings = {
+  ativo: boolean;
+};
+
+type EmployeeControlSettings = {
+  ativo: boolean;
+};
+
+type EmployeeRecord = {
+  id: number;
+  name: string;
+  codeHash: string;
+  active: boolean;
+  updatedAt?: string | null;
+};
+
+type EmployeeAuthMode = "open" | "close-confirm";
+
+type EmployeeAuthRequest = {
+  mode: EmployeeAuthMode;
+};
+
 const defaultPaymentSettings: PaymentSettings = {
   dinheiro: true,
   pix: true,
@@ -418,18 +514,28 @@ const defaultPaymentSettings: PaymentSettings = {
   convenio: false
 };
 
+const defaultCommandSettings: CommandSettings = {
+  ativo: true
+};
+
+const defaultExpenseSettings: ExpenseSettings = {
+  ativo: true
+};
+
+const defaultEmployeeControlSettings: EmployeeControlSettings = {
+  ativo: false
+};
+
 type PdvFiscalPrintSettings = {
   useDefaultPrinter: boolean;
   printerName: string;
   bobinaMm: number;
-  danfeExePath: string;
 };
 
 const defaultPdvFiscalPrintSettings: PdvFiscalPrintSettings = {
   useDefaultPrinter: true,
   printerName: "",
-  bobinaMm: 80,
-  danfeExePath: ""
+  bobinaMm: 80
 };
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
@@ -445,6 +551,17 @@ const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
 const shortDateFormatter = new Intl.DateTimeFormat("pt-BR");
 
 const dailyShiftSequenceKeyPrefix = "caixaagil:pdv:daily-shift-sequence";
+const ignoredSyncFailuresKeyPrefix = "caixaagil:pdv:ignored-sync-failures";
+
+type IgnoredSyncFailures = {
+  eventIds: Set<string>;
+  fiscalDocumentIds: Set<string>;
+};
+
+type StoredIgnoredSyncFailures = {
+  eventIds?: string[];
+  fiscalDocumentIds?: string[];
+};
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
@@ -460,6 +577,87 @@ function getLocalDateKey(date = new Date()) {
 
 function getDailyShiftSequenceKey(scope: string) {
   return `${dailyShiftSequenceKeyPrefix}:${scope || "local"}`;
+}
+
+function getIgnoredSyncFailuresKey(scope: string) {
+  return `${ignoredSyncFailuresKeyPrefix}:${scope || "local"}`;
+}
+
+function readIgnoredSyncFailures(scope: string): IgnoredSyncFailures {
+  if (typeof window === "undefined") {
+    return { eventIds: new Set(), fiscalDocumentIds: new Set() };
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(getIgnoredSyncFailuresKey(scope));
+    const parsed = rawValue ? JSON.parse(rawValue) as StoredIgnoredSyncFailures : {};
+
+    return {
+      eventIds: new Set((parsed.eventIds ?? []).filter(Boolean)),
+      fiscalDocumentIds: new Set((parsed.fiscalDocumentIds ?? []).filter(Boolean))
+    };
+  } catch {
+    return { eventIds: new Set(), fiscalDocumentIds: new Set() };
+  }
+}
+
+function rememberIgnoredSyncFailure(scope: string, type: "event" | "fiscalDocument", id: string) {
+  if (typeof window === "undefined" || !id) {
+    return;
+  }
+
+  try {
+    const ignored = readIgnoredSyncFailures(scope);
+
+    if (type === "event") {
+      ignored.eventIds.add(id);
+    } else {
+      ignored.fiscalDocumentIds.add(id);
+    }
+
+    window.localStorage.setItem(
+      getIgnoredSyncFailuresKey(scope),
+      JSON.stringify({
+        eventIds: Array.from(ignored.eventIds),
+        fiscalDocumentIds: Array.from(ignored.fiscalDocumentIds)
+      })
+    );
+  } catch {
+    // O ignore no SQLite ainda cobre o app desktop; localStorage é fallback visual.
+  }
+}
+
+function filterVisibleFailedEvents(events: LocalPdvStorePendingEvent[], ignored: IgnoredSyncFailures) {
+  return events.filter((event) => !ignored.eventIds.has(event.id));
+}
+
+function filterVisibleFailedFiscalDocuments(documents: FiscalDocumentRecord[], ignored: IgnoredSyncFailures) {
+  return documents.filter((document) => !ignored.fiscalDocumentIds.has(document.id));
+}
+
+function getVisibleSyncFailureSummary(
+  summary: LocalPdvStoreSummary,
+  events: LocalPdvStorePendingEvent[],
+  documents: FiscalDocumentRecord[]
+): LocalPdvStoreSummary {
+  const failedCandidates = [
+    ...events.map((event) => ({
+      updatedAt: event.updated_at,
+      error: event.last_error
+    })),
+    ...documents.map((document) => ({
+      updatedAt: document.updated_at,
+      error: document.sync_error || document.mensagem_operador
+    }))
+  ].sort((first, second) => String(second.updatedAt || "").localeCompare(String(first.updatedAt || "")));
+  const latestFailure = failedCandidates[0] ?? null;
+
+  return {
+    ...summary,
+    failed: events.length + documents.length,
+    lastFailedAt: latestFailure?.updatedAt ?? null,
+    lastError: latestFailure?.error ?? null
+  };
 }
 
 function getLastDailyShiftNumber(date: Date, scope: string) {
@@ -620,6 +818,19 @@ function normalizeSearch(value: string) {
     .trim();
 }
 
+function normalizeEmployeeCode(value: string) {
+  return value.replace(/\D/g, "");
+}
+
+async function hashEmployeeCode(value: string) {
+  const normalizedCode = normalizeEmployeeCode(value);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalizedCode));
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function formatCommandTitle(value: string) {
   const normalizedValue = value.replace(/^\s+/, "");
 
@@ -662,6 +873,10 @@ function formatStockQuantity(value: number | null) {
   });
 
   return `${formatted} un.`;
+}
+
+function normalizeProductNcm(value: unknown) {
+  return String(value ?? "").replace(/\D/g, "").slice(0, 8);
 }
 
 function getControlledStockLimit(product: Pick<Product, "stockQuantity">) {
@@ -709,13 +924,15 @@ function getFiscalNumber(source: Record<string, unknown> | null, key: string) {
 
 function mapProductFiscal(product: ApiCatalogProduct): ProductFiscal | null {
   const group = asRecord(product.grupo_fiscal) ?? asRecord(product.grupoFiscal);
-  const ncm = String(product.ncm ?? getFiscalString(group, "ncm")).trim();
+  const groupId = Number(product.grupo_fiscal_id ?? group?.id);
+  const ncm = normalizeProductNcm(product.ncm) || normalizeProductNcm(getFiscalString(group, "ncm"));
 
   if (!group && !ncm) {
     return null;
   }
 
   return {
+    grupo_fiscal_id: Number.isFinite(groupId) && groupId > 0 ? groupId : null,
     ncm,
     cfop: getFiscalString(group, "cfop"),
     regime_tributario: getFiscalString(group, "regime_tributario"),
@@ -741,8 +958,10 @@ function mapCatalogProduct(product: ApiCatalogProduct): Product {
     categoryId: product.categoria?.id ? String(product.categoria.id) : product.categoria_id ? String(product.categoria_id) : null,
     category: categoryName,
     barcode: product.codigo_barras ?? "",
+    ncm: normalizeProductNcm(product.ncm),
     priceCents: normalizeNumber(product.preco_venda_centavos),
     stockQuantity: product.quantidade_estoque ?? null,
+    active: product.ativo !== false,
     categoryIcon: product.categoria?.icone || "package",
     categoryColor: categoryTone.color,
     categoryAccent: categoryTone.accent,
@@ -756,12 +975,111 @@ function mapAgreementClient(client: ApiAgreementClient): AgreementClient {
     id: Number(client.id),
     name: client.nome || "Cliente",
     personType: client.tipo_pessoa === "juridica" ? "juridica" : "fisica",
+    fiscalData: client.tipo_pessoa === "juridica" ? asRecord(client.dados_fiscais) : null,
+    active: client.ativo !== false,
     allowFrontPayment: Boolean(client.permite_pagamento_frente_caixa)
   };
 }
 
+function getProductFiscalIssues(product: Pick<Product, "fiscal" | "ncm">) {
+  const fiscal = product.fiscal;
+  const fiscalGroupId = Number(fiscal?.grupo_fiscal_id);
+  const ncm = normalizeProductNcm(product.ncm);
+  const issues: string[] = [];
+
+  if (!Number.isFinite(fiscalGroupId) || fiscalGroupId <= 0) {
+    issues.push("Sem grupo fiscal");
+  }
+
+  if (!ncm) {
+    issues.push("Sem NCM");
+  }
+
+  return issues;
+}
+
+function formatProductFiscalIssues(issues: string[]) {
+  if (issues.length === 0) {
+    return "";
+  }
+
+  if (issues.length === 1) {
+    return issues[0];
+  }
+
+  const lastIssue = issues[issues.length - 1].replace(/^Sem /, "sem ");
+
+  return `${issues.slice(0, -1).join(", ")} e ${lastIssue}`;
+}
+
+function getProductFiscalBlockMessage(product: Pick<Product, "fiscal" | "name" | "ncm">) {
+  const issues = getProductFiscalIssues(product);
+
+  if (issues.length === 0) {
+    return "";
+  }
+
+  return `${product.name} ${formatProductFiscalIssues(issues).toLocaleLowerCase("pt-BR")}.`;
+}
+
+function normalizeAgreementClients(clients: AgreementClient[]) {
+  return clients
+    .filter((client) => Number.isFinite(client.id) && client.id > 0 && client.active === true)
+    .sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
+}
+
+function mapEmployee(employee: ApiEmployee): EmployeeRecord {
+  return {
+    id: Number(employee.id),
+    name: employee.nome || "Funcionário",
+    codeHash: employee.codigo_hash || "",
+    active: employee.ativo !== false,
+    updatedAt: employee.updated_at ?? null
+  };
+}
+
+function mergeEmployees(employees: EmployeeRecord[]) {
+  const uniqueEmployees = new Map<number, EmployeeRecord>();
+
+  employees
+    .filter((employee) => Number.isFinite(employee.id) && employee.id > 0 && employee.codeHash)
+    .forEach((employee) => uniqueEmployees.set(employee.id, employee));
+
+  return Array.from(uniqueEmployees.values()).sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
+}
+
 function getAgreementClientTypeLabel(client: Pick<AgreementClient, "personType">) {
   return client.personType === "juridica" ? "Pessoa jurídica" : "Pessoa física";
+}
+
+function AgreementClientIcon({ client, size = 18 }: { client: Pick<AgreementClient, "personType">; size?: number }) {
+  const Icon = client.personType === "juridica" ? Building2 : UserRound;
+
+  return <Icon aria-hidden="true" size={size} />;
+}
+
+function getFiscalModelLabel(model: FiscalModel | string | null | undefined) {
+  return model === "55" ? "NF-e" : "NFC-e";
+}
+
+function getSaleStoredFiscalModel(sale: SaleRecord): FiscalModel {
+  return sale.paymentMethod === "convenio" && sale.clienteConvenioTipoPessoa === "juridica" ? "55" : "65";
+}
+
+function getFiscalModelKey(model: FiscalModel) {
+  return model === "55" ? "nfe" : "nfce";
+}
+
+function getFiscalModelConfig(config: Record<string, unknown>, model: FiscalModel) {
+  const key = getFiscalModelKey(model);
+  const ambiente = config.ambiente === "producao" ? "producao" : "homologacao";
+  const ambientes = asRecord(config.ambientes);
+  const environment = asRecord(ambientes?.[ambiente]);
+
+  return {
+    ...(asRecord(config[key]) ?? {}),
+    ...(asRecord(environment?.[key]) ?? {})
+  };
 }
 
 function mapReceiptItem(item: unknown, fallbackIndex: number): CartItem {
@@ -783,6 +1101,7 @@ function mapReceiptItem(item: unknown, fallbackIndex: number): CartItem {
     categoryId: null,
     category: String(categoryVisual.nome ?? data.categoria ?? data.category ?? "Produtos"),
     barcode: String(data.codigo_barras ?? data.barcode ?? ""),
+    ncm: normalizeProductNcm(data.ncm),
     priceCents,
     stockQuantity: null,
     categoryIcon: String(categoryVisual.icone ?? data.categoria_icone ?? data.categoryIcon ?? "package"),
@@ -791,6 +1110,7 @@ function mapReceiptItem(item: unknown, fallbackIndex: number): CartItem {
     imageUrl: resolveFileUrl(
       typeof data.imagem_url === "string" ? data.imagem_url : typeof data.imageUrl === "string" ? data.imageUrl : null
     ),
+    fiscal: asRecord(data.fiscal) as ProductFiscal | null,
     quantity: Math.max(1, Math.floor(quantity || 1))
   };
 }
@@ -808,11 +1128,13 @@ function mapAgreementReceipt(receipt: ApiAgreementReceipt): AgreementReceiptReco
     title: receipt.titulo || "Venda em convênio",
     clientId: receipt.cliente_convenio_id ?? null,
     clientName: receipt.cliente_nome || "Cliente",
+    clientPersonType: receipt.cliente_tipo_pessoa === "juridica" ? "juridica" : "fisica",
     itemsCount,
     items,
     totalCents: normalizeNumber(receipt.total_centavos),
     status: receipt.status_convenio === "pago" ? "pago" : "pendente",
     paymentMethod: receiptPaymentMethod,
+    receivedSessionId: receipt.caixa_recebimento_id || null,
     createdAt: receipt.registrado_em || new Date().toISOString(),
     receivedAt: receipt.recebido_em || null
   };
@@ -848,7 +1170,15 @@ function mergeAgreementReceipts(currentReceipts: AgreementReceiptRecord[], remot
 
   for (const receipt of currentReceipts) {
     if (receipt.status === "pago") {
-      receiptById.set(receipt.id, receipt);
+      const remoteReceipt = receiptById.get(receipt.id);
+
+      receiptById.set(receipt.id, {
+        ...remoteReceipt,
+        ...receipt,
+        paymentMethod: receipt.paymentMethod ?? remoteReceipt?.paymentMethod ?? null,
+        receivedAt: receipt.receivedAt ?? remoteReceipt?.receivedAt ?? null,
+        receivedSessionId: receipt.receivedSessionId ?? remoteReceipt?.receivedSessionId ?? null
+      });
       continue;
     }
 
@@ -939,10 +1269,12 @@ function buildAgreementReceiptFromSale(sale: SaleRecord, client: AgreementClient
     title: sale.originCommandTitle ? `Venda - ${sale.originCommandTitle}` : "Venda em convênio",
     clientId: client.id,
     clientName: client.name,
+    clientPersonType: client.personType,
     itemsCount: getCartQuantity(sale.items),
     items: sale.items,
     totalCents: sale.totalCents,
     status: "pendente",
+    receivedSessionId: null,
     createdAt: sale.createdAt,
     receivedAt: null
   };
@@ -969,27 +1301,64 @@ function normalizePaymentSettings(value?: Partial<Record<PaymentMethod, boolean>
   return settings;
 }
 
+function normalizeCommandSettings(value?: Partial<CommandSettings> | null): CommandSettings {
+  return {
+    ativo: value?.ativo !== false
+  };
+}
+
+function normalizeExpenseSettings(value?: Partial<ExpenseSettings> | null): ExpenseSettings {
+  return {
+    ativo: value?.ativo !== false
+  };
+}
+
+function normalizeEmployeeControlSettings(value?: Partial<EmployeeControlSettings> | null): EmployeeControlSettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
+function normalizePdvBoolean(value: unknown, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (["true", "1", "sim", "s", "yes", "y"].includes(normalized)) {
+      return true;
+    }
+
+    if (["false", "0", "nao", "n", "no"].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
 function normalizePdvFiscalPrintSettings(value?: Record<string, unknown> | null): PdvFiscalPrintSettings {
   const bobinaMm = Number(value?.bobinaMm ?? value?.larguraBobinaMm ?? value?.largura_bobina_mm);
-  const printerName = String(value?.printerName ?? value?.impressora ?? value?.nomeImpressora ?? "").trim();
-  const danfeExePath = String(
-    value?.danfeExePath ??
-      value?.unidanfeExePath ??
-      value?.uninfeDanfeExePath ??
-      value?.caminhoUnidanfe ??
-      value?.caminho_unidanfe ??
-      ""
-  ).trim();
+  const printerName = String(value?.printerName ?? value?.impressora ?? value?.nomeImpressora ?? value?.nome_impressora ?? "").trim();
+  const defaultUseDefaultPrinter = printerName.length === 0
+    ? defaultPdvFiscalPrintSettings.useDefaultPrinter
+    : false;
 
   return {
-    useDefaultPrinter: Boolean(
+    useDefaultPrinter: normalizePdvBoolean(
       value?.useDefaultPrinter ??
         value?.usarImpressoraPadrao ??
         value?.usar_impressora_padrao ??
-        defaultPdvFiscalPrintSettings.useDefaultPrinter
+        defaultUseDefaultPrinter,
+      defaultUseDefaultPrinter
     ),
     printerName,
-    danfeExePath,
     bobinaMm: Number.isFinite(bobinaMm)
       ? Math.min(Math.max(Math.floor(bobinaMm), 58), 210)
       : defaultPdvFiscalPrintSettings.bobinaMm
@@ -1001,43 +1370,33 @@ function buildPdvFiscalPrintConfig(settings: PdvFiscalPrintSettings) {
     printing: {
       useDefaultPrinter: settings.useDefaultPrinter,
       printerName: settings.printerName,
-      bobinaMm: settings.bobinaMm,
-      danfeExePath: settings.danfeExePath
+      bobinaMm: settings.bobinaMm
     },
     impressao: {
+      useDefaultPrinter: settings.useDefaultPrinter,
+      usarImpressoraPadrao: settings.useDefaultPrinter,
       usar_impressora_padrao: settings.useDefaultPrinter,
+      printerName: settings.printerName,
       impressora: settings.printerName,
+      nomeImpressora: settings.printerName,
+      nome_impressora: settings.printerName,
+      bobinaMm: settings.bobinaMm,
+      larguraBobinaMm: settings.bobinaMm,
       largura_bobina_mm: settings.bobinaMm
     },
     danfe: {
-      exePath: settings.danfeExePath,
-      danfeExePath: settings.danfeExePath,
       useNativeFallback: false
-    },
-    unidanfe: {
-      exePath: settings.danfeExePath
-    },
-    uninfeDanfeExePath: settings.danfeExePath,
-    danfeExePath: settings.danfeExePath
+    }
   };
 }
 
 function getPdvFiscalPrintSettingsFromConfig(config?: Record<string, unknown> | null) {
   const printing = asRecord(config?.printing);
   const impressao = asRecord(config?.impressao);
-  const danfe = asRecord(config?.danfe);
-  const unidanfe = asRecord(config?.unidanfe);
 
   return normalizePdvFiscalPrintSettings({
     ...(impressao ?? {}),
-    ...(printing ?? {}),
-    danfeExePath:
-      printing?.danfeExePath ??
-      danfe?.exePath ??
-      danfe?.danfeExePath ??
-      unidanfe?.exePath ??
-      config?.uninfeDanfeExePath ??
-      config?.danfeExePath
+    ...(printing ?? {})
   });
 }
 
@@ -1150,6 +1509,22 @@ function getActiveRemoteFiscalEnvironment(fiscal: Record<string, unknown>) {
     ambiente,
     activeEnvironment
   };
+}
+
+function isFiscalEmissionActiveConfig(config?: Record<string, unknown> | null) {
+  const fiscal = asRecord(config);
+
+  if (!fiscal) {
+    return false;
+  }
+
+  const { activeEnvironment } = getActiveRemoteFiscalEnvironment(fiscal);
+
+  if (typeof activeEnvironment.ativo === "boolean") {
+    return activeEnvironment.ativo;
+  }
+
+  return fiscal.ativo === true;
 }
 
 function buildLocalFiscalConfigFromRemote(
@@ -1281,7 +1656,7 @@ function isPendingContingencyTransmissionDocument(document: FiscalDocumentRecord
   const status = String(document.status || "").toLowerCase();
   const model = String(document.modelo || "");
 
-  if (model && model !== "65") {
+  if (model && model !== "65" && model !== "55") {
     return false;
   }
 
@@ -1324,6 +1699,53 @@ function getEnabledPaymentOptions(settings: PaymentSettings) {
 
 function isSaleCanceled(sale: Pick<SaleRecord, "status">) {
   return sale.status === "canceled";
+}
+
+function isAtOrAfter(value: string | null | undefined, threshold: string) {
+  if (!value || !threshold) {
+    return false;
+  }
+
+  const valueTime = new Date(value).getTime();
+  const thresholdTime = new Date(threshold).getTime();
+
+  return Number.isFinite(valueTime) && Number.isFinite(thresholdTime) && valueTime >= thresholdTime;
+}
+
+function saleBelongsToSession(sale: SaleRecord, session: CashierSession | null) {
+  if (!session) {
+    return false;
+  }
+
+  if (sale.sessionId) {
+    return sale.sessionId === session.id;
+  }
+
+  return isAtOrAfter(sale.createdAt, session.openedAt);
+}
+
+function expenseBelongsToSession(expense: CashExpenseRecord, session: CashierSession | null) {
+  if (!session) {
+    return false;
+  }
+
+  if (expense.sessionId) {
+    return expense.sessionId === session.id;
+  }
+
+  return isAtOrAfter(expense.createdAt, session.openedAt);
+}
+
+function agreementReceiptBelongsToSession(receipt: AgreementReceiptRecord, session: CashierSession | null) {
+  if (!session || receipt.status !== "pago" || !receipt.paymentMethod) {
+    return false;
+  }
+
+  if (receipt.receivedSessionId) {
+    return receipt.receivedSessionId === session.id;
+  }
+
+  return false;
 }
 
 function CashierModal({
@@ -1384,14 +1806,85 @@ function CashierModal({
   );
 }
 
+function EmployeeAuthModal({
+  mode,
+  code,
+  error,
+  isSubmitting,
+  onChangeCode,
+  onClose,
+  onConfirm
+}: {
+  mode: EmployeeAuthMode;
+  code: string;
+  error: string;
+  isSubmitting: boolean;
+  onChangeCode: (value: string) => void;
+  onClose: () => void;
+  onConfirm: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const title = mode === "open" ? "Abrir caixa" : "Fechar caixa";
+  const description = mode === "open"
+    ? "Informe a senha do funcionário responsável pelo turno."
+    : "Informe a senha do funcionário responsável pelo fechamento.";
+
+  return (
+    <CashierModal
+      title={title}
+      description={description}
+      onClose={onClose}
+      size="sm"
+      dismissible={!isSubmitting}
+      footer={
+        <>
+          <button className="pdv-secondary-action" type="button" onClick={onClose} disabled={isSubmitting}>
+            Cancelar
+          </button>
+          <button className="pdv-primary-action" type="submit" form="employee-auth-form" disabled={isSubmitting || code.length === 0}>
+            {isSubmitting ? <LoaderCircle className="pdv-spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}
+            Confirmar
+          </button>
+        </>
+      }
+    >
+      <form className="pdv-employee-auth" id="employee-auth-form" onSubmit={onConfirm}>
+        <label>
+          <span>
+            <KeyRound aria-hidden="true" size={17} />
+            Senha
+          </span>
+          <input
+            autoFocus
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            type="password"
+            value={code}
+            placeholder="Apenas números"
+            onChange={(event) => onChangeCode(normalizeEmployeeCode(event.currentTarget.value))}
+          />
+        </label>
+        {error ? (
+          <p className="pdv-employee-auth-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </form>
+    </CashierModal>
+  );
+}
+
 export function DesktopCashierFlow({
   connectivity,
   deviceCredential,
   deviceId,
   pdvIdentity,
   shiftSequenceScope,
+  initialSettings,
+  initialEmployees,
   lastAccessLabel,
   isUnpairing,
+  onConnectivityChange,
   onUnpair,
   systemMessage,
   onSystemMessage
@@ -1417,7 +1910,24 @@ export function DesktopCashierFlow({
   const [selectedPickerCategoryId, setSelectedPickerCategoryId] = useState("all");
   const [catalogProducts, setCatalogProducts] = useState<Product[]>([]);
   const [catalogCategories, setCatalogCategories] = useState<ProductCategory[]>([]);
+  const [commandSettings, setCommandSettings] = useState<CommandSettings>(() =>
+    normalizeCommandSettings(initialSettings?.comandas)
+  );
+  const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(() =>
+    normalizeExpenseSettings(initialSettings?.lancar_despesas)
+  );
+  const [employeeControlSettings, setEmployeeControlSettings] = useState<EmployeeControlSettings>(() =>
+    normalizeEmployeeControlSettings(initialSettings?.controle_funcionarios)
+  );
+  const [employees, setEmployees] = useState<EmployeeRecord[]>(() => mergeEmployees((initialEmployees ?? []).map(mapEmployee)));
+  const [employeeAuthRequest, setEmployeeAuthRequest] = useState<EmployeeAuthRequest | null>(null);
+  const [employeeAuthCode, setEmployeeAuthCode] = useState("");
+  const [employeeAuthError, setEmployeeAuthError] = useState("");
+  const [isEmployeeAuthSubmitting, setIsEmployeeAuthSubmitting] = useState(false);
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
+  const [isFiscalEmissionEnabled, setIsFiscalEmissionEnabled] = useState(() =>
+    isFiscalEmissionActiveConfig(initialSettings?.fiscal ?? null)
+  );
   const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const [selectedSale, setSelectedSale] = useState<SaleRecord | null>(null);
@@ -1429,12 +1939,15 @@ export function DesktopCashierFlow({
   const [completedSale, setCompletedSale] = useState<SaleRecord | null>(null);
   const [fiscalEmissionModal, setFiscalEmissionModal] = useState<FiscalEmissionModalState | null>(null);
   const [isFiscalPrinting, setIsFiscalPrinting] = useState(false);
+  const [fiscalPrintMode, setFiscalPrintMode] = useState<FiscalPrintMode | null>(null);
+  const fiscalPrintingLockRef = useRef(false);
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCashPaymentOpen, setIsCashPaymentOpen] = useState(false);
   const [cashPaymentTarget, setCashPaymentTarget] = useState<"sale" | "agreement-receipt">("sale");
   const [isAgreementPaymentOpen, setIsAgreementPaymentOpen] = useState(false);
   const [isExpenseOpen, setIsExpenseOpen] = useState(false);
+  const [expenseEditRequest, setExpenseEditRequest] = useState<CashExpenseRecord | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProductPickerOpen, setIsProductPickerOpen] = useState(false);
@@ -1472,18 +1985,29 @@ export function DesktopCashierFlow({
   const commandEditorQuantity = getCartQuantity(commandEditor?.items ?? []);
   const paymentItems = commandPaymentRequest?.items ?? cartItems;
   const paymentTotalCents = getCartTotal(paymentItems);
+  const activeAgreementClients = useMemo(
+    () => normalizeAgreementClients(agreementClients),
+    [agreementClients]
+  );
   const enabledPaymentOptions = useMemo(
-    () => getEnabledPaymentOptions(paymentSettings).filter((option) => option.id !== "convenio" || agreementClients.length > 0),
-    [agreementClients.length, paymentSettings]
+    () => getEnabledPaymentOptions(paymentSettings).filter((option) => option.id !== "convenio" || activeAgreementClients.length > 0),
+    [activeAgreementClients.length, paymentSettings]
   );
   const receiptPaymentOptions = useMemo(
     () => enabledPaymentOptions.filter((option) => option.id !== "convenio"),
     [enabledPaymentOptions]
   );
+  const isCommandsEnabled = commandSettings.ativo;
+  const isExpensesEnabled = expenseSettings.ativo;
+  const isEmployeeControlEnabled = employeeControlSettings.ativo;
+  const activeEmployees = useMemo(
+    () => employees.filter((employee) => employee.active && employee.codeHash),
+    [employees]
+  );
   const isAgreementPaymentEnabled = paymentSettings.convenio;
   const frontCashAgreementClients = useMemo(
-    () => agreementClients.filter((client) => client.allowFrontPayment),
-    [agreementClients]
+    () => activeAgreementClients.filter((client) => client.allowFrontPayment),
+    [activeAgreementClients]
   );
   const pendingAgreementReceipts = useMemo(() => {
     const allowedClientIds = new Set(frontCashAgreementClients.map((client) => client.id));
@@ -1499,6 +2023,10 @@ export function DesktopCashierFlow({
   const paidAgreementReceipts = useMemo(
     () => agreementReceipts.filter((receipt) => receipt.status === "pago" && receipt.paymentMethod),
     [agreementReceipts]
+  );
+  const sessionAgreementReceipts = useMemo(
+    () => paidAgreementReceipts.filter((receipt) => agreementReceiptBelongsToSession(receipt, session)),
+    [paidAgreementReceipts, session]
   );
   const agreementClientReceivableSummaries = useMemo<AgreementClientReceivableSummary[]>(() => {
     return frontCashAgreementClients
@@ -1569,15 +2097,22 @@ export function DesktopCashierFlow({
   }, [agreementReceiptDetailsClient, agreementReceipts]);
   const agreementReceiptPaymentTotalCents =
     agreementReceiptPaymentRequest?.receipts.reduce((total, receipt) => total + receipt.totalCents, 0) ?? 0;
-  const activeSales = sales.filter((sale) => !isSaleCanceled(sale));
-  const sessionPaidSales = activeSales.filter((sale) => sale.paymentMethod !== "convenio");
+  const sessionRecordedSales = useMemo(
+    () => sales.filter((sale) => saleBelongsToSession(sale, session)),
+    [sales, session]
+  );
+  const sessionActiveSales = useMemo(
+    () => sessionRecordedSales.filter((sale) => !isSaleCanceled(sale)),
+    [sessionRecordedSales]
+  );
+  const sessionPaidSales = sessionActiveSales.filter((sale) => sale.paymentMethod !== "convenio");
   const sessionSales = sessionPaidSales.reduce((total, sale) => total + sale.totalCents, 0) +
-    paidAgreementReceipts.reduce((total, receipt) => total + receipt.totalCents, 0);
+    sessionAgreementReceipts.reduce((total, receipt) => total + receipt.totalCents, 0);
   const sessionSalesByPayment = paymentOptions
     .filter((option) => option.id !== "convenio")
     .map<PaymentBreakdownItem>((option) => {
       const optionSales = sessionPaidSales.filter((sale) => sale.paymentMethod === option.id);
-      const optionReceipts = paidAgreementReceipts.filter((receipt) => receipt.paymentMethod === option.id);
+      const optionReceipts = sessionAgreementReceipts.filter((receipt) => receipt.paymentMethod === option.id);
 
       return {
         method: option.id,
@@ -1589,14 +2124,94 @@ export function DesktopCashierFlow({
       };
     })
     .filter((item) => item.count > 0);
-  const sessionExpenses = expenses.reduce((total, expense) => total + expense.amountCents, 0);
-  const expectedCashCents = session ? sessionSales - sessionExpenses : 0;
+  const sessionExpenseRecords = useMemo(
+    () => expenses.filter((expense) => expenseBelongsToSession(expense, session)),
+    [expenses, session]
+  );
+  const sessionExpenses = sessionExpenseRecords.reduce((total, expense) => total + expense.amountCents, 0);
+  const sessionHistoryMovements = useMemo<HistoryMovement[]>(() => {
+    const agreementClientById = new Map(activeAgreementClients.map((client) => [client.id, client]));
+    const saleMovements: HistoryMovement[] = sessionRecordedSales.map((sale) => ({
+      type: "sale",
+      id: sale.id,
+      occurredAt: sale.createdAt,
+      sale
+    }));
+    const agreementReceiptGroups = new Map<string, Extract<HistoryMovement, { type: "agreement-receipt" }>>();
+
+    for (const receipt of sessionAgreementReceipts) {
+      const occurredAt = receipt.receivedAt ?? receipt.createdAt;
+      const groupKey = [
+        receipt.clientId ?? "sem-cliente",
+        receipt.clientName,
+        receipt.paymentMethod ?? "sem-pagamento",
+        occurredAt
+      ].join(":");
+      const currentGroup = agreementReceiptGroups.get(groupKey);
+
+      if (currentGroup) {
+        currentGroup.receiptCount += 1;
+        currentGroup.itemsCount += receipt.itemsCount;
+        currentGroup.totalCents += receipt.totalCents;
+        currentGroup.receipts.push(receipt);
+        continue;
+      }
+
+      agreementReceiptGroups.set(groupKey, {
+        type: "agreement-receipt",
+        id: `convenio-recebido-${receipt.id}`,
+        occurredAt,
+        clientName: receipt.clientName,
+        clientPersonType: receipt.clientPersonType ?? agreementClientById.get(Number(receipt.clientId))?.personType ?? "fisica",
+        receiptCount: 1,
+        itemsCount: receipt.itemsCount,
+        totalCents: receipt.totalCents,
+        paymentMethod: receipt.paymentMethod,
+        receipts: [receipt]
+      });
+    }
+    const agreementReceiptMovements = Array.from(agreementReceiptGroups.values());
+
+    return [...saleMovements, ...agreementReceiptMovements].sort((firstMovement, secondMovement) => {
+      const firstTime = new Date(firstMovement.occurredAt).getTime();
+      const secondTime = new Date(secondMovement.occurredAt).getTime();
+
+      if (Number.isFinite(firstTime) && Number.isFinite(secondTime) && secondTime !== firstTime) {
+        return secondTime - firstTime;
+      }
+
+      return secondMovement.id.localeCompare(firstMovement.id);
+    });
+  }, [activeAgreementClients, sessionAgreementReceipts, sessionRecordedSales]);
+  const sessionCashSales = sessionSalesByPayment.find((item) => item.method === "dinheiro")?.totalCents ?? 0;
+  const expectedCashCents = session ? Math.max(sessionCashSales - sessionExpenses, 0) : 0;
+
+  useEffect(() => {
+    if (!initialSettings) {
+      return;
+    }
+
+    setCommandSettings(normalizeCommandSettings(initialSettings.comandas));
+    setExpenseSettings(normalizeExpenseSettings(initialSettings.lancar_despesas));
+    setEmployeeControlSettings(normalizeEmployeeControlSettings(initialSettings.controle_funcionarios));
+    setPaymentSettings(normalizePaymentSettings(initialSettings.formas_pagamento));
+    setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(initialSettings.fiscal ?? null));
+  }, [initialSettings]);
+
+  useEffect(() => {
+    if (!initialSettings || !initialEmployees) {
+      return;
+    }
+
+    setEmployees(mergeEmployees(initialEmployees.map(mapEmployee)));
+  }, [initialEmployees, initialSettings]);
 
   const filteredProducts = useMemo(() => {
     const query = normalizeSearch(searchQuery);
+    const activeCatalogProducts = catalogProducts.filter((product) => product.active !== false);
     const baseProducts = selectedPickerCategoryId === "all"
-      ? catalogProducts
-      : catalogProducts.filter((product) => product.categoryId === selectedPickerCategoryId);
+      ? activeCatalogProducts
+      : activeCatalogProducts.filter((product) => product.categoryId === selectedPickerCategoryId);
 
     if (!query) {
       return baseProducts;
@@ -1617,10 +2232,14 @@ export function DesktopCashierFlow({
       sales,
       commands,
       expenses,
+      employees,
       agreementClients,
       agreementReceipts,
       catalogProducts,
       catalogCategories,
+      commandSettings,
+      expenseSettings,
+      employeeControlSettings,
       paymentSettings
     };
   }
@@ -1637,30 +2256,34 @@ export function DesktopCashierFlow({
 
     try {
       const summary = await store.getSyncSummary({ scope: localStoreScope });
-      setSyncSummary(summary);
-      setPendingSyncCount(summary.pending);
+      const ignoredFailures = readIgnoredSyncFailures(localStoreScope);
+      let visibleFailedEvents: LocalPdvStorePendingEvent[] = [];
+      let visibleFailedFiscalDocuments: FiscalDocumentRecord[] = [];
 
       if (summary.failed > 0 && typeof store.getFailedEvents === "function") {
-        const events = await store.getFailedEvents({ scope: localStoreScope, limit: 8 });
-        setFailedSyncEvents(events);
-      } else {
-        setFailedSyncEvents([]);
+        const events = await store.getFailedEvents({ scope: localStoreScope, limit: 50 });
+        visibleFailedEvents = filterVisibleFailedEvents(events, ignoredFailures);
       }
 
       if (summary.failed > 0 && typeof store.getFailedFiscalDocuments === "function") {
         try {
-          const documents = await store.getFailedFiscalDocuments({ scope: localStoreScope, limit: 8 });
-          setFailedFiscalDocuments(dedupeFiscalDocuments(documents));
+          const documents = await store.getFailedFiscalDocuments({ scope: localStoreScope, limit: 50 });
+          visibleFailedFiscalDocuments = filterVisibleFailedFiscalDocuments(
+            dedupeFiscalDocuments(documents),
+            ignoredFailures
+          );
         } catch (error) {
           if (!isMissingFiscalIpcHandlerError(error)) {
             throw error;
           }
-
-          setFailedFiscalDocuments([]);
         }
-      } else {
-        setFailedFiscalDocuments([]);
       }
+
+      const visibleSummary = getVisibleSyncFailureSummary(summary, visibleFailedEvents, visibleFailedFiscalDocuments);
+      setSyncSummary(visibleSummary);
+      setPendingSyncCount(visibleSummary.pending);
+      setFailedSyncEvents(visibleFailedEvents.slice(0, 8));
+      setFailedFiscalDocuments(visibleFailedFiscalDocuments.slice(0, 8));
     } catch {
       setPendingSyncCount(0);
       setSyncSummary({ total: 0, pending: 0, failed: 0 });
@@ -1669,10 +2292,10 @@ export function DesktopCashierFlow({
     }
   }, [localStoreScope]);
 
-  const syncPendingEvents = useCallback(async (options: { showMessage?: boolean } = {}) => {
+  const syncPendingEvents = useCallback(async (options: { showMessage?: boolean; forceOnline?: boolean } = {}) => {
     const store = getLocalPdvStore();
 
-    if (!store || connectivity !== "online" || !deviceCredential || !deviceId || isSyncingRef.current) {
+    if (!store || (connectivity !== "online" && !options.forceOnline) || !deviceCredential || !deviceId || isSyncingRef.current) {
       return false;
     }
 
@@ -1700,9 +2323,19 @@ export function DesktopCashierFlow({
           created_at: event.created_at
         }))
       });
+      onConnectivityChange("online");
+      const pendingEventIds = new Set(pendingEvents.map((event) => event.id));
+      const pendingEventsByLegacyApiId = new Map(
+        pendingEvents.map((event) => [event.id.length > 64 ? event.id.slice(0, 64) : event.id, event.id])
+      );
+      const resolveLocalEventId = (eventId: string) => (
+        pendingEventIds.has(eventId)
+          ? eventId
+          : pendingEventsByLegacyApiId.get(eventId) ?? eventId
+      );
       const syncedIds = response.eventos
         .filter((event) => event.status === "processado" || event.status === "duplicado")
-        .map((event) => event.id);
+        .map((event) => resolveLocalEventId(event.id));
       const failedEvents = response.eventos.filter((event) => event.status === "erro");
 
       if (syncedIds.length > 0) {
@@ -1713,7 +2346,7 @@ export function DesktopCashierFlow({
         const message = failedEvents[0]?.message ?? "Evento recusado pela sincronização.";
         await store.markEventsFailed({
           scope: localStoreScope,
-          eventIds: failedEvents.map((event) => event.id),
+          eventIds: failedEvents.map((event) => resolveLocalEventId(event.id)),
           error: message
         });
         setEventSyncError(message);
@@ -1734,6 +2367,7 @@ export function DesktopCashierFlow({
 
       return failedEvents.length === 0;
     } catch (error) {
+      onConnectivityChange("offline");
       const message = error instanceof Error ? error.message : "Não foi possível sincronizar com a API.";
       setEventSyncError(message);
       if (options.showMessage) {
@@ -1744,16 +2378,93 @@ export function DesktopCashierFlow({
     } finally {
       isSyncingRef.current = false;
     }
-  }, [connectivity, deviceCredential, deviceId, localStoreScope, onSystemMessage, refreshSyncSummary]);
+  }, [connectivity, deviceCredential, deviceId, localStoreScope, onConnectivityChange, onSystemMessage, refreshSyncSummary]);
 
-  const syncPendingFiscalDocuments = useCallback(async (options: { showMessage?: boolean } = {}) => {
+  const getUnsyncedSaleEventIds = useCallback(async () => {
+    const store = getLocalPdvStore();
+
+    if (!store?.getPendingEvents) {
+      return new Set<string>();
+    }
+
+    try {
+      const [pendingEvents, failedEvents] = await Promise.all([
+        store.getPendingEvents({ scope: localStoreScope, limit: 250 }),
+        typeof store.getFailedEvents === "function"
+          ? store.getFailedEvents({ scope: localStoreScope, limit: 250 })
+          : Promise.resolve([] as LocalPdvStorePendingEvent[])
+      ]);
+
+      return new Set(
+        [...pendingEvents, ...failedEvents]
+          .filter((event) => event.event_type === "venda_concluida" && event.aggregate_id)
+          .map((event) => event.aggregate_id)
+      );
+    } catch {
+      return new Set<string>();
+    }
+  }, [localStoreScope]);
+
+  const enqueueRecoverableSaleEventsForFiscalDocuments = useCallback(async () => {
+    const store = getLocalPdvStore();
+
+    if (!store?.getPendingFiscalDocuments || !session) {
+      return 0;
+    }
+
+    const pendingDocuments = dedupeFiscalDocuments(await store.getPendingFiscalDocuments({ scope: localStoreScope, limit: 100 }))
+      .filter((document) => getFiscalDocumentSyncState(document) === "pending" && Boolean(document.venda_id));
+    const salesById = new Map(sales.map((sale) => [sale.id, sale]));
+    const eventPayloadBase = {
+      pdv: {
+        deviceId,
+        identity: pdvIdentity,
+        sequenceScope: shiftSequenceScope
+      }
+    };
+    let recovered = 0;
+
+    for (const document of pendingDocuments) {
+      const saleId = document.venda_id;
+      const sale = saleId ? salesById.get(saleId) : null;
+
+      if (!sale) {
+        continue;
+      }
+
+      await store.enqueueEvent({
+        scope: localStoreScope,
+        eventType: "venda_concluida",
+        aggregateType: "venda",
+        aggregateId: sale.id,
+        payload: {
+          ...eventPayloadBase,
+          eventId: `venda_concluida-${sale.id}`,
+          session,
+          sale,
+          origem: sale.originCommandTitle ? "comanda" : "caixa",
+          origemComandaNome: sale.originCommandTitle ?? null
+        }
+      });
+      recovered += 1;
+    }
+
+    if (recovered > 0) {
+      await refreshSyncSummary();
+    }
+
+    return recovered;
+  }, [deviceId, localStoreScope, pdvIdentity, refreshSyncSummary, sales, session, shiftSequenceScope]);
+
+  const syncPendingFiscalDocuments = useCallback(async (options: { showMessage?: boolean; forceOnline?: boolean } = {}) => {
     const store = getLocalPdvStore();
 
     if (
       !store?.getPendingFiscalDocuments ||
       !store.markFiscalDocumentsSynced ||
       !store.markFiscalDocumentsFailed ||
-      connectivity !== "online" ||
+      !isFiscalEmissionEnabled ||
+      (connectivity !== "online" && !options.forceOnline) ||
       !deviceCredential ||
       !deviceId ||
       isFiscalSyncingRef.current
@@ -1766,17 +2477,20 @@ export function DesktopCashierFlow({
     try {
       const pendingDocuments = dedupeFiscalDocuments(await store.getPendingFiscalDocuments({ scope: localStoreScope, limit: 100 }))
         .filter((document) => getFiscalDocumentSyncState(document) === "pending");
+      const blockedSaleIds = await getUnsyncedSaleEventIds();
+      const readyDocuments = pendingDocuments.filter((document) => !document.venda_id || !blockedSaleIds.has(document.venda_id));
 
-      if (pendingDocuments.length === 0) {
+      if (readyDocuments.length === 0) {
         await refreshSyncSummary();
-        return true;
+        return pendingDocuments.length === 0;
       }
 
       const response = await apiPost<SyncFiscalResponse>("/pdvs/sync/fiscal", {
         credencial_dispositivo: deviceCredential,
         dispositivo_id: deviceId,
-        documentos: pendingDocuments
+        documentos: readyDocuments
       });
+      onConnectivityChange("online");
       const syncedDocuments = response.documentos
         .filter((document) => ["processado", "atualizado", "duplicado"].includes(document.status))
         .map((document) => ({
@@ -1823,6 +2537,7 @@ export function DesktopCashierFlow({
         return true;
       }
 
+      onConnectivityChange("offline");
       const message = error instanceof Error ? error.message : "Não foi possível sincronizar notas fiscais com a API.";
       setEventSyncError(message);
       if (options.showMessage) {
@@ -1833,15 +2548,16 @@ export function DesktopCashierFlow({
     } finally {
       isFiscalSyncingRef.current = false;
     }
-  }, [connectivity, deviceCredential, deviceId, localStoreScope, onSystemMessage, refreshSyncSummary]);
+  }, [connectivity, deviceCredential, deviceId, getUnsyncedSaleEventIds, isFiscalEmissionEnabled, localStoreScope, onConnectivityChange, onSystemMessage, refreshSyncSummary]);
 
-  const transmitPendingContingencyFiscalDocuments = useCallback(async (options: { showMessage?: boolean } = {}) => {
+  const transmitPendingContingencyFiscalDocuments = useCallback(async (options: { showMessage?: boolean; forceOnline?: boolean } = {}) => {
     const store = getLocalPdvStore();
 
     if (
       !store?.listFiscalDocuments ||
       !store.callFiscalWorker ||
-      connectivity !== "online" ||
+      !isFiscalEmissionEnabled ||
+      (connectivity !== "online" && !options.forceOnline) ||
       isContingencyTransmittingRef.current
     ) {
       return false;
@@ -1873,15 +2589,16 @@ export function DesktopCashierFlow({
           continue;
         }
 
+        const fiscalModel: FiscalModel = document.modelo === "55" ? "55" : "65";
         const response = await store.callFiscalWorker({
           scope: localStoreScope,
-          command: "transmitir-nfce-contingencia",
+          command: fiscalModel === "55" ? "transmitir-nfe-contingencia" : "transmitir-nfce-contingencia",
           documentId: document.id,
           payload: {
             documentId: document.id,
             vendaId: document.venda_id,
             xmlPath,
-            modelo: document.modelo || "65",
+            modelo: fiscalModel,
             serie: document.serie,
             numero: document.numero,
             chave: document.chave
@@ -1909,14 +2626,14 @@ export function DesktopCashierFlow({
       await refreshSyncSummary();
 
       if (transmittedCount > 0 && options.showMessage) {
-        onSystemMessage(`${transmittedCount} NFC-e em contingência ${transmittedCount === 1 ? "foi transmitida" : "foram transmitidas"}.`);
+        onSystemMessage(`${transmittedCount} documento fiscal em contingência ${transmittedCount === 1 ? "foi transmitido" : "foram transmitidos"}.`);
       } else if (firstError && options.showMessage) {
         onSystemMessage(firstError);
       }
 
       return failedCount === 0;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Não foi possível transmitir as NFC-e em contingência.";
+      const message = error instanceof Error ? error.message : "Não foi possível transmitir os documentos fiscais em contingência.";
 
       if (options.showMessage) {
         onSystemMessage(message);
@@ -1927,7 +2644,27 @@ export function DesktopCashierFlow({
     } finally {
       isContingencyTransmittingRef.current = false;
     }
-  }, [connectivity, localStoreScope, onSystemMessage, refreshSyncSummary]);
+  }, [connectivity, isFiscalEmissionEnabled, localStoreScope, onSystemMessage, refreshSyncSummary]);
+
+  const syncPendingOutboundQueues = useCallback(async (options: { showMessage?: boolean; forceOnline?: boolean } = {}) => {
+    let eventsSynced = false;
+    let fiscalSynced = false;
+
+    try {
+      await enqueueRecoverableSaleEventsForFiscalDocuments();
+      eventsSynced = await syncPendingEvents(options);
+    } catch (error) {
+      console.warn("Não foi possível sincronizar eventos locais.", error);
+    }
+
+    try {
+      fiscalSynced = await syncPendingFiscalDocuments(options);
+    } catch (error) {
+      console.warn("Não foi possível sincronizar documentos fiscais locais.", error);
+    }
+
+    return { eventsSynced, fiscalSynced };
+  }, [enqueueRecoverableSaleEventsForFiscalDocuments, syncPendingEvents, syncPendingFiscalDocuments]);
 
   function enqueueLocalEvent(
     eventType: string,
@@ -1963,11 +2700,7 @@ export function DesktopCashierFlow({
       })
       .then((result) => {
         setPendingSyncCount(result.pending);
-        void syncPendingEvents().then((eventsSynced) => {
-          if (eventsSynced) {
-            void syncPendingFiscalDocuments();
-          }
-        });
+        void syncPendingOutboundQueues();
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "Não foi possível registrar o evento local.";
@@ -1992,9 +2725,7 @@ export function DesktopCashierFlow({
 
     async function recoverMissingLocalEvents() {
       try {
-        const summary = await activeStore.getSyncSummary({ scope: localStoreScope });
-
-        if (shouldIgnore || summary.total > 0) {
+        if (shouldIgnore) {
           return;
         }
 
@@ -2019,7 +2750,7 @@ export function DesktopCashierFlow({
           })
         ];
 
-        for (const sale of sales) {
+        for (const sale of sessionRecordedSales) {
           const saleEventPayload = {
             ...eventPayloadBase,
             eventId: `venda_concluida-${sale.id}`,
@@ -2060,7 +2791,7 @@ export function DesktopCashierFlow({
           }
         }
 
-        for (const expense of expenses) {
+        for (const expense of sessionExpenseRecords) {
           operations.push(
             activeStore.enqueueEvent({
               scope: localStoreScope,
@@ -2077,11 +2808,7 @@ export function DesktopCashierFlow({
           );
         }
 
-        for (const receipt of agreementReceipts) {
-          if (receipt.status !== "pago" || !receipt.paymentMethod) {
-            continue;
-          }
-
+        for (const receipt of sessionAgreementReceipts) {
           operations.push(
             activeStore.enqueueEvent({
               scope: localStoreScope,
@@ -2102,11 +2829,7 @@ export function DesktopCashierFlow({
 
         if (!shouldIgnore) {
           await refreshSyncSummary();
-          void syncPendingEvents().then((eventsSynced) => {
-            if (eventsSynced) {
-              void syncPendingFiscalDocuments();
-            }
-          });
+          void syncPendingOutboundQueues();
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Não foi possível recuperar eventos locais.";
@@ -2121,17 +2844,16 @@ export function DesktopCashierFlow({
     };
   }, [
     deviceId,
-    agreementReceipts,
-    expenses,
     isLocalStateReady,
     localStoreScope,
     pdvIdentity,
     refreshSyncSummary,
-    sales,
     session,
+    sessionAgreementReceipts,
+    sessionExpenseRecords,
+    sessionRecordedSales,
     shiftSequenceScope,
-    syncPendingEvents,
-    syncPendingFiscalDocuments
+    syncPendingOutboundQueues
   ]);
 
   const synchronizeRemoteFiscalConfig = useCallback(async (remoteFiscal?: Record<string, unknown> | null) => {
@@ -2145,11 +2867,14 @@ export function DesktopCashierFlow({
     const savedConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
     const printingConfig = getPdvFiscalPrintSettingsFromConfig(asRecord(savedConfig));
     const { activeEnvironment } = getActiveRemoteFiscalEnvironment(fiscal);
+    const remoteFiscalEmissionEnabled = isFiscalEmissionActiveConfig(fiscal);
     const certificado = asRecord(activeEnvironment.certificado) ?? asRecord(fiscal.certificado) ?? {};
     const arquivoId = Number(certificado.arquivo_id ?? certificado.arquivoId);
     let pfxPath = typeof certificado.pfxPath === "string" ? certificado.pfxPath : "";
 
-    if (arquivoId > 0 && deviceCredential && deviceId && store.saveFiscalCertificate) {
+    setIsFiscalEmissionEnabled(remoteFiscalEmissionEnabled);
+
+    if (remoteFiscalEmissionEnabled && arquivoId > 0 && deviceCredential && deviceId && store.saveFiscalCertificate) {
       const certificateFile = await apiPost<ApiFiscalCertificateDownload>("/pdvs/certificado-fiscal", {
         credencial_dispositivo: deviceCredential,
         dispositivo_id: deviceId,
@@ -2170,6 +2895,7 @@ export function DesktopCashierFlow({
       scope: localStoreScope,
       config: preserveLocalFiscalNumbering(nextLocalFiscalConfig, asRecord(savedConfig))
     });
+    setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(nextLocalFiscalConfig));
   }, [deviceCredential, deviceId, localStoreScope]);
 
   useEffect(() => {
@@ -2178,7 +2904,7 @@ export function DesktopCashierFlow({
     async function loadFiscalDocumentsForSalesList() {
       const store = getLocalPdvStore();
 
-      if (sales.length === 0 || !store?.listFiscalDocuments) {
+      if (!isFiscalEmissionEnabled || sales.length === 0 || !store?.listFiscalDocuments) {
         setFiscalDocumentsBySaleId({});
         return;
       }
@@ -2215,13 +2941,13 @@ export function DesktopCashierFlow({
     return () => {
       shouldIgnore = true;
     };
-  }, [fiscalDocumentsRefreshToken, localStoreScope, sales]);
+  }, [fiscalDocumentsRefreshToken, isFiscalEmissionEnabled, localStoreScope, sales]);
 
   useEffect(() => {
     let shouldIgnore = false;
 
     async function loadSelectedSaleFiscalDocuments() {
-      if (!selectedSale) {
+      if (!isFiscalEmissionEnabled || !selectedSale) {
         setSelectedSaleFiscalDocuments([]);
         setIsSelectedSaleFiscalLoading(false);
         return;
@@ -2263,9 +2989,9 @@ export function DesktopCashierFlow({
     return () => {
       shouldIgnore = true;
     };
-  }, [fiscalDocumentsRefreshToken, localStoreScope, selectedSale]);
+  }, [fiscalDocumentsRefreshToken, isFiscalEmissionEnabled, localStoreScope, selectedSale]);
 
-  const refreshRemoteData = useCallback(async (options: { silent?: boolean; showMessage?: boolean } = {}) => {
+  const refreshRemoteData = useCallback(async (options: { silent?: boolean; showMessage?: boolean; forceOnline?: boolean } = {}) => {
     if (!deviceCredential || !deviceId) {
       const message = "PDV sem credencial ativa para carregar produtos.";
       setCatalogError(message);
@@ -2273,7 +2999,7 @@ export function DesktopCashierFlow({
       return false;
     }
 
-    if (connectivity !== "online") {
+    if (connectivity !== "online" && !options.forceOnline) {
       const message = "Modo local: usando o último catálogo salvo.";
       setCatalogSyncError(message);
       return false;
@@ -2294,6 +3020,10 @@ export function DesktopCashierFlow({
       const nextProducts = (response.produtos ?? []).map(mapCatalogProduct);
       const nextAgreementClients = (response.clientes_convenio ?? []).map(mapAgreementClient);
       const nextAgreementReceipts = (response.recebimentos_convenio ?? []).map(mapAgreementReceipt);
+      const nextEmployees = mergeEmployees((response.funcionarios ?? []).map(mapEmployee));
+      const nextCommandSettings = normalizeCommandSettings(response.configuracoes?.comandas);
+      const nextExpenseSettings = normalizeExpenseSettings(response.configuracoes?.lancar_despesas);
+      const nextEmployeeControlSettings = normalizeEmployeeControlSettings(response.configuracoes?.controle_funcionarios);
       const nextPaymentSettings = normalizePaymentSettings(response.configuracoes?.formas_pagamento);
       const syncedAt = new Date().toISOString();
       let fiscalSyncMessage = "";
@@ -2306,8 +3036,12 @@ export function DesktopCashierFlow({
 
       setCatalogCategories(nextCategories);
       setCatalogProducts(nextProducts);
-      setAgreementClients(nextAgreementClients);
+      setAgreementClients(normalizeAgreementClients(nextAgreementClients));
       setAgreementReceipts((currentReceipts) => mergeAgreementReceipts(currentReceipts, nextAgreementReceipts));
+      setEmployees(nextEmployees);
+      setCommandSettings(nextCommandSettings);
+      setExpenseSettings(nextExpenseSettings);
+      setEmployeeControlSettings(nextEmployeeControlSettings);
       setPaymentSettings(nextPaymentSettings);
       setCartItems((currentItems) => mergeCartItemsWithCatalog(currentItems, nextProducts));
       setCommandEditor((currentEditor) =>
@@ -2327,6 +3061,7 @@ export function DesktopCashierFlow({
       setCatalogSyncedAt(syncedAt);
       setCatalogError("");
       setCatalogSyncError(fiscalSyncMessage);
+      onConnectivityChange("online");
       hasLoadedRemoteDataRef.current = true;
 
       if (options.showMessage) {
@@ -2335,6 +3070,7 @@ export function DesktopCashierFlow({
 
       return true;
     } catch (error) {
+      onConnectivityChange("offline");
       const message = error instanceof Error ? error.message : "Não foi possível carregar os produtos deste PDV.";
       setCatalogSyncError(message);
 
@@ -2351,7 +3087,7 @@ export function DesktopCashierFlow({
         setIsCatalogLoading(false);
       }
     }
-  }, [connectivity, deviceCredential, deviceId, onSystemMessage, synchronizeRemoteFiscalConfig]);
+  }, [connectivity, deviceCredential, deviceId, onConnectivityChange, onSystemMessage, synchronizeRemoteFiscalConfig]);
 
   const openProductPicker = useCallback((nextSearchQuery = "") => {
     setSearchQuery(nextSearchQuery);
@@ -2386,31 +3122,73 @@ export function DesktopCashierFlow({
     return getPreviewShiftNumber(now, shiftSequenceScope, remoteShiftNumber);
   }, [getRemoteShiftNumber, shiftSequenceScope]);
 
-  async function syncNow() {
+  const runPdvSyncCycle = useCallback(async (options: { forceOnline?: boolean; retryFailed?: boolean } = {}) => {
     const store = getLocalPdvStore();
+    const forceOnline = options.forceOnline ?? connectivity !== "online";
+    const retryFailed = options.retryFailed ?? true;
+
+    if (store?.retryFailedEvents && retryFailed) {
+      try {
+        const summary = await store.getSyncSummary({ scope: localStoreScope });
+
+        if (summary.failed > 0) {
+          const result = await store.retryFailedEvents({ scope: localStoreScope });
+          setPendingSyncCount(result.pending);
+          await refreshSyncSummary();
+        }
+      } catch (error) {
+        console.warn("Não foi possível preparar falhas locais para reenvio.", error);
+      }
+    }
+
+    const contingencySynced = await transmitPendingContingencyFiscalDocuments({ showMessage: false, forceOnline });
+    const { eventsSynced, fiscalSynced } = await syncPendingOutboundQueues({ showMessage: false, forceOnline });
+    const dataSynced = await refreshRemoteData({ silent: true, showMessage: false, forceOnline });
+
+    let finalSummary: LocalPdvStoreSummary | null = null;
+
+    try {
+      finalSummary = store ? await store.getSyncSummary({ scope: localStoreScope }) : null;
+    } catch {
+      finalSummary = null;
+    }
+
+    await refreshSyncSummary();
+
+    return {
+      contingencySynced,
+      dataSynced,
+      eventsSynced,
+      finalSummary,
+      fiscalSynced
+    };
+  }, [
+    connectivity,
+    localStoreScope,
+    refreshRemoteData,
+    refreshSyncSummary,
+    syncPendingOutboundQueues,
+    transmitPendingContingencyFiscalDocuments
+  ]);
+
+  async function syncNow() {
+    const forceOnline = connectivity !== "online";
 
     setIsManualSyncing(true);
 
     try {
-      if (store && syncSummary.failed > 0) {
-        const result = await store.retryFailedEvents({ scope: localStoreScope });
-        setPendingSyncCount(result.pending);
-        await refreshSyncSummary();
-      }
+      const result = await runPdvSyncCycle({ forceOnline, retryFailed: true });
+      const hasQueueAfterSync = Boolean((result.finalSummary?.pending ?? 0) > 0 || (result.finalSummary?.failed ?? 0) > 0);
+      const hasOutboundSync = result.eventsSynced || result.fiscalSynced || result.contingencySynced;
 
-      await transmitPendingContingencyFiscalDocuments({ showMessage: false });
-      const eventsSynced = await syncPendingEvents({ showMessage: false });
-      const [fiscalSynced, dataSynced] = await Promise.all([
-        eventsSynced ? syncPendingFiscalDocuments({ showMessage: false }) : Promise.resolve(false),
-        refreshRemoteData({ silent: true, showMessage: false })
-      ]);
-
-      await refreshSyncSummary();
-
-      if (eventsSynced || fiscalSynced || dataSynced) {
+      if (result.dataSynced && !hasQueueAfterSync) {
         onSystemMessage("Sincronização concluída.");
-      } else if (connectivity !== "online") {
-        onSystemMessage("Sem conexão com a API. A fila continua salva neste computador.");
+      } else if (result.dataSynced && hasQueueAfterSync) {
+        onSystemMessage("Dados recebidos. Ainda há itens locais pendentes de envio.");
+      } else if (hasOutboundSync && !hasQueueAfterSync) {
+        onSystemMessage("Envio concluído. Não foi possível atualizar os dados da API.");
+      } else if (hasQueueAfterSync) {
+        onSystemMessage("Sincronização parcial. A fila local continua salva neste computador.");
       } else {
         onSystemMessage("Não foi possível concluir a sincronização agora.");
       }
@@ -2421,6 +3199,60 @@ export function DesktopCashierFlow({
     } finally {
       setIsManualSyncing(false);
     }
+  }
+
+  async function ignoreFailedSyncEvent(eventId: string) {
+    const store = getLocalPdvStore();
+    const remainingEvents = failedSyncEvents.filter(event => event.id !== eventId);
+
+    rememberIgnoredSyncFailure(localStoreScope, "event", eventId);
+    setFailedSyncEvents(remainingEvents);
+    setEventSyncError("");
+
+    try {
+      if (store?.ignoreEvents) {
+        await store.ignoreEvents({ scope: localStoreScope, eventIds: [eventId] });
+      }
+    } catch (error) {
+      if (!isMissingFiscalIpcHandlerError(error)) {
+        console.warn("Não foi possível persistir o ignore do evento local.", error);
+      }
+    }
+
+    await refreshSyncSummary();
+
+    if (remainingEvents.length === 0 && failedFiscalDocuments.length === 0) {
+      setIsSyncDetailsOpen(false);
+    }
+
+    onSystemMessage("Erro de sincronização ignorado.");
+  }
+
+  async function ignoreFailedFiscalDocument(documentId: string) {
+    const store = getLocalPdvStore();
+    const remainingDocuments = failedFiscalDocuments.filter(document => document.id !== documentId);
+
+    rememberIgnoredSyncFailure(localStoreScope, "fiscalDocument", documentId);
+    setFailedFiscalDocuments(remainingDocuments);
+    setEventSyncError("");
+
+    try {
+      if (store?.ignoreFiscalDocuments) {
+        await store.ignoreFiscalDocuments({ scope: localStoreScope, documentIds: [documentId] });
+      }
+    } catch (error) {
+      if (!isMissingFiscalIpcHandlerError(error)) {
+        console.warn("Não foi possível persistir o ignore do documento fiscal local.", error);
+      }
+    }
+
+    await refreshSyncSummary();
+
+    if (remainingDocuments.length === 0 && failedSyncEvents.length === 0) {
+      setIsSyncDetailsOpen(false);
+    }
+
+    onSystemMessage("Erro fiscal ignorado.");
   }
 
   function startWaveHover(event: ReactPointerEvent<HTMLElement>, activeClassName: string) {
@@ -2457,6 +3289,13 @@ export function DesktopCashierFlow({
   }
 
   function addProduct(product: Product) {
+    const fiscalBlockMessage = isFiscalEmissionEnabled ? getProductFiscalBlockMessage(product) : "";
+
+    if (fiscalBlockMessage) {
+      onSystemMessage(`${fiscalBlockMessage} Complete o fiscal antes de vender.`);
+      return;
+    }
+
     const stockLimit = getControlledStockLimit(product);
     const existingItem = cartItems.find((item) => item.id === product.id);
 
@@ -2528,6 +3367,11 @@ export function DesktopCashierFlow({
   }
 
   function requestCommandFromSale() {
+    if (!isCommandsEnabled) {
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     if (cartItems.length === 0) {
       onSystemMessage("Adicione produtos antes de criar uma comanda.");
       return;
@@ -2537,6 +3381,12 @@ export function DesktopCashierFlow({
   }
 
   function requestNewCommand() {
+    if (!isCommandsEnabled) {
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     setCommandEditor({
       mode: "create",
       title: "",
@@ -2550,6 +3400,14 @@ export function DesktopCashierFlow({
 
   function confirmCommandName(title: string) {
     if (!commandNameRequest) {
+      return;
+    }
+
+    if (!isCommandsEnabled) {
+      setCommandNameRequest(null);
+      setCommandEditor(null);
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
       return;
     }
 
@@ -2598,6 +3456,12 @@ export function DesktopCashierFlow({
   }
 
   function editCommand(command: CommandRecord) {
+    if (!isCommandsEnabled) {
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     setCommandEditor({
       mode: "edit",
       commandId: command.id,
@@ -2611,6 +3475,12 @@ export function DesktopCashierFlow({
   }
 
   function finalizeCommand(command: CommandRecord) {
+    if (!isCommandsEnabled) {
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     if (command.items.length === 0) {
       onSystemMessage("Adicione produtos antes de finalizar a comanda.");
       return;
@@ -2625,7 +3495,7 @@ export function DesktopCashierFlow({
     setCommandEditor(null);
     setSearchQuery("");
     setSelectedPickerCategoryId("all");
-    setView("commands");
+    setView(isCommandsEnabled ? "commands" : session ? "sale" : "menu");
     onSystemMessage("");
   }
 
@@ -2646,6 +3516,13 @@ export function DesktopCashierFlow({
   }
 
   function saveCommandEditor() {
+    if (!isCommandsEnabled) {
+      setCommandEditor(null);
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     if (!commandEditor) {
       return;
     }
@@ -2682,6 +3559,13 @@ export function DesktopCashierFlow({
   }
 
   function requestDeleteCommand() {
+    if (!isCommandsEnabled) {
+      setCommandEditor(null);
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     if (!commandEditor || commandEditor.mode !== "edit" || !commandEditor.commandId) {
       return;
     }
@@ -2695,6 +3579,13 @@ export function DesktopCashierFlow({
   }
 
   function finalizeEditedCommand() {
+    if (!isCommandsEnabled) {
+      setCommandEditor(null);
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     if (!commandEditor || commandEditor.mode !== "edit" || !commandEditor.commandId) {
       return;
     }
@@ -2727,22 +3618,61 @@ export function DesktopCashierFlow({
     finalizeCommand(updatedCommand);
   }
 
-  async function openFiscalDispatchForSale(sale: SaleRecord, activeSession: CashierSession) {
+  async function getActiveLocalFiscalConfig() {
     const store = getLocalPdvStore();
-    const fiscalConfig = await store?.getFiscalConfig?.({ scope: localStoreScope });
-    const config = asRecord(fiscalConfig);
 
-    if (!config || config.ativo !== true) {
+    if (!store?.getFiscalConfig) {
+      setIsFiscalEmissionEnabled(false);
+      return null;
+    }
+
+    const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
+    const config = asRecord(fiscalConfig);
+    const isActive = isFiscalEmissionActiveConfig(config);
+
+    setIsFiscalEmissionEnabled(isActive);
+
+    return isActive ? config : null;
+  }
+
+  async function openFiscalDispatchForSale(sale: SaleRecord, activeSession: CashierSession) {
+    const config = await getActiveLocalFiscalConfig();
+
+    if (!config) {
+      return;
+    }
+
+    const blockedItem = sale.items.find((item) => getProductFiscalIssues(item).length > 0);
+
+    if (blockedItem) {
+      const message = `${getProductFiscalBlockMessage(blockedItem)} Complete o fiscal antes de emitir.`;
+
+      setCompletedSale(null);
+      setFiscalEmissionModal({
+        tone: "error",
+        title: "Falha na emissão fiscal",
+        message: "Venda concluída.",
+        detail: message,
+        sale,
+        fiscalModel: getSaleStoredFiscalModel(sale)
+      });
+      onSystemMessage(message);
       return;
     }
 
     setCompletedSale(null);
-    await emitFiscalDocumentForSale(sale, activeSession);
+    await emitFiscalDocumentForSale(sale, activeSession, { config, silentWhenDisabled: true });
   }
 
   function buildFiscalDocumentPayload(sale: SaleRecord, activeSession: CashierSession, config: Record<string, unknown>) {
-    const nfce = asRecord(config.nfce) ?? {};
-    const serieFiscal = getPdvFiscalSeriesValue(config) ?? (Number(nfce.serie) || null);
+    const agreementClient = sale.clienteConvenioId
+      ? activeAgreementClients.find((client) => client.id === sale.clienteConvenioId) ?? null
+      : null;
+    const clientPersonType = sale.clienteConvenioTipoPessoa ?? agreementClient?.personType ?? "fisica";
+    const clientFiscalData = asRecord(sale.clienteConvenioDadosFiscais) ?? asRecord(agreementClient?.fiscalData) ?? null;
+    const fiscalModel: FiscalModel = sale.paymentMethod === "convenio" && clientPersonType === "juridica" ? "55" : "65";
+    const modelConfig = getFiscalModelConfig(config, fiscalModel);
+    const serieFiscal = Number(modelConfig.serie) || getPdvFiscalSeriesValue(config) || null;
     const fiscalIssuedAt = new Date().toISOString();
     const itens = sale.items.map((item) => ({
       id: item.id,
@@ -2751,14 +3681,15 @@ export function DesktopCashierFlow({
       priceCents: item.priceCents,
       totalPriceCents: item.priceCents * item.quantity,
       barcode: item.barcode,
+      ncm: normalizeProductNcm(item.ncm),
       fiscal: item.fiscal ?? null
     }));
 
     return {
       vendaId: sale.id,
-      modelo: "65",
+      modelo: fiscalModel,
       serie: serieFiscal,
-      numero: Number(nfce.proximo_numero ?? nfce.ultimoNumero ?? nfce.ultimo_numero) || null,
+      numero: Number(modelConfig.proximo_numero ?? modelConfig.proximoNumero ?? modelConfig.ultimoNumero ?? modelConfig.ultimo_numero) || null,
       paymentMethod: sale.paymentMethod,
       totalCents: sale.totalCents,
       createdAt: fiscalIssuedAt,
@@ -2766,9 +3697,12 @@ export function DesktopCashierFlow({
       emittedAt: fiscalIssuedAt,
       dhEmi: fiscalIssuedAt,
       itens,
+      ...(fiscalModel === "55" ? { destinatario: clientFiscalData } : {}),
       session: activeSession,
       sale: {
         ...sale,
+        clienteConvenioTipoPessoa: clientPersonType,
+        clienteConvenioDadosFiscais: clientFiscalData,
         items: itens
       }
     };
@@ -2787,6 +3721,8 @@ export function DesktopCashierFlow({
   ) {
     const status = String(response.status || "");
     const data = asRecord(response.data) ?? {};
+    const fiscalModel: FiscalModel = data.modelo === "55" ? "55" : getSaleStoredFiscalModel(sale);
+    const fiscalLabel = getFiscalModelLabel(fiscalModel);
     const documentId = typeof data.documentId === "string" ? data.documentId : null;
     const operatorMessage = typeof data.mensagemOperador === "string" && data.mensagemOperador.trim()
       ? data.mensagemOperador
@@ -2813,8 +3749,8 @@ export function DesktopCashierFlow({
     if (status === "pendente") {
       setFiscalEmissionModal({
         tone: "queued",
-        title: "NFC-e pendente",
-        message: "Emissão pendente.",
+        title: `${fiscalLabel} pendente`,
+        message: "Emissão pendente",
         detail: operatorMessage || "Abra os detalhes da venda para tentar novamente.",
         sale,
         documentId,
@@ -2822,6 +3758,7 @@ export function DesktopCashierFlow({
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
+        fiscalModel,
         xmlPath: null,
         logPath: response.logPath ?? null
       });
@@ -2832,15 +3769,16 @@ export function DesktopCashierFlow({
       if (isContingencyEmission) {
         setFiscalEmissionModal({
           tone: "queued",
-          title: "NFC-e em contingência",
-          message: "Emitida em contingência offline.",
-          detail: "XML salvo para transmissão posterior.",
+          title: `${fiscalLabel} em contingência`,
+          message: "Salva em contingência",
+          detail: "Transmita quando a conexão voltar.",
           sale,
           documentId,
           fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
           fiscalStatus: "contingencia_emitida",
           fiscalProtocol: null,
           fiscalKey,
+          fiscalModel,
           xmlPath: approvedXmlPath,
           logPath: response.logPath ?? null
         });
@@ -2849,8 +3787,8 @@ export function DesktopCashierFlow({
 
       setFiscalEmissionModal({
         tone: "success",
-        title: "NFC-e autorizada",
-        message: approvedXmlPath ? "Autorizada pela SEFAZ." : "Autorizada, mas sem XML para impressão.",
+        title: `${fiscalLabel} autorizada`,
+        message: approvedXmlPath ? "Autorizada pela SEFAZ" : "Autorizada sem DANFE disponível",
         detail: null,
         sale,
         documentId,
@@ -2858,6 +3796,7 @@ export function DesktopCashierFlow({
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
+        fiscalModel,
         xmlPath: approvedXmlPath,
         logPath: response.logPath ?? null
       });
@@ -2876,6 +3815,7 @@ export function DesktopCashierFlow({
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
+        fiscalModel,
         xmlPath: null,
         logPath: response.logPath ?? null
       });
@@ -2887,7 +3827,7 @@ export function DesktopCashierFlow({
       title: "Falha na emissão fiscal",
       message: isDuplicateFiscalNumber
         ? "Numeração já utilizada na SEFAZ."
-        : operatorMessage || "Não foi possível emitir a NFC-e.",
+        : operatorMessage || `Não foi possível emitir a ${fiscalLabel}.`,
       detail: isDuplicateFiscalNumber
         ? "A próxima numeração foi ajustada automaticamente. Tente novamente pelos detalhes da venda."
         : fiscalStatus && fiscalStatus !== status && fiscalStatus !== operatorMessage
@@ -2899,57 +3839,186 @@ export function DesktopCashierFlow({
       fiscalStatus,
       fiscalProtocol,
       fiscalKey,
+      fiscalModel,
       xmlPath: null,
       logPath: response.logPath ?? null
     });
   }
 
-  async function emitFiscalDocumentForSale(sale: SaleRecord, activeSession: CashierSession) {
+  function getFiscalResponseXmlPath(response: { success?: boolean; data?: unknown }) {
+    const data = asRecord(response.data) ?? {};
+    const xmlPath = typeof data.xmlAutorizadoPath === "string"
+      ? data.xmlAutorizadoPath
+      : typeof data.xmlPath === "string"
+        ? data.xmlPath
+        : null;
+
+    return response.success && xmlPath ? xmlPath : null;
+  }
+
+  async function callFiscalDanfePrint({
+    sale,
+    documentId,
+    xmlPath,
+    command,
+    config,
+    payload
+  }: {
+    sale: SaleRecord;
+    documentId?: string | null;
+    xmlPath: string;
+    command: "imprimir-danfe" | "reimprimir-danfe";
+    config?: Record<string, unknown> | null;
+    payload?: Record<string, unknown>;
+  }): Promise<FiscalWorkerResponse | null> {
+    const store = getLocalPdvStore();
+
+    if (!isFiscalEmissionEnabled || !store?.getFiscalConfig || !store.callFiscalWorker) {
+      return null;
+    }
+
+    const fiscalConfig = config ?? asRecord(await store.getFiscalConfig({ scope: localStoreScope })) ?? {};
+    const fiscalModel: FiscalModel = payload?.modelo === "55" ? "55" : getSaleStoredFiscalModel(sale);
+    const printPayload = {
+      vendaId: sale.id,
+      xmlPath,
+      modelo: fiscalModel,
+      ...(payload ?? {}),
+      contingencia: isFiscalDocumentContingencyPrint({
+        status: String(payload?.fiscalStatus ?? payload?.status ?? ""),
+        xmlPath,
+        raw_result: {
+          data: payload ?? {}
+        }
+      })
+    };
+
+    return store.callFiscalWorker({
+      scope: localStoreScope,
+      command,
+      documentId: documentId || createId("documento-fiscal"),
+      config: fiscalConfig,
+      payload: printPayload
+    });
+  }
+
+  async function printFiscalDocumentAfterEmission(
+    sale: SaleRecord,
+    response: {
+      success?: boolean;
+      status?: string;
+      friendlyMessage?: string;
+      data?: unknown;
+    },
+    config: Record<string, unknown>
+  ) {
+    const data = asRecord(response.data) ?? {};
+    const xmlPath = getFiscalResponseXmlPath(response);
+
+    if (!xmlPath || fiscalPrintingLockRef.current) {
+      return;
+    }
+
+    const documentId = typeof data.documentId === "string" ? data.documentId : null;
+
+    fiscalPrintingLockRef.current = true;
+    setFiscalPrintMode("initial");
+    setIsFiscalPrinting(true);
+
+    try {
+      const printResponse = await callFiscalDanfePrint({
+        sale,
+        documentId,
+        xmlPath,
+        command: "imprimir-danfe",
+        config,
+        payload: {
+          fiscalStatus: response.status,
+          modelo: data.modelo || "65",
+          serie: data.serie,
+          numero: data.numero,
+          chave: data.chave,
+          tpEmis: data.tpEmis,
+          contingencia: data.contingencia === true
+        }
+      });
+
+      if (!printResponse?.success) {
+        setFiscalEmissionModal(current => current?.sale.id === sale.id
+          ? {
+              ...current,
+              detail: printResponse?.friendlyMessage || "Documento fiscal emitido, mas a impressão automática não foi concluída."
+            }
+          : current);
+      }
+    } catch (error) {
+      setFiscalEmissionModal(current => current?.sale.id === sale.id
+        ? {
+            ...current,
+            detail: "Documento fiscal emitido, mas a impressão automática não foi concluída."
+          }
+        : current);
+    } finally {
+      fiscalPrintingLockRef.current = false;
+      setFiscalPrintMode(null);
+      setIsFiscalPrinting(false);
+    }
+  }
+
+  async function emitFiscalDocumentForSale(
+    sale: SaleRecord,
+    activeSession: CashierSession,
+    options: { config?: Record<string, unknown>; silentWhenDisabled?: boolean } = {}
+  ) {
     const store = getLocalPdvStore();
 
     if (!store?.getFiscalConfig || !store.callFiscalWorker) {
       return;
     }
 
-    setFiscalEmissionModal({
-      tone: "pending",
-      title: connectivity === "online" ? "Emitindo NFC-e" : "Emitindo NFC-e em contingência",
-      message: connectivity === "online" ? "Aguardando autorização da SEFAZ." : "Gerando XML para impressão offline.",
-      detail: null,
-      sale,
-      documentId: null,
-      fiscalNumber: null,
-      fiscalStatus: null,
-      fiscalProtocol: null,
-      fiscalKey: null,
-      xmlPath: null,
-      logPath: null
-    });
-
     try {
-      const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
-      const config = asRecord(fiscalConfig);
+      const config = options.config ?? await getActiveLocalFiscalConfig();
 
-      if (!config || config.ativo !== true) {
-        setFiscalEmissionModal({
-          tone: "error",
-          title: "Emissão fiscal desativada",
-          message: "A venda foi concluída, mas a configuração fiscal local não está ativa neste PDV.",
-          detail: "Sincronize o PDV ou ative a emissão fiscal no painel web.",
-          sale
-        });
+      if (!config) {
+        setFiscalEmissionModal(null);
+
+        if (!options.silentWhenDisabled) {
+          onSystemMessage("Emissão fiscal desativada neste PDV.");
+        }
+
         return;
       }
 
       const payload = buildFiscalDocumentPayload(sale, activeSession, config);
+      const fiscalModel: FiscalModel = payload.modelo === "55" ? "55" : "65";
+      const fiscalLabel = getFiscalModelLabel(fiscalModel);
+
+      setFiscalEmissionModal({
+        tone: "pending",
+        title: connectivity === "online" ? `Emitindo ${fiscalLabel}` : `Emitindo ${fiscalLabel} em contingência`,
+        message: connectivity === "online" ? "Aguardando SEFAZ" : "Preparando contingência",
+        detail: null,
+        sale,
+        documentId: null,
+        fiscalNumber: null,
+        fiscalStatus: null,
+        fiscalProtocol: null,
+        fiscalKey: null,
+        fiscalModel,
+        xmlPath: null,
+        logPath: null
+      });
+
       const documentId = createId("documento-fiscal");
-      const command = connectivity === "online" ? "emitir-nfce" : "emitir-nfce-contingencia";
+      const command = connectivity === "online"
+        ? fiscalModel === "55" ? "emitir-nfe" : "emitir-nfce"
+        : fiscalModel === "55" ? "emitir-nfe-contingencia" : "emitir-nfce-contingencia";
       const response = await store.callFiscalWorker({
         scope: localStoreScope,
         command,
         documentId,
         config,
-        payload: command === "emitir-nfce-contingencia"
+        payload: command.endsWith("-contingencia")
           ? {
               ...payload,
               motivoContingencia: "PDV operando sem comunicação com a SEFAZ"
@@ -2957,73 +4026,152 @@ export function DesktopCashierFlow({
           : payload
       });
       const responseData = asRecord(response.data) ?? {};
-
-      showFiscalEmissionResult(sale, {
+      const emissionResponse = {
         ...response,
         data: {
           ...responseData,
           documentId
         }
-      });
+      };
+
+      showFiscalEmissionResult(sale, emissionResponse);
+      void printFiscalDocumentAfterEmission(sale, emissionResponse, config);
       setFiscalDocumentsRefreshToken((current) => current + 1);
-      void syncPendingEvents({ showMessage: false }).then((eventsSynced) => {
-        if (eventsSynced) {
-          void syncPendingFiscalDocuments({ showMessage: false });
-        }
-      });
+      void syncPendingOutboundQueues({ showMessage: false });
     } catch (error) {
       setFiscalEmissionModal({
         tone: "error",
         title: "Falha na emissão fiscal",
         message: "A venda foi concluída, mas o PDV não conseguiu chamar o fluxo fiscal.",
         detail: "Verifique a configuração fiscal local e tente emitir novamente pelos detalhes da venda.",
-        sale
+        sale,
+        fiscalModel: getSaleStoredFiscalModel(sale)
       });
       setFiscalDocumentsRefreshToken((current) => current + 1);
     }
   }
 
-  async function printFiscalDocumentFromModal() {
-    const state = fiscalEmissionModal;
+  async function cancelFiscalDocumentsForSale(sale: SaleRecord, canceledAt: string) {
     const store = getLocalPdvStore();
 
-    if (!state?.xmlPath || !store?.getFiscalConfig || !store.callFiscalWorker) {
+    if (!isFiscalEmissionEnabled || !store?.callFiscalWorker || !store.listFiscalDocuments) {
       return;
     }
 
+    try {
+      const config = await getActiveLocalFiscalConfig();
+
+      if (!config) {
+        return;
+      }
+
+      const documents = dedupeFiscalDocuments(await store.listFiscalDocuments({
+        scope: localStoreScope,
+        vendaId: sale.id,
+        limit: 50
+      }));
+      const cancelableDocuments = getCancelableFiscalDocuments(documents);
+
+      if (cancelableDocuments.length === 0) {
+        return;
+      }
+
+      let canceledCount = 0;
+      let failedCount = 0;
+
+      for (const document of cancelableDocuments) {
+        const documentId = createId("documento-fiscal");
+        const fiscalModel: FiscalModel = document.modelo === "55" ? "55" : "65";
+        const response = await store.callFiscalWorker({
+          scope: localStoreScope,
+          command: "cancelar",
+          documentId,
+          config,
+          payload: {
+            documentId,
+            vendaId: sale.id,
+            modelo: fiscalModel,
+            serie: document.serie,
+            numero: document.numero,
+            chave: document.chave,
+            protocolo: document.protocolo,
+            xmlPath: getFiscalDocumentXmlPath(document),
+            justificativa: "Cancelamento da venda no PDV Caixa Agil.",
+            canceledAt,
+            sale
+          }
+        });
+
+        if (response.success) {
+          canceledCount += 1;
+        } else {
+          failedCount += 1;
+        }
+      }
+
+      setFiscalDocumentsRefreshToken((current) => current + 1);
+      void syncPendingOutboundQueues({ showMessage: false });
+
+      if (failedCount > 0) {
+        onSystemMessage("Venda cancelada, mas o cancelamento fiscal precisa de atenção nos detalhes da venda.");
+        return;
+      }
+
+      if (canceledCount > 0) {
+        onSystemMessage(canceledCount === 1 ? "Venda cancelada e NF cancelada." : "Venda cancelada e notas fiscais canceladas.");
+      }
+    } catch (error) {
+      console.warn("Não foi possível cancelar a NF da venda.", error);
+      onSystemMessage("Venda cancelada, mas não foi possível cancelar a NF automaticamente.");
+      setFiscalDocumentsRefreshToken((current) => current + 1);
+    }
+  }
+
+  async function printFiscalDocumentFromModal() {
+    if (fiscalPrintingLockRef.current) {
+      return;
+    }
+
+    const state = fiscalEmissionModal;
+
+    if (!state?.xmlPath) {
+      return;
+    }
+
+    fiscalPrintingLockRef.current = true;
+    setFiscalPrintMode("reprint");
     setIsFiscalPrinting(true);
 
     try {
-      const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
-      const config = asRecord(fiscalConfig) ?? {};
-      const response = await store.callFiscalWorker({
-        scope: localStoreScope,
-        command: "imprimir-danfe",
-        documentId: state.documentId || createId("documento-fiscal"),
-        config,
+      const response = await callFiscalDanfePrint({
+        sale: state.sale,
+        documentId: state.documentId,
+        xmlPath: state.xmlPath,
+        command: "reimprimir-danfe",
         payload: {
-          vendaId: state.sale.id,
-          xmlPath: state.xmlPath,
-          modelo: "65"
+          fiscalStatus: state.fiscalStatus,
+          modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale)
         }
       });
 
       setFiscalEmissionModal(current => current
         ? {
             ...current,
-            tone: response.success ? "success" : "error",
-            detail: response.friendlyMessage || current.detail || "Não foi possível imprimir o DANFE."
+            detail: response?.success
+              ? "DANFE reenviado para impressão."
+              : response?.friendlyMessage || current.detail || "Não foi possível reimprimir o DANFE."
           }
         : current);
     } catch (error) {
       setFiscalEmissionModal(current => current
         ? {
             ...current,
-            tone: "error",
-            detail: "Não foi possível imprimir o DANFE."
+            detail: "Não foi possível reimprimir o DANFE."
           }
         : current);
     } finally {
+      fiscalPrintingLockRef.current = false;
+      setFiscalPrintMode(null);
       setIsFiscalPrinting(false);
     }
   }
@@ -3031,6 +4179,11 @@ export function DesktopCashierFlow({
   async function reprintFiscalDocumentFromDetails(sale: SaleRecord, document: FiscalDocumentRecord) {
     const store = getLocalPdvStore();
     const xmlPath = getFiscalDocumentXmlPath(document);
+
+    if (!isFiscalEmissionEnabled) {
+      onSystemMessage("Emissão fiscal desativada neste PDV.");
+      return;
+    }
 
     if (!xmlPath || !store?.getFiscalConfig || !store.callFiscalWorker) {
       onSystemMessage("XML autorizado indisponível para reimpressão.");
@@ -3053,7 +4206,8 @@ export function DesktopCashierFlow({
           modelo: document.modelo || "65",
           serie: document.serie,
           numero: document.numero,
-          chave: document.chave
+          chave: document.chave,
+          contingencia: isFiscalDocumentContingencyPrint(document)
         }
       });
 
@@ -3076,6 +4230,14 @@ export function DesktopCashierFlow({
       return;
     }
 
+    if (!isCommandsEnabled) {
+      setCommandDeleteRequest(null);
+      setCommandEditor(null);
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+      return;
+    }
+
     setCommands((currentCommands) => currentCommands.filter((command) => command.id !== commandDeleteRequest.id));
     setCommandEditor(null);
     setCommandDeleteRequest(null);
@@ -3086,7 +4248,14 @@ export function DesktopCashierFlow({
   }
 
   function addProductToCommandEditor(product: Product) {
-    if (!commandEditor) {
+    if (!isCommandsEnabled || !commandEditor) {
+      return;
+    }
+
+    const fiscalBlockMessage = isFiscalEmissionEnabled ? getProductFiscalBlockMessage(product) : "";
+
+    if (fiscalBlockMessage) {
+      onSystemMessage(`${fiscalBlockMessage} Complete o fiscal antes de vender.`);
       return;
     }
 
@@ -3116,7 +4285,7 @@ export function DesktopCashierFlow({
   }
 
   function decreaseCommandItem(productId: string) {
-    if (!commandEditor) {
+    if (!isCommandsEnabled || !commandEditor) {
       return;
     }
 
@@ -3129,7 +4298,7 @@ export function DesktopCashierFlow({
   }
 
   function increaseCommandItem(productId: string) {
-    if (!commandEditor) {
+    if (!isCommandsEnabled || !commandEditor) {
       return;
     }
 
@@ -3159,9 +4328,23 @@ export function DesktopCashierFlow({
     const sourceCommand = commandPaymentRequest;
     const sourceItems = sourceCommand?.items ?? cartItems;
     const sourceTotalCents = getCartTotal(sourceItems);
-    const convenioClient = method === "convenio" ? agreementClient : null;
+    const convenioClient = method === "convenio" &&
+      agreementClient?.active === true &&
+      activeAgreementClients.some((client) => client.id === agreementClient.id)
+      ? agreementClient
+      : null;
 
     if (!session || sourceItems.length === 0) {
+      return;
+    }
+
+    if (sourceCommand && !isCommandsEnabled) {
+      setCommandPaymentRequest(null);
+      setIsPaymentOpen(false);
+      setIsCashPaymentOpen(false);
+      setIsAgreementPaymentOpen(false);
+      setView("sale");
+      onSystemMessage("Comandas desativadas neste PDV.");
       return;
     }
 
@@ -3171,14 +4354,26 @@ export function DesktopCashierFlow({
       return;
     }
 
+    if (isFiscalEmissionEnabled) {
+      const blockedItem = sourceItems.find((item) => getProductFiscalIssues(item).length > 0);
+
+      if (blockedItem) {
+        onSystemMessage(`${getProductFiscalBlockMessage(blockedItem)} Complete o fiscal antes de concluir a venda.`);
+        return;
+      }
+    }
+
     const nextSale: SaleRecord = {
       id: createId("venda"),
       createdAt: new Date().toISOString(),
+      sessionId: session.id,
       items: sourceItems,
       paymentMethod: method,
       totalCents: sourceTotalCents,
       originCommandTitle: sourceCommand?.title ?? null,
       clienteConvenioId: convenioClient?.id ?? null,
+      clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
+      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null,
       clientName: convenioClient?.name ?? null
     };
 
@@ -3220,7 +4415,9 @@ export function DesktopCashierFlow({
       origem: sourceCommand ? "comanda" : "caixa",
       origemComandaNome: sourceCommand?.title ?? null,
       clienteConvenioId: convenioClient?.id ?? null,
-      clienteConvenioNome: convenioClient?.name ?? null
+      clienteConvenioNome: convenioClient?.name ?? null,
+      clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
+      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null
     });
     void openFiscalDispatchForSale(nextSale, session);
   }
@@ -3277,6 +4474,7 @@ export function DesktopCashierFlow({
       origem: canceledSale.originCommandTitle ? "comanda" : "caixa",
       origemComandaNome: canceledSale.originCommandTitle ?? null
     });
+    void cancelFiscalDocumentsForSale(nextCanceledSale, canceledAt);
   }
 
   function closePaymentFlow() {
@@ -3304,7 +4502,7 @@ export function DesktopCashierFlow({
     }
 
     if (method === "convenio") {
-      if (agreementClients.length === 0) {
+      if (activeAgreementClients.length === 0) {
         onSystemMessage("Cadastre um cliente de convênio antes de usar essa forma de pagamento.");
         closePaymentFlow();
         return;
@@ -3332,6 +4530,7 @@ export function DesktopCashierFlow({
       ...receipt,
       status: "pago",
       paymentMethod: method,
+      receivedSessionId: session.id,
       receivedAt
     }));
     const nextReceiptById = new Map(nextReceipts.map((receipt) => [receipt.id, receipt]));
@@ -3385,7 +4584,74 @@ export function DesktopCashierFlow({
     confirmAgreementReceiptPayment(method, paymentRequest);
   }
 
-  async function openSession() {
+  function requestEmployeeAuth(mode: EmployeeAuthMode) {
+    if (activeEmployees.length === 0) {
+      onSystemMessage("Funcionários ativados, mas nenhum funcionário foi sincronizado para este PDV.");
+      return false;
+    }
+
+    setEmployeeAuthCode("");
+    setEmployeeAuthError("");
+    setEmployeeAuthRequest({ mode });
+    return true;
+  }
+
+  function closeEmployeeAuthModal() {
+    if (isEmployeeAuthSubmitting) {
+      return;
+    }
+
+    setEmployeeAuthRequest(null);
+    setEmployeeAuthCode("");
+    setEmployeeAuthError("");
+  }
+
+  async function confirmEmployeeAuth(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+
+    if (!employeeAuthRequest || isEmployeeAuthSubmitting) {
+      return;
+    }
+
+    const normalizedCode = normalizeEmployeeCode(employeeAuthCode);
+
+    if (!normalizedCode) {
+      setEmployeeAuthError("Informe a senha do funcionário.");
+      return;
+    }
+
+    setIsEmployeeAuthSubmitting(true);
+    setEmployeeAuthError("");
+
+    try {
+      const codeHash = await hashEmployeeCode(normalizedCode);
+      const employee = activeEmployees.find((item) => item.codeHash === codeHash);
+
+      if (!employee) {
+        setEmployeeAuthError("Senha inválida.");
+        return;
+      }
+
+      const mode = employeeAuthRequest.mode;
+
+      setEmployeeAuthRequest(null);
+      setEmployeeAuthCode("");
+
+      if (mode === "open") {
+        await completeOpenSession(employee);
+        return;
+      }
+
+      if (mode === "close-confirm") {
+        completeCloseSession(employee);
+        return;
+      }
+    } finally {
+      setIsEmployeeAuthSubmitting(false);
+    }
+  }
+
+  async function completeOpenSession(employee: EmployeeRecord | null) {
     if (isOpeningSession) {
       return;
     }
@@ -3399,18 +4665,41 @@ export function DesktopCashierFlow({
       const nextSession = {
         id: createId("turno"),
         shiftNumber,
-        openedAt: openedAt.toISOString()
+        openedAt: openedAt.toISOString(),
+        openedByEmployeeId: employee?.id ?? null,
+        openedByEmployeeName: employee?.name ?? null
       };
 
       setSession(nextSession);
+      setCartItems([]);
+      setSales([]);
+      setExpenses([]);
+      setCommands([]);
+      setCommandEditor(null);
+      setCommandNameRequest(null);
+      setCommandDeleteRequest(null);
+      setCommandPaymentRequest(null);
       setView("sale");
-      onSystemMessage("Turno aberto. O caixa já pode iniciar vendas.");
+      onSystemMessage(employee ? `Turno aberto por ${employee.name}.` : "Turno aberto. O caixa já pode iniciar vendas.");
       enqueueLocalEvent("turno_aberto", "turno", nextSession.id, {
         session: nextSession
       });
     } finally {
       setIsOpeningSession(false);
     }
+  }
+
+  async function openSession() {
+    if (isOpeningSession) {
+      return;
+    }
+
+    if (isEmployeeControlEnabled) {
+      requestEmployeeAuth("open");
+      return;
+    }
+
+    await completeOpenSession(null);
   }
 
   useEffect(() => {
@@ -3434,9 +4723,22 @@ export function DesktopCashierFlow({
         setSession(savedState.session ?? null);
         setCartItems(savedState.cartItems ?? []);
         setSales(savedState.sales ?? []);
-        setCommands(savedState.commands ?? []);
+        const nextCommandSettings = initialSettings
+          ? normalizeCommandSettings(initialSettings.comandas)
+          : normalizeCommandSettings(savedState.commandSettings);
+        const nextExpenseSettings = initialSettings
+          ? normalizeExpenseSettings(initialSettings.lancar_despesas)
+          : normalizeExpenseSettings(savedState.expenseSettings);
+        const nextEmployeeControlSettings = initialSettings
+          ? normalizeEmployeeControlSettings(initialSettings.controle_funcionarios)
+          : normalizeEmployeeControlSettings(savedState.employeeControlSettings);
+        setCommandSettings(nextCommandSettings);
+        setExpenseSettings(nextExpenseSettings);
+        setEmployeeControlSettings(nextEmployeeControlSettings);
+        setEmployees(initialSettings ? mergeEmployees((initialEmployees ?? []).map(mapEmployee)) : mergeEmployees(savedState.employees ?? []));
+        setCommands(nextCommandSettings.ativo ? savedState.commands ?? [] : []);
         setExpenses(savedState.expenses ?? []);
-        setAgreementClients(savedState.agreementClients ?? []);
+        setAgreementClients(normalizeAgreementClients(savedState.agreementClients ?? []));
         setAgreementReceipts(savedState.agreementReceipts ?? []);
         setCatalogProducts(savedState.catalogProducts ?? []);
         setCatalogCategories(savedState.catalogCategories ?? []);
@@ -3462,7 +4764,34 @@ export function DesktopCashierFlow({
     return () => {
       shouldIgnore = true;
     };
-  }, [localStoreScope]);
+  }, [initialEmployees, initialSettings, localStoreScope]);
+
+  useEffect(() => {
+    let shouldIgnore = false;
+    const store = getLocalPdvStore();
+
+    if (!store?.getFiscalConfig) {
+      setIsFiscalEmissionEnabled(false);
+      return;
+    }
+
+    store
+      .getFiscalConfig({ scope: localStoreScope })
+      .then((config) => {
+        if (!shouldIgnore) {
+          setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(asRecord(config)));
+        }
+      })
+      .catch(() => {
+        if (!shouldIgnore && !initialSettings?.fiscal) {
+          setIsFiscalEmissionEnabled(false);
+        }
+      });
+
+    return () => {
+      shouldIgnore = true;
+    };
+  }, [initialSettings, localStoreScope]);
 
   useEffect(() => {
     if (!isLocalStateReady || connectivity !== "online") {
@@ -3475,11 +4804,7 @@ export function DesktopCashierFlow({
           return;
         }
 
-        void syncPendingEvents().then((eventsSynced) => {
-          if (eventsSynced) {
-            void syncPendingFiscalDocuments();
-          }
-        });
+        void syncPendingOutboundQueues();
       });
     };
 
@@ -3492,7 +4817,7 @@ export function DesktopCashierFlow({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [connectivity, deviceCredential, isLocalStateReady, syncPendingEvents, syncPendingFiscalDocuments, transmitPendingContingencyFiscalDocuments]);
+  }, [connectivity, deviceCredential, isLocalStateReady, syncPendingOutboundQueues, transmitPendingContingencyFiscalDocuments]);
 
   useEffect(() => {
     if (!isLocalStateReady) {
@@ -3519,10 +4844,14 @@ export function DesktopCashierFlow({
     sales,
     commands,
     expenses,
+    employees,
     agreementClients,
     agreementReceipts,
     catalogProducts,
     catalogCategories,
+    commandSettings,
+    expenseSettings,
+    employeeControlSettings,
     paymentSettings
   ]);
 
@@ -3563,6 +4892,19 @@ export function DesktopCashierFlow({
 
     setView(session ? "sale" : "menu");
   }, [frontCashAgreementClients.length, isAgreementPaymentEnabled, session, view]);
+
+  useEffect(() => {
+    if (isExpensesEnabled) {
+      return;
+    }
+
+    setIsExpenseOpen(false);
+
+    if (view === "expenses") {
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Despesas desativadas neste PDV.");
+    }
+  }, [isExpensesEnabled, onSystemMessage, session, view]);
 
   useEffect(() => {
     if (session || view !== "menu") {
@@ -3618,15 +4960,25 @@ export function DesktopCashierFlow({
     const shortcutMap: Partial<Record<string, CashierView>> = {
       Escape: "sale",
       F1: "history",
-      F2: "commands",
+      ...(isCommandsEnabled ? { F2: "commands" as const } : {}),
       ...(isAgreementPaymentEnabled && frontCashAgreementClients.length > 0 ? { F3: "agreement" as const } : {}),
-      F4: "expenses"
+      ...(isExpensesEnabled ? { F4: "expenses" as const } : {})
     };
 
     const handleFunctionShortcut = (event: KeyboardEvent) => {
       const nextView = shortcutMap[event.key];
 
+      if (event.key === "F2" && !isCommandsEnabled) {
+        event.preventDefault();
+        return;
+      }
+
       if (event.key === "F3" && (!isAgreementPaymentEnabled || frontCashAgreementClients.length === 0)) {
+        event.preventDefault();
+        return;
+      }
+
+      if (event.key === "F4" && !isExpensesEnabled) {
         event.preventDefault();
         return;
       }
@@ -3668,6 +5020,8 @@ export function DesktopCashierFlow({
     completedAgreementReceipt,
     saleCancelRequest,
     frontCashAgreementClients.length,
+    isCommandsEnabled,
+    isExpensesEnabled,
     isAgreementPaymentEnabled,
     onSystemMessage
   ]);
@@ -3767,12 +5121,53 @@ export function DesktopCashierFlow({
     };
   }, [connectivity, isLocalStateReady, refreshRemoteData]);
 
+  useEffect(() => {
+    if (isCommandsEnabled) {
+      return;
+    }
+
+    setCommands([]);
+    setCommandEditor(null);
+    setCommandNameRequest(null);
+    setCommandDeleteRequest(null);
+    setIsProductPickerOpen(false);
+
+    if (commandPaymentRequest) {
+      setCommandPaymentRequest(null);
+      setIsPaymentOpen(false);
+      setIsCashPaymentOpen(false);
+      setIsAgreementPaymentOpen(false);
+    }
+
+    if (view === "commands" || view === "command-editor") {
+      setSearchQuery("");
+      setSelectedPickerCategoryId("all");
+      setView(session ? "sale" : "menu");
+      onSystemMessage("Comandas desativadas neste PDV.");
+    }
+  }, [commandPaymentRequest, isCommandsEnabled, onSystemMessage, session, view]);
+
+  useEffect(() => {
+    if (isFiscalEmissionEnabled) {
+      return;
+    }
+
+    setFiscalEmissionModal(null);
+    setFiscalDocumentsBySaleId({});
+    setSelectedSaleFiscalDocuments([]);
+    setIsSelectedSaleFiscalLoading(false);
+    setReprintingFiscalDocumentId(null);
+    fiscalPrintingLockRef.current = false;
+    setFiscalPrintMode(null);
+    setIsFiscalPrinting(false);
+  }, [isFiscalEmissionEnabled]);
+
   function closeSession() {
     if (!session) {
       return;
     }
 
-    if (commands.length > 0) {
+    if (isCommandsEnabled && commands.length > 0) {
       onSystemMessage("Conclua ou remova as comandas abertas antes de fechar o turno.");
       return;
     }
@@ -3782,10 +5177,25 @@ export function DesktopCashierFlow({
       return;
     }
 
+    if (isEmployeeControlEnabled) {
+      requestEmployeeAuth("close-confirm");
+      return;
+    }
+
+    completeCloseSession(null);
+  }
+
+  function completeCloseSession(employee: EmployeeRecord | null) {
+    if (!session) {
+      return;
+    }
+
     const closedAt = new Date().toISOString();
     const closedSession = {
       ...session,
-      closedAt
+      closedAt,
+      closedByEmployeeId: employee?.id ?? null,
+      closedByEmployeeName: employee?.name ?? null
     };
 
     setSession(null);
@@ -3795,15 +5205,17 @@ export function DesktopCashierFlow({
     setCommandNameRequest(null);
     setCommandDeleteRequest(null);
     setCommandPaymentRequest(null);
+    setExpenseEditRequest(null);
     setSales([]);
     setExpenses([]);
     setIsClosingSession(false);
     setView("menu");
-    onSystemMessage("Turno fechado neste computador.");
+    onSystemMessage(employee ? `Turno fechado por ${employee.name}.` : "Turno fechado neste computador.");
     enqueueLocalEvent("turno_fechado", "turno", closedSession.id, {
       session: closedSession,
-      sales,
-      expenses,
+      sales: sessionActiveSales,
+      expenses: sessionExpenseRecords,
+      agreementReceipts: sessionAgreementReceipts,
       totals: {
         salesCents: sessionSales,
         expensesCents: sessionExpenses,
@@ -3813,20 +5225,80 @@ export function DesktopCashierFlow({
     void resolvePreviewShiftNumber().then(setPreviewShiftNumber);
   }
 
-  function addExpense(title: string, amountCents: number) {
+  function openNewExpense() {
+    setExpenseEditRequest(null);
+    setIsExpenseOpen(true);
+  }
+
+  function openExpenseEditor(expense: CashExpenseRecord) {
+    setExpenseEditRequest(expense);
+    setIsExpenseOpen(true);
+  }
+
+  function closeExpenseModal() {
+    setIsExpenseOpen(false);
+    setExpenseEditRequest(null);
+  }
+
+  function saveExpense(title: string, amountCents: number) {
+    if (!isExpensesEnabled) {
+      closeExpenseModal();
+      onSystemMessage("Despesas desativadas neste PDV.");
+      return;
+    }
+
+    if (expenseEditRequest) {
+      const updatedAt = new Date().toISOString();
+      const nextExpense = {
+        ...expenseEditRequest,
+        title,
+        amountCents,
+        sessionId: expenseEditRequest.sessionId ?? session?.id ?? null,
+        updatedAt
+      };
+
+      setExpenses((currentExpenses) =>
+        currentExpenses.map((expense) => (expense.id === nextExpense.id ? nextExpense : expense))
+      );
+      closeExpenseModal();
+      onSystemMessage(`Despesa atualizada: ${formatCurrency(amountCents)}.`);
+      enqueueLocalEvent("despesa_atualizada", "despesa", nextExpense.id, {
+        eventId: `despesa_atualizada-${nextExpense.id}-${Date.now()}`,
+        session,
+        expense: nextExpense,
+        updatedAt
+      });
+      return;
+    }
+
     const nextExpense = {
       id: createId("despesa"),
       title,
       amountCents,
+      sessionId: session?.id ?? null,
       createdAt: new Date().toISOString()
     };
 
     setExpenses((currentExpenses) => [nextExpense, ...currentExpenses]);
-    setIsExpenseOpen(false);
+    closeExpenseModal();
     onSystemMessage(`Despesa lançada: ${formatCurrency(amountCents)}.`);
     enqueueLocalEvent("despesa_lancada", "despesa", nextExpense.id, {
       session,
       expense: nextExpense
+    });
+  }
+
+  function deleteExpense(expense: CashExpenseRecord) {
+    const deletedAt = new Date().toISOString();
+
+    setExpenses((currentExpenses) => currentExpenses.filter((currentExpense) => currentExpense.id !== expense.id));
+    closeExpenseModal();
+    onSystemMessage(`Despesa excluída: ${formatCurrency(expense.amountCents)}.`);
+    enqueueLocalEvent("despesa_excluida", "despesa", expense.id, {
+      eventId: `despesa_excluida-${expense.id}-${Date.now()}`,
+      session,
+      expense,
+      deletedAt
     });
   }
 
@@ -3976,10 +5448,12 @@ export function DesktopCashierFlow({
         </div>
 
         <div className="pdv-work-actions pdv-sale-actions">
-          <button className="pdv-secondary-action" type="button" onClick={requestCommandFromSale} disabled={cartItems.length === 0}>
-            <ReceiptText aria-hidden="true" size={17} />
-            Criar comanda
-          </button>
+          {isCommandsEnabled ? (
+            <button className="pdv-secondary-action" type="button" onClick={requestCommandFromSale} disabled={cartItems.length === 0}>
+              <ReceiptText aria-hidden="true" size={17} />
+              Criar comanda
+            </button>
+          ) : null}
           <button className="pdv-primary-action" type="button" onClick={() => setIsPaymentOpen(true)} disabled={cartItems.length === 0}>
             <CreditCard aria-hidden="true" size={17} />
             Finalizar venda
@@ -3990,6 +5464,10 @@ export function DesktopCashierFlow({
   }
 
   function renderCommands() {
+    if (!isCommandsEnabled) {
+      return null;
+    }
+
     return (
       <section className="pdv-work-card pdv-sale-work-card pdv-command-list-card" aria-labelledby="pdv-commands-title">
         <header className="pdv-work-head">
@@ -4072,6 +5550,10 @@ export function DesktopCashierFlow({
   }
 
   function renderCommandEditor() {
+    if (!isCommandsEnabled) {
+      return null;
+    }
+
     if (!commandEditor) {
       return renderCommands();
     }
@@ -4250,19 +5732,83 @@ export function DesktopCashierFlow({
         <header className="pdv-work-head">
           <div>
             <h1 id="pdv-history-title">Vendas</h1>
-            <p>Vendas concluídas no turno atual.</p>
+            <p>Vendas e recebimentos do turno atual.</p>
           </div>
-          <span className="pdv-work-chip">{sales.length} vendas</span>
+          <span className="pdv-work-chip">
+            {sessionHistoryMovements.length} {sessionHistoryMovements.length === 1 ? "movimento" : "movimentos"}
+          </span>
         </header>
 
-        {sales.length > 0 ? (
-          <div className="pdv-history-board" aria-label="Vendas concluídas">
-            {sales.map((sale, index) => {
+        {sessionHistoryMovements.length > 0 ? (
+          <div className="pdv-history-board" aria-label="Vendas e recebimentos do turno">
+            {sessionHistoryMovements.map((movement) => {
+              if (movement.type === "agreement-receipt") {
+                const paymentLabel = movement.paymentMethod ? getPaymentLabel(movement.paymentMethod) : "Recebido";
+
+                return (
+                  <button
+                    className="pdv-history-line pdv-history-line-agreement"
+                    key={movement.id}
+                    type="button"
+                    onClick={() =>
+                      setCompletedAgreementReceipt({
+                        id: movement.id,
+                        clientName: movement.clientName,
+                        receiptCount: movement.receiptCount,
+                        itemsCount: movement.itemsCount,
+                        totalCents: movement.totalCents,
+                        paymentMethod: movement.paymentMethod,
+                        receivedAt: movement.occurredAt
+                      })
+                    }
+                  >
+                    <span className="pdv-record-icon">
+                      <AgreementClientIcon client={{ personType: movement.clientPersonType }} />
+                    </span>
+                    <span className="pdv-record-copy">
+                      <strong className="pdv-history-title pdv-history-title-agreement">
+                        <span>Recebimento de convênio</span>
+                        <span className="pdv-history-title-separator" aria-hidden="true">|</span>
+                        <em>{movement.clientName}</em>
+                      </strong>
+                      <em className="pdv-sale-item-meta">
+                        <span>{formatDateTime(movement.occurredAt)}</span>
+                        <span>{paymentLabel}</span>
+                        <span>
+                          {movement.receiptCount} {movement.receiptCount === 1 ? "título" : "títulos"}
+                        </span>
+                        <span>
+                          {movement.itemsCount} {movement.itemsCount === 1 ? "item" : "itens"}
+                        </span>
+                      </em>
+                    </span>
+                    <span className="pdv-history-line-total">
+                      <strong>{formatCurrency(movement.totalCents)}</strong>
+                      <em>Recebido</em>
+                    </span>
+                    <span className="pdv-history-line-action">
+                      <span>Resumo</span>
+                      <ArrowRight aria-hidden="true" size={18} />
+                    </span>
+                  </button>
+                );
+              }
+
+              const { sale } = movement;
               const canceled = isSaleCanceled(sale);
               const commandSaleTitle = sale.originCommandTitle?.trim();
-              const saleTitle = commandSaleTitle || `Venda ${sales.length - index}`;
               const SaleIcon = canceled ? X : commandSaleTitle ? ReceiptText : ShoppingCart;
-              const fiscalSummary = getSaleFiscalSummary(fiscalDocumentsBySaleId[sale.id] ?? []);
+              const fiscalSummary = getSaleFiscalSummary(fiscalDocumentsBySaleId[sale.id] ?? [], false, sale);
+              const saleItemsCount = getCartQuantity(sale.items);
+              const saleFiscalTitle = isFiscalEmissionEnabled
+                ? getHistoryFiscalTitle(fiscalSummary.title)
+                : getSaleOrdinalTitle(sale, sessionRecordedSales);
+              const saleFiscalLabel = isFiscalEmissionEnabled
+                ? fiscalSummary.label
+                : canceled
+                  ? "Cancelada"
+                  : "Concluída";
+              const saleTone = isFiscalEmissionEnabled ? fiscalSummary.tone : canceled ? "neutral" : "success";
 
               return (
                 <button
@@ -4275,23 +5821,22 @@ export function DesktopCashierFlow({
                     <SaleIcon aria-hidden="true" size={18} />
                   </span>
                   <span className="pdv-record-copy">
-                    <strong>{saleTitle}</strong>
+                    <strong className={`pdv-history-title pdv-history-title-${saleTone}`}>
+                      <span>{saleFiscalTitle}</span>
+                      <span className="pdv-history-title-separator" aria-hidden="true">|</span>
+                      <em>{saleFiscalLabel}</em>
+                    </strong>
                     <em className="pdv-sale-item-meta">
                       <span>{formatDateTime(sale.createdAt)}</span>
                       <span>{getPaymentLabel(sale.paymentMethod)}</span>
-                      {canceled ? <span className="pdv-sale-status-badge">Cancelada</span> : null}
+                      {commandSaleTitle ? <span>{commandSaleTitle}</span> : null}
                     </em>
                   </span>
-                  <span className={`pdv-history-fiscal pdv-history-fiscal-${fiscalSummary.tone}`}>
-                    <strong>
-                      {fiscalSummary.title}
-                      <span className="pdv-history-fiscal-separator" aria-hidden="true" />
-                      <em>{fiscalSummary.label}</em>
-                    </strong>
-                  </span>
                   <span className="pdv-history-line-total">
-                    <em>{getCartQuantity(sale.items)} itens</em>
                     <strong>{formatCurrency(sale.totalCents)}</strong>
+                    <em>
+                      {saleItemsCount} {saleItemsCount === 1 ? "item" : "itens"}
+                    </em>
                   </span>
                   <span className="pdv-history-line-action">
                     <span>Detalhes</span>
@@ -4302,14 +5847,14 @@ export function DesktopCashierFlow({
             })}
           </div>
         ) : (
-          <section className="pdv-sale-board pdv-history-empty-board" aria-label="Nenhuma venda concluída">
+          <section className="pdv-sale-board pdv-history-empty-board" aria-label="Nenhum movimento no turno">
             <div className="pdv-empty-sale">
               <span className="pdv-empty-sale-icon" aria-hidden="true">
                 <History size={42} strokeWidth={1.9} />
                 <span className="pdv-empty-sale-zero">0</span>
               </span>
-              <strong>Nenhuma venda no turno</strong>
-              <span>As vendas concluídas aparecerão aqui.</span>
+              <strong>Nenhum movimento no turno</strong>
+              <span>Vendas e recebimentos aparecerão aqui.</span>
             </div>
           </section>
         )}
@@ -4363,7 +5908,7 @@ export function DesktopCashierFlow({
                 onClick={() => setAgreementReceiptDetailsClient(summary.client)}
               >
                 <span className="pdv-record-icon">
-                  <UserRound aria-hidden="true" size={18} />
+                  <AgreementClientIcon client={summary.client} />
                 </span>
                 <span className="pdv-record-copy">
                   <strong>{summary.client.name}</strong>
@@ -4414,44 +5959,56 @@ export function DesktopCashierFlow({
 
   function renderExpenses() {
     return (
-      <section className="pdv-work-card pdv-work-card-medium" aria-labelledby="pdv-expenses-title">
+      <section className="pdv-work-card pdv-sale-work-card pdv-command-list-card pdv-expense-list-card" aria-labelledby="pdv-expenses-title">
         <header className="pdv-work-head">
           <div>
             <h1 id="pdv-expenses-title">Despesas</h1>
-            <p>Saídas registradas neste turno.</p>
+            <p>Saídas de dinheiro registradas neste turno.</p>
           </div>
           <span className="pdv-work-chip">{formatCurrency(sessionExpenses)}</span>
         </header>
 
-        <div className="pdv-record-list">
-          {expenses.map((expense) => (
-            <div className="pdv-record-row" key={expense.id}>
-              <span className="pdv-record-icon">
-                <WalletCards aria-hidden="true" size={18} />
+        {expenses.length > 0 ? (
+          <div className="pdv-command-board pdv-expense-board" aria-label="Despesas lançadas">
+            {expenses.map((expense) => (
+              <button className="pdv-command-line pdv-expense-line" key={expense.id} type="button" onClick={() => openExpenseEditor(expense)}>
+                <span className="pdv-record-icon">
+                  <WalletCards aria-hidden="true" size={18} />
+                </span>
+                <span className="pdv-record-copy">
+                  <strong>{expense.title}</strong>
+                  <em>{formatDateTime(expense.createdAt)}</em>
+                </span>
+                <span className="pdv-command-line-total pdv-expense-line-total">
+                  <em>Saída</em>
+                  <strong>{formatCurrency(expense.amountCents)}</strong>
+                </span>
+                <span className="pdv-expense-line-status">
+                  <span>Editar</span>
+                  <ArrowRight aria-hidden="true" size={18} />
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <section className="pdv-sale-board pdv-command-empty-board" aria-label="Nenhuma despesa lançada">
+            <div className="pdv-empty-sale">
+              <span className="pdv-empty-sale-icon" aria-hidden="true">
+                <WalletCards size={42} strokeWidth={1.9} />
+                <span className="pdv-empty-sale-zero">0</span>
               </span>
-              <span className="pdv-record-copy">
-                <strong>{expense.title}</strong>
-                <em>{formatDateTime(expense.createdAt)}</em>
-              </span>
-              <span className="pdv-record-value">{formatCurrency(expense.amountCents)}</span>
+              <strong>Nenhuma despesa lançada</strong>
+              <span>Registre saídas de dinheiro usadas durante o turno.</span>
             </div>
-          ))}
-
-          {expenses.length === 0 ? (
-            <div className="pdv-empty-state">
-              <WalletCards aria-hidden="true" size={24} />
-              <strong>Nenhuma despesa no turno</strong>
-              <span>Registre saídas de caixa quando necessário.</span>
-            </div>
-          ) : null}
-        </div>
+          </section>
+        )}
 
         <div className="pdv-work-actions">
           <button className="pdv-secondary-action" type="button" onClick={() => setView("sale")}>
             <ArrowLeft aria-hidden="true" size={17} />
             Voltar
           </button>
-          <button className="pdv-primary-action" type="button" onClick={() => setIsExpenseOpen(true)}>
+          <button className="pdv-primary-action" type="button" onClick={openNewExpense}>
             <WalletCards aria-hidden="true" size={17} />
             Nova despesa
           </button>
@@ -4463,23 +6020,41 @@ export function DesktopCashierFlow({
   const headerDate = session ? new Date(session.openedAt) : new Date();
   const headerShiftNumber = session?.shiftNumber ?? getPreviewDailyShiftNumber(headerDate, shiftSequenceScope);
   const headerTurnLabel = formatOpenCashDate(headerDate, headerShiftNumber);
+  const headerEmployeeLabel = session?.openedByEmployeeName?.trim() || "";
   const navItems: Array<{
     view: CashierView;
     label: string;
     shortcut: string;
   }> = [
     { view: "sale", label: "Caixa", shortcut: "ESC" },
-    { view: "history", label: "Vendas", shortcut: "F1" },
-    { view: "commands", label: "Comandas", shortcut: "F2" }
+    { view: "history", label: "Vendas", shortcut: "F1" }
   ];
+
+  if (isCommandsEnabled) {
+    navItems.push({ view: "commands", label: "Comandas", shortcut: "F2" });
+  }
 
   if (isAgreementPaymentEnabled && frontCashAgreementClients.length > 0) {
     navItems.push({ view: "agreement", label: "Receber Convênios", shortcut: "F3" });
   }
 
-  navItems.push({ view: "expenses", label: "Despesas", shortcut: "F4" });
-  const activeView = session && view === "menu" ? "sale" : view;
-  const openCommandsCount = commands.length;
+  if (isExpensesEnabled) {
+    navItems.push({ view: "expenses", label: "Despesas", shortcut: "F4" });
+  }
+
+  const activeView =
+    !isCommandsEnabled && (view === "commands" || view === "command-editor")
+      ? session
+        ? "sale"
+        : "menu"
+      : !isExpensesEnabled && view === "expenses"
+        ? session
+          ? "sale"
+          : "menu"
+      : session && view === "menu"
+        ? "sale"
+        : view;
+  const openCommandsCount = isCommandsEnabled ? commands.length : 0;
   const openCommandsLabel = `${openCommandsCount} ${openCommandsCount === 1 ? "comanda aberta" : "comandas abertas"}`;
   const sectionTitle =
     !session && activeView === "menu"
@@ -4611,37 +6186,38 @@ export function DesktopCashierFlow({
 
         {activeView === "menu" ? renderMenu() : null}
         {activeView === "sale" ? renderSale() : null}
-        {activeView === "commands" ? renderCommands() : null}
-        {activeView === "command-editor" ? renderCommandEditor() : null}
+        {isCommandsEnabled && activeView === "commands" ? renderCommands() : null}
+        {isCommandsEnabled && activeView === "command-editor" ? renderCommandEditor() : null}
         {activeView === "agreement" ? renderAgreement() : null}
-        {activeView === "expenses" ? renderExpenses() : null}
+        {isExpensesEnabled && activeView === "expenses" ? renderExpenses() : null}
         {activeView === "history" ? renderHistory() : null}
 
-        {isProductPickerOpen ? (
+        {isProductPickerOpen && (isCommandsEnabled || view !== "command-editor") ? (
           <ProductPickerModal
             categories={catalogCategories}
             isLoading={isCatalogLoading}
             loadError={catalogError}
             products={filteredProducts}
+            isFiscalEmissionEnabled={isFiscalEmissionEnabled}
             searchQuery={searchQuery}
             selectedCategoryId={selectedPickerCategoryId}
             onCategoryChange={setSelectedPickerCategoryId}
             onSearchChange={setSearchQuery}
-            onSelect={view === "command-editor" ? addProductToCommandEditor : addProduct}
+            onSelect={isCommandsEnabled && view === "command-editor" ? addProductToCommandEditor : addProduct}
             onClose={() => setIsProductPickerOpen(false)}
           />
         ) : null}
-        {commandNameRequest ? (
+        {isCommandsEnabled && commandNameRequest ? (
           <CommandNameModal onClose={() => setCommandNameRequest(null)} onConfirm={confirmCommandName} />
         ) : null}
-        {commandDeleteRequest ? (
+        {isCommandsEnabled && commandDeleteRequest ? (
           <DeleteCommandModal
             command={commandDeleteRequest}
             onClose={() => setCommandDeleteRequest(null)}
             onConfirm={confirmDeleteCommand}
           />
         ) : null}
-        {isPaymentOpen ? (
+        {isPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
           <PaymentModal
             items={paymentItems}
             options={enabledPaymentOptions}
@@ -4650,7 +6226,7 @@ export function DesktopCashierFlow({
             onConfirm={requestPaymentConfirmation}
           />
         ) : null}
-        {isCashPaymentOpen ? (
+        {isCashPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
           <CashPaymentModal
             confirmLabel={cashPaymentTarget === "agreement-receipt" ? "Confirmar recebimento" : "Confirmar venda"}
             title={cashPaymentTarget === "agreement-receipt" ? "Receber convênio" : "Receber em dinheiro"}
@@ -4677,9 +6253,9 @@ export function DesktopCashierFlow({
             }}
           />
         ) : null}
-        {isAgreementPaymentOpen ? (
+        {isAgreementPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
           <AgreementPaymentModal
-            clients={agreementClients}
+            clients={activeAgreementClients}
             totalCents={paymentTotalCents}
             onBack={() => {
               setIsAgreementPaymentOpen(false);
@@ -4701,18 +6277,38 @@ export function DesktopCashierFlow({
             onConfirm={requestAgreementReceiptPayment}
           />
         ) : null}
-        {isExpenseOpen ? <ExpenseModal onClose={() => setIsExpenseOpen(false)} onConfirm={addExpense} /> : null}
+        {isExpensesEnabled && isExpenseOpen ? (
+          <ExpenseModal
+            expense={expenseEditRequest}
+            onClose={closeExpenseModal}
+            onConfirm={saveExpense}
+            onDelete={expenseEditRequest ? () => deleteExpense(expenseEditRequest) : undefined}
+          />
+        ) : null}
         {isClosingSession && session ? (
           <CloseSessionModal
             session={session}
             salesTotalCents={sessionSales}
             salesByPayment={sessionSalesByPayment}
             expensesTotalCents={sessionExpenses}
-            salesCount={activeSales.length}
-            commandsCount={commands.length}
+            salesCount={sessionActiveSales.length}
+            commandsCount={openCommandsCount}
             pendingSaleItemsCount={cartItems.length}
-            onClose={() => setIsClosingSession(false)}
+            onClose={() => {
+              setIsClosingSession(false);
+            }}
             onConfirm={closeSession}
+          />
+        ) : null}
+        {employeeAuthRequest ? (
+          <EmployeeAuthModal
+            code={employeeAuthCode}
+            error={employeeAuthError}
+            isSubmitting={isEmployeeAuthSubmitting}
+            mode={employeeAuthRequest.mode}
+            onChangeCode={setEmployeeAuthCode}
+            onClose={closeEmployeeAuthModal}
+            onConfirm={confirmEmployeeAuth}
           />
         ) : null}
         {isSettingsOpen ? (
@@ -4740,20 +6336,29 @@ export function DesktopCashierFlow({
             fallbackMessage={eventSyncError || syncSummary.lastError || catalogSyncError}
             fiscalDocuments={failedFiscalDocuments}
             onClose={() => setIsSyncDetailsOpen(false)}
+            onIgnoreEvent={ignoreFailedSyncEvent}
+            onIgnoreFiscalDocument={ignoreFailedFiscalDocument}
           />
         ) : null}
         {selectedSale ? (
           <SaleDetailsModal
             fiscalDocuments={selectedSaleFiscalDocuments}
+            isFiscalEmissionEnabled={isFiscalEmissionEnabled}
             isFiscalLoading={isSelectedSaleFiscalLoading}
             reprintingFiscalDocumentId={reprintingFiscalDocumentId}
             sale={selectedSale}
+            saleDisplayTitle={getSaleOrdinalTitle(selectedSale, sessionRecordedSales)}
             onCancelRequest={requestCancelSale}
             onClose={() => setSelectedSale(null)}
             onReprintFiscal={reprintFiscalDocumentFromDetails}
             onRetryFiscal={(sale) => {
               if (!session) {
-                onSystemMessage("Abra o caixa antes de tentar emitir a NFC-e.");
+                onSystemMessage("Abra o caixa antes de tentar emitir o documento fiscal.");
+                return;
+              }
+
+              if (!isFiscalEmissionEnabled) {
+                onSystemMessage("Emissão fiscal desativada neste PDV.");
                 return;
               }
 
@@ -4771,6 +6376,7 @@ export function DesktopCashierFlow({
         {fiscalEmissionModal ? (
           <FiscalEmissionModal
             isPrinting={isFiscalPrinting}
+            printMode={fiscalPrintMode}
             state={fiscalEmissionModal}
             onClose={() => setFiscalEmissionModal(null)}
             onPrint={printFiscalDocumentFromModal}
@@ -4788,6 +6394,7 @@ export function DesktopCashierFlow({
             <span className={connectivity === "online" ? "pdv-runtime-dot pdv-runtime-dot-online" : "pdv-runtime-dot"} />
             <span>{connectivity === "online" ? "Sessão online" : "Modo local"}</span>
             <em>{headerTurnLabel}</em>
+            {headerEmployeeLabel ? <em>{headerEmployeeLabel}</em> : null}
             {syncSummary.failed > 0 ? <em>{syncSummary.failed} falhas</em> : null}
             {pendingSyncCount > 0 ? <em>{pendingSyncCount} pendentes</em> : null}
           </div>
@@ -4805,7 +6412,6 @@ function PdvSettingsModal({
   isCatalogSyncing,
   isManualSyncing,
   isUnpairing,
-  lastAccessLabel,
   localStoreScope,
   onClose,
   onShowSyncDetails,
@@ -4838,7 +6444,11 @@ function PdvSettingsModal({
     : syncSummary.pending > 0
       ? `${syncSummary.pending} ${syncSummary.pending === 1 ? "pendente" : "pendentes"}`
       : "Sem pendências";
-  const canSyncNow = connectivity === "online" && !isManualSyncing;
+  const syncStatusLabel = isManualSyncing ? "Sincronizando" : queueLabel;
+  const lastSyncLabel = isCatalogSyncing
+    ? "Atualizando dados"
+    : `Última sincronização: ${formatSyncDateTime(syncSummary.lastSyncedAt ?? catalogSyncedAt)}`;
+  const canSyncNow = !isManualSyncing;
   const [printSettings, setPrintSettings] = useState<PdvFiscalPrintSettings>(defaultPdvFiscalPrintSettings);
   const [fiscalSeries, setFiscalSeries] = useState(1);
   const [printerOptions, setPrinterOptions] = useState<string[]>([]);
@@ -4846,6 +6456,28 @@ function PdvSettingsModal({
   const [isPrintConfigLoading, setIsPrintConfigLoading] = useState(false);
   const [isPrintConfigSaving, setIsPrintConfigSaving] = useState(false);
   const [printConfigFeedback, setPrintConfigFeedback] = useState("");
+  const [printConfigFeedbackTone, setPrintConfigFeedbackTone] = useState<"neutral" | "success" | "error">("neutral");
+  const printerChoices = useMemo(
+    () => Array.from(new Set(
+      [printSettings.printerName, defaultPrinterName, ...printerOptions]
+        .map(printer => printer.trim())
+        .filter(Boolean)
+    )),
+    [defaultPrinterName, printSettings.printerName, printerOptions]
+  );
+  const printerSelectOptions = useMemo(
+    () => printerChoices.map(printer => ({ value: printer, label: printer })),
+    [printerChoices]
+  );
+  const selectedPrinterName = printSettings.printerName || defaultPrinterName || "";
+  const printerStatusMessage = isPrintConfigLoading
+    ? "Buscando impressoras"
+    : isPrintConfigSaving
+      ? "Salvando"
+      : printConfigFeedback || (printerChoices.length === 0 ? "Nenhuma impressora encontrada." : "");
+  const printerStatusTone = printerChoices.length === 0 && !printConfigFeedback
+    ? "neutral"
+    : printConfigFeedbackTone;
 
   useEffect(() => {
     let isMounted = true;
@@ -4859,6 +6491,7 @@ function PdvSettingsModal({
 
       setIsPrintConfigLoading(true);
       setPrintConfigFeedback("");
+      setPrintConfigFeedbackTone("neutral");
 
       try {
         const savedConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
@@ -4887,6 +6520,7 @@ function PdvSettingsModal({
       } catch (error) {
         if (isMounted) {
           setPrintConfigFeedback(error instanceof Error ? error.message : "Não foi possível carregar a impressão local.");
+          setPrintConfigFeedbackTone("error");
         }
       } finally {
         if (isMounted) {
@@ -4902,19 +6536,21 @@ function PdvSettingsModal({
     };
   }, [localStoreScope]);
 
-  async function savePrintSettings() {
+  async function savePrintSettings(nextSettings = printSettings) {
     const store = getLocalPdvStore();
 
     if (!store?.saveFiscalConfig) {
       setPrintConfigFeedback("Configuração local indisponível neste ambiente.");
+      setPrintConfigFeedbackTone("error");
       return;
     }
 
     setIsPrintConfigSaving(true);
     setPrintConfigFeedback("");
+    setPrintConfigFeedbackTone("neutral");
 
     try {
-      const normalizedSettings = normalizePdvFiscalPrintSettings(printSettings);
+      const normalizedSettings = normalizePdvFiscalPrintSettings(nextSettings);
       const normalizedSeries = normalizePdvFiscalSeries(fiscalSeries);
       const currentConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
 
@@ -4924,212 +6560,290 @@ function PdvSettingsModal({
       });
       setPrintSettings(normalizedSettings);
       setFiscalSeries(normalizedSeries);
-      setPrintConfigFeedback("Configuração fiscal local salva.");
+      setPrintConfigFeedback("Salvo");
+      setPrintConfigFeedbackTone("success");
     } catch (error) {
       setPrintConfigFeedback(error instanceof Error ? error.message : "Não foi possível salvar a impressão local.");
+      setPrintConfigFeedbackTone("error");
     } finally {
       setIsPrintConfigSaving(false);
     }
   }
 
+  function handlePrinterChange(printerName: string) {
+    const nextSettings = normalizePdvFiscalPrintSettings({
+      ...printSettings,
+      useDefaultPrinter: false,
+      printerName
+    });
+
+    setPrintSettings(nextSettings);
+    void savePrintSettings(nextSettings);
+  }
+
   return (
     <CashierModal
       title="Configurações do PDV"
-      description="Ajustes locais deste computador."
+      description={pdvIdentity}
+      size="sm"
       onClose={onClose}
       footer={
-        <>
-          <button className="pdv-secondary-action" type="button" onClick={onClose}>
-            Fechar
-          </button>
-          <button className="pdv-danger-action" type="button" onClick={onUnpair} disabled={isUnpairing}>
-            {isUnpairing ? (
-              <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
-            ) : (
-              <LogOut aria-hidden="true" size={17} />
-            )}
-            {isUnpairing ? "Desvinculando" : "Desvincular PDV"}
-          </button>
-        </>
+        <button className="pdv-danger-action" type="button" onClick={onUnpair} disabled={isUnpairing}>
+          {isUnpairing ? (
+            <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
+          ) : (
+            <LogOut aria-hidden="true" size={17} />
+          )}
+          {isUnpairing ? "Desvinculando" : "Desvincular PDV"}
+        </button>
       }
     >
-      <div className="pdv-settings-list">
-        <div>
-          <span>Computador vinculado</span>
-          <strong>{pdvIdentity}</strong>
-        </div>
-        <div>
-          <span>Conexão</span>
-          <strong>{connectivity === "online" ? "Online" : "Modo local"}</strong>
-        </div>
-        <div>
-          <span>Último acesso</span>
-          <strong>{lastAccessLabel}</strong>
-        </div>
-      </div>
-      <section className="pdv-settings-sync" aria-label="Sincronização do PDV">
-        <div className="pdv-settings-section-head">
-          <Cloud aria-hidden="true" size={20} />
-          <div>
-            <strong>Sincronização</strong>
-            <span>{connectivity === "online" ? "Online com API" : "Operando com dados locais"}</span>
+      <div className="pdv-settings-panel">
+        <section className="pdv-settings-section" aria-label="Sincronização do PDV">
+          <div className="pdv-settings-section-head">
+            <Cloud aria-hidden="true" size={20} />
+            <div>
+              <strong>Sincronização</strong>
+              <span className={hasQueueProblem ? "pdv-settings-section-status-danger" : undefined}>{syncStatusLabel}</span>
+              <em className="pdv-settings-sync-meta">{lastSyncLabel}</em>
+            </div>
           </div>
-        </div>
 
-        <div className="pdv-sync-grid">
-          <div className={hasQueueProblem ? "pdv-sync-card pdv-sync-card-danger" : "pdv-sync-card"}>
-            <span>Fila local</span>
-            <strong className={hasQueueProblem ? "pdv-sync-danger-text" : ""}>{queueLabel}</strong>
-            {hasQueueProblem ? (
-              <button className="pdv-sync-detail-link" type="button" onClick={onShowSyncDetails}>
-                Ver detalhes
-              </button>
-            ) : null}
-          </div>
-          <div className="pdv-sync-card">
-            <span>Último envio</span>
-            <strong>{formatSyncDateTime(syncSummary.lastSyncedAt)}</strong>
-          </div>
-          <div className="pdv-sync-card">
-            <span>Dados da API</span>
-            <strong>{isCatalogSyncing ? "Atualizando" : formatSyncDateTime(catalogSyncedAt)}</strong>
-          </div>
-        </div>
+          {hasQueueProblem ? (
+            <button className="pdv-settings-inline-alert" type="button" onClick={onShowSyncDetails}>
+              <span>Fila local</span>
+              <strong>{queueLabel}</strong>
+              <em>Ver detalhes</em>
+            </button>
+          ) : null}
 
-        {eventSyncError || catalogSyncError ? (
-          <p className="pdv-sync-message">{eventSyncError || catalogSyncError}</p>
-        ) : null}
+          {eventSyncError || catalogSyncError ? (
+            <p className="pdv-sync-message">{eventSyncError || catalogSyncError}</p>
+          ) : null}
 
-        <button className="pdv-sync-action" type="button" disabled={!canSyncNow} onClick={onSyncNow}>
-          {isManualSyncing ? (
-            <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
-          ) : syncSummary.failed > 0 ? (
-            <RefreshCw aria-hidden="true" size={17} />
-          ) : (
-            <Check aria-hidden="true" size={17} />
-          )}
-          {isManualSyncing
-            ? "Sincronizando"
-            : syncSummary.failed > 0
-              ? "Reenviar falhas"
+          <button className="pdv-sync-action" type="button" disabled={!canSyncNow} onClick={onSyncNow}>
+            {isManualSyncing ? (
+              <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
+            ) : (
+              <RefreshCw aria-hidden="true" size={17} />
+            )}
+            {isManualSyncing
+              ? "Sincronizando"
               : "Sincronizar agora"}
-        </button>
-      </section>
-
-      <section className="pdv-settings-sync pdv-settings-printing" aria-label="Impressão fiscal do PDV">
-        <div className="pdv-settings-section-head">
-          <Printer aria-hidden="true" size={20} />
-          <div>
-            <strong>Fiscal local</strong>
-            <span>{defaultPrinterName ? `Padrão do Windows: ${defaultPrinterName}` : "Série e impressão deste computador"}</span>
-          </div>
-        </div>
-
-        <div className="pdv-printing-grid">
-          <button
-            aria-checked={printSettings.useDefaultPrinter}
-            className={printSettings.useDefaultPrinter ? "pdv-printing-toggle pdv-printing-toggle-active" : "pdv-printing-toggle"}
-            disabled={isPrintConfigLoading || isPrintConfigSaving}
-            role="switch"
-            type="button"
-            onClick={() =>
-              setPrintSettings(current => ({
-                ...current,
-                useDefaultPrinter: !current.useDefaultPrinter
-              }))
-            }
-          >
-            <span className="pdv-printing-switch" aria-hidden="true">
-              <span />
-            </span>
-            <span>
-              <strong>Usar impressora padrão</strong>
-              <small>{printSettings.useDefaultPrinter ? "Ativa" : "Manual"}</small>
-            </span>
           </button>
+        </section>
 
-          <label className="pdv-printing-path">
-            <span>Executável UniDANFE</span>
-            <input
-              disabled={isPrintConfigLoading || isPrintConfigSaving}
-              maxLength={260}
-              placeholder="C:\Unimake\UniNFe\unidanfe.exe"
-              value={printSettings.danfeExePath}
-              onChange={event =>
-                setPrintSettings(current => ({
-                  ...current,
-                  danfeExePath: event.currentTarget.value
-                }))
-              }
-            />
-          </label>
+        <section className="pdv-settings-section pdv-settings-printing" aria-label="Impressão fiscal do PDV">
+          <div className="pdv-settings-section-head">
+            <Printer aria-hidden="true" size={20} />
+            <div>
+              <strong>Impressão fiscal</strong>
+              {printerStatusMessage ? (
+                <span className={`pdv-printing-feedback pdv-printing-feedback-${printerStatusTone}`}>
+                  {printerStatusMessage}
+                </span>
+              ) : null}
+            </div>
+          </div>
 
-          <label>
+          <div className="pdv-printing-field">
             <span>Impressora</span>
-            <input
-              disabled={isPrintConfigLoading || isPrintConfigSaving || printSettings.useDefaultPrinter}
-              list="pdv-fiscal-printers"
-              maxLength={160}
-              value={printSettings.printerName}
-              onChange={event =>
-                setPrintSettings(current => ({
-                  ...current,
-                  printerName: event.currentTarget.value
-                }))
-              }
+            <PdvPrinterSelect
+              ariaLabel="Selecionar impressora fiscal"
+              disabled={isPrintConfigLoading || isPrintConfigSaving || printerChoices.length === 0}
+              options={printerSelectOptions}
+              placeholder={printerChoices.length === 0 ? "Nenhuma impressora encontrada" : "Selecione uma impressora"}
+              value={selectedPrinterName}
+              onChange={handlePrinterChange}
             />
-            <datalist id="pdv-fiscal-printers">
-              {printerOptions.map(printer => (
-                <option key={printer} value={printer} />
-              ))}
-            </datalist>
-          </label>
-
-          <label>
-            <span>Bobina mm</span>
-            <input
-              disabled={isPrintConfigLoading || isPrintConfigSaving}
-              inputMode="numeric"
-              max={210}
-              min={58}
-              type="number"
-              value={printSettings.bobinaMm}
-              onChange={event =>
-                setPrintSettings(current => ({
-                  ...current,
-                  bobinaMm: Math.min(Math.max(Number(event.currentTarget.value) || 80, 58), 210)
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>Série NF-e/NFC-e</span>
-            <input
-              disabled={isPrintConfigLoading || isPrintConfigSaving}
-              inputMode="numeric"
-              max={999}
-              min={1}
-              type="number"
-              value={fiscalSeries}
-              onChange={event => setFiscalSeries(normalizePdvFiscalSeries(event.currentTarget.value, fiscalSeries))}
-            />
-          </label>
-        </div>
-
-        {printConfigFeedback ? <p className="pdv-sync-message">{printConfigFeedback}</p> : null}
-
-        <button className="pdv-sync-action pdv-printing-save" type="button" disabled={isPrintConfigLoading || isPrintConfigSaving} onClick={savePrintSettings}>
-          {isPrintConfigSaving ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Check aria-hidden="true" size={17} />}
-          {isPrintConfigSaving ? "Salvando" : "Salvar"}
-        </button>
-      </section>
+          </div>
+        </section>
+      </div>
     </CashierModal>
+  );
+}
+
+type PdvPrinterSelectOption = {
+  value: string;
+  label: string;
+};
+
+function PdvPrinterSelect({
+  ariaLabel,
+  disabled = false,
+  onChange,
+  options,
+  placeholder,
+  value
+}: {
+  ariaLabel: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  options: PdvPrinterSelectOption[];
+  placeholder: string;
+  value: string;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonId = useId();
+  const listboxId = useId();
+  const [isOpen, setIsOpen] = useState(false);
+  const [highlightedValue, setHighlightedValue] = useState(value || options[0]?.value || "");
+  const selectedOption = options.find(option => option.value === value) ?? null;
+  const canOpen = !disabled && options.length > 0;
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    setHighlightedValue(value || options[0]?.value || "");
+  }, [isOpen, options, value]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [isOpen]);
+
+  function getOptionId(optionValue: string) {
+    const optionIndex = options.findIndex(option => option.value === optionValue);
+
+    return `${listboxId}-option-${optionIndex >= 0 ? optionIndex : "none"}`;
+  }
+
+  function moveHighlight(direction: 1 | -1) {
+    if (!options.length) {
+      return;
+    }
+
+    setHighlightedValue(currentValue => {
+      const currentIndex = options.findIndex(option => option.value === (currentValue || value));
+      const nextIndex = currentIndex === -1
+        ? 0
+        : (currentIndex + direction + options.length) % options.length;
+
+      return options[nextIndex]?.value || "";
+    });
+  }
+
+  function selectOption(nextValue: string) {
+    if (!options.some(option => option.value === nextValue)) {
+      return;
+    }
+
+    onChange(nextValue);
+    setIsOpen(false);
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (!canOpen) {
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setIsOpen(true);
+      moveHighlight(1);
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setIsOpen(true);
+      moveHighlight(-1);
+      return;
+    }
+
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+
+      if (!isOpen) {
+        setIsOpen(true);
+        return;
+      }
+
+      if (highlightedValue) {
+        selectOption(highlightedValue);
+      }
+
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setIsOpen(false);
+    }
+  }
+
+  return (
+    <div className="pdv-platform-select" data-open={isOpen ? "true" : undefined} ref={rootRef}>
+      <button
+        aria-activedescendant={isOpen && highlightedValue ? getOptionId(highlightedValue) : undefined}
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        aria-label={ariaLabel}
+        className="pdv-platform-select-control"
+        disabled={!canOpen}
+        id={buttonId}
+        onClick={() => setIsOpen(current => canOpen ? !current : false)}
+        onKeyDown={handleKeyDown}
+        role="combobox"
+        type="button"
+      >
+        <span className="pdv-platform-select-value">
+          <span className="pdv-platform-select-value-copy">{selectedOption?.label ?? placeholder}</span>
+        </span>
+        <ChevronDown aria-hidden="true" className="pdv-platform-select-chevron" size={17} />
+      </button>
+
+      {isOpen ? (
+        <div aria-label={ariaLabel} className="pdv-platform-select-menu" id={listboxId} role="listbox">
+          {options.map(option => {
+            const isSelected = option.value === value;
+            const isHighlighted = option.value === highlightedValue;
+
+            return (
+              <button
+                aria-selected={isSelected}
+                className="pdv-platform-select-option"
+                data-highlighted={isHighlighted ? "true" : undefined}
+                data-selected={isSelected ? "true" : undefined}
+                id={getOptionId(option.value)}
+                key={option.value}
+                onClick={() => selectOption(option.value)}
+                onMouseEnter={() => setHighlightedValue(option.value)}
+                role="option"
+                tabIndex={-1}
+                type="button"
+              >
+                <span className="pdv-platform-select-option-copy">
+                  <span>{option.label}</span>
+                </span>
+
+                {isSelected ? <Check aria-hidden="true" className="pdv-platform-select-check-icon" size={16} /> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
 function getSyncEventTypeLabel(eventType: string) {
   const labels: Record<string, string> = {
+    despesa_atualizada: "Despesa atualizada",
+    despesa_excluida: "Despesa excluída",
     despesa_lancada: "Despesa",
     convenio_recebido: "Recebimento de convênio",
     turno_aberto: "Abertura de turno",
@@ -5149,14 +6863,42 @@ function SyncFailureDetailsModal({
   events,
   fallbackMessage,
   fiscalDocuments,
-  onClose
+  onClose,
+  onIgnoreEvent,
+  onIgnoreFiscalDocument
 }: {
   events: LocalPdvStorePendingEvent[];
   fallbackMessage?: string | null;
   fiscalDocuments: FiscalDocumentRecord[];
   onClose: () => void;
+  onIgnoreEvent: (eventId: string) => void | Promise<void>;
+  onIgnoreFiscalDocument: (documentId: string) => void | Promise<void>;
 }) {
   const hasFailures = events.length > 0 || fiscalDocuments.length > 0;
+  const [copiedFailureId, setCopiedFailureId] = useState<string | null>(null);
+  const [copyErrorId, setCopyErrorId] = useState<string | null>(null);
+  const [ignoringFailureId, setIgnoringFailureId] = useState<string | null>(null);
+
+  async function copyFailureExample(failureId: string, example: unknown) {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(example, null, 2));
+      setCopiedFailureId(failureId);
+      setCopyErrorId(null);
+    } catch {
+      setCopiedFailureId(null);
+      setCopyErrorId(failureId);
+    }
+  }
+
+  async function ignoreFailure(failureId: string, action: () => void | Promise<void>) {
+    setIgnoringFailureId(failureId);
+
+    try {
+      await action();
+    } finally {
+      setIgnoringFailureId(null);
+    }
+  }
 
   return (
     <CashierModal
@@ -5205,6 +6947,43 @@ function SyncFailureDetailsModal({
                   <summary>Dados técnicos</summary>
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
                 </details>
+                <div className="pdv-sync-failure-actions">
+                  <button
+                    className="pdv-sync-failure-copy"
+                    type="button"
+                    onClick={() => copyFailureExample(`event:${event.id}`, {
+                      tipo: "evento",
+                      id: event.id,
+                      event_type: event.event_type,
+                      aggregate_type: event.aggregate_type,
+                      aggregate_id: event.aggregate_id,
+                      idempotency_key: event.idempotency_key,
+                      attempts: event.attempts,
+                      last_error: event.last_error,
+                      payload: event.payload
+                    })}
+                  >
+                    <Copy aria-hidden="true" size={15} />
+                    {copiedFailureId === `event:${event.id}`
+                      ? "Copiado"
+                      : copyErrorId === `event:${event.id}`
+                        ? "Falhou"
+                        : "Copiar exemplo"}
+                  </button>
+                  <button
+                    className="pdv-sync-failure-ignore"
+                    disabled={ignoringFailureId === `event:${event.id}`}
+                    type="button"
+                    onClick={() => ignoreFailure(`event:${event.id}`, () => onIgnoreEvent(event.id))}
+                  >
+                    {ignoringFailureId === `event:${event.id}` ? (
+                      <LoaderCircle aria-hidden="true" className="pdv-spin" size={15} />
+                    ) : (
+                      <Ban aria-hidden="true" size={15} />
+                    )}
+                    {ignoringFailureId === `event:${event.id}` ? "Ignorando" : "Ignorar erro"}
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -5241,6 +7020,46 @@ function SyncFailureDetailsModal({
                   <summary>Dados técnicos</summary>
                   <pre>{JSON.stringify(document.raw_result, null, 2)}</pre>
                 </details>
+                <div className="pdv-sync-failure-actions">
+                  <button
+                    className="pdv-sync-failure-copy"
+                    type="button"
+                    onClick={() => copyFailureExample(`document:${document.id}`, {
+                      tipo: "documento_fiscal",
+                      id: document.id,
+                      venda_id: document.venda_id,
+                      modelo: document.modelo,
+                      serie: document.serie,
+                      numero: document.numero,
+                      chave: document.chave,
+                      status: document.status,
+                      sync_status: document.sync_status,
+                      sync_attempts: document.sync_attempts,
+                      sync_error: document.sync_error,
+                      raw_result: document.raw_result
+                    })}
+                  >
+                    <Copy aria-hidden="true" size={15} />
+                    {copiedFailureId === `document:${document.id}`
+                      ? "Copiado"
+                      : copyErrorId === `document:${document.id}`
+                        ? "Falhou"
+                        : "Copiar exemplo"}
+                  </button>
+                  <button
+                    className="pdv-sync-failure-ignore"
+                    disabled={ignoringFailureId === `document:${document.id}`}
+                    type="button"
+                    onClick={() => ignoreFailure(`document:${document.id}`, () => onIgnoreFiscalDocument(document.id))}
+                  >
+                    {ignoringFailureId === `document:${document.id}` ? (
+                      <LoaderCircle aria-hidden="true" className="pdv-spin" size={15} />
+                    ) : (
+                      <Ban aria-hidden="true" size={15} />
+                    )}
+                    {ignoringFailureId === `document:${document.id}` ? "Ignorando" : "Ignorar erro"}
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -5356,6 +7175,7 @@ function ProductPickerModal({
   isLoading,
   loadError,
   products,
+  isFiscalEmissionEnabled,
   searchQuery,
   selectedCategoryId,
   onCategoryChange,
@@ -5367,6 +7187,7 @@ function ProductPickerModal({
   isLoading: boolean;
   loadError: string;
   products: Product[];
+  isFiscalEmissionEnabled: boolean;
   searchQuery: string;
   selectedCategoryId: string;
   onCategoryChange: (categoryId: string) => void;
@@ -5405,16 +7226,22 @@ function ProductPickerModal({
 
     return Array.from(byCategory.values());
   }, [categories, products]);
+  const selectableProducts = useMemo(
+    () => isFiscalEmissionEnabled
+      ? products.filter((product) => getProductFiscalIssues(product).length === 0)
+      : products,
+    [isFiscalEmissionEnabled, products]
+  );
 
   useEffect(() => {
     pickerSearchRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    setActiveProductId(products[0]?.id ?? "");
-  }, [products]);
+    setActiveProductId(selectableProducts[0]?.id ?? "");
+  }, [selectableProducts]);
 
-  const activeProduct = products.find((product) => product.id === activeProductId) ?? products[0];
+  const activeProduct = selectableProducts.find((product) => product.id === activeProductId) ?? selectableProducts[0] ?? null;
 
   return (
     <CashierModal
@@ -5436,18 +7263,18 @@ function ProductPickerModal({
               return;
             }
 
-            if (event.key === "ArrowDown" && products.length > 0) {
+            if (event.key === "ArrowDown" && selectableProducts.length > 0) {
               event.preventDefault();
-              const currentIndex = Math.max(0, products.findIndex((product) => product.id === activeProductId));
-              const nextProduct = products[Math.min(products.length - 1, currentIndex + 1)];
+              const currentIndex = Math.max(0, selectableProducts.findIndex((product) => product.id === activeProductId));
+              const nextProduct = selectableProducts[Math.min(selectableProducts.length - 1, currentIndex + 1)];
               setActiveProductId(nextProduct.id);
               return;
             }
 
-            if (event.key === "ArrowUp" && products.length > 0) {
+            if (event.key === "ArrowUp" && selectableProducts.length > 0) {
               event.preventDefault();
-              const currentIndex = Math.max(0, products.findIndex((product) => product.id === activeProductId));
-              const nextProduct = products[Math.max(0, currentIndex - 1)];
+              const currentIndex = Math.max(0, selectableProducts.findIndex((product) => product.id === activeProductId));
+              const nextProduct = selectableProducts[Math.max(0, currentIndex - 1)];
               setActiveProductId(nextProduct.id);
             }
           }}
@@ -5497,45 +7324,61 @@ function ProductPickerModal({
             </div>
 
             <div className="pdv-product-picker-category-items">
-              {categoryProducts.map((product) => (
-                <button
-                  className={
-                    product.id === activeProductId
-                      ? "pdv-product-row pdv-product-picker-row pdv-product-picker-row-active"
-                      : "pdv-product-row pdv-product-picker-row"
-                  }
-                  key={product.id}
-                  type="button"
-                  aria-selected={product.id === activeProductId}
-                  onPointerEnter={(event) => {
-                    setPointerWaveOrigin(event);
-                    setActiveProductId(product.id);
-                  }}
-                  onClick={() => onSelect(product)}
-                >
-                  <ProductThumbnail
-                    backgroundColor={product.categoryColor}
-                    color={product.categoryAccent}
-                    icon={product.categoryIcon}
-                    imageUrl={product.imageUrl}
-                    label={product.category}
-                  />
-                  <span className="pdv-product-copy">
-                    <strong>{product.name}</strong>
-                    <em className="pdv-product-detail-line">
-                      <span>{product.barcode ? `Código ${product.barcode}` : "Sem código de barras"}</span>
-                      <span>Estoque {formatStockQuantity(product.stockQuantity)}</span>
-                    </em>
-                  </span>
-                  <span className="pdv-product-picker-meta">
-                    <span>
-                      <em>Preço</em>
-                      <strong>{formatCurrency(product.priceCents)}</strong>
+              {categoryProducts.map((product) => {
+                const fiscalIssues = isFiscalEmissionEnabled ? getProductFiscalIssues(product) : [];
+                const fiscalWarning = formatProductFiscalIssues(fiscalIssues);
+                const isFiscalBlocked = fiscalIssues.length > 0;
+                const isActive = !isFiscalBlocked && product.id === activeProductId;
+                const rowClassName = [
+                  "pdv-product-row",
+                  "pdv-product-picker-row",
+                  isActive ? "pdv-product-picker-row-active" : "",
+                  isFiscalBlocked ? "pdv-product-picker-row-disabled" : ""
+                ].filter(Boolean).join(" ");
+
+                return (
+                  <button
+                    className={rowClassName}
+                    key={product.id}
+                    type="button"
+                    aria-disabled={isFiscalBlocked}
+                    aria-selected={isActive}
+                    disabled={isFiscalBlocked}
+                    onPointerEnter={(event) => {
+                      if (isFiscalBlocked) {
+                        return;
+                      }
+
+                      setPointerWaveOrigin(event);
+                      setActiveProductId(product.id);
+                    }}
+                    onClick={() => onSelect(product)}
+                  >
+                    <ProductThumbnail
+                      backgroundColor={product.categoryColor}
+                      color={product.categoryAccent}
+                      icon={product.categoryIcon}
+                      imageUrl={product.imageUrl}
+                      label={product.category}
+                    />
+                    <span className="pdv-product-copy">
+                      <strong>{product.name}</strong>
+                      <em className="pdv-product-detail-line">
+                        <span>{product.barcode ? `Código ${product.barcode}` : "Sem código de barras"}</span>
+                        <span>Estoque {formatStockQuantity(product.stockQuantity)}</span>
+                      </em>
+                      {fiscalWarning ? <span className="pdv-product-fiscal-warning">{fiscalWarning}</span> : null}
                     </span>
-                  </span>
-                  <Plus aria-hidden="true" size={18} />
-                </button>
-              ))}
+                    <span className="pdv-product-picker-meta">
+                      <span>
+                        <em>Preço</em>
+                        <strong>{formatCurrency(product.priceCents)}</strong>
+                      </span>
+                    </span>
+                    {isFiscalBlocked ? <AlertTriangle aria-hidden="true" size={18} /> : <Plus aria-hidden="true" size={18} />}
+                  </button>
+                );
+              })}
             </div>
           </section>
         ))}
@@ -5554,15 +7397,20 @@ function ProductPickerModal({
 }
 
 function ExpenseModal({
+  expense,
   onClose,
-  onConfirm
+  onConfirm,
+  onDelete
 }: {
+  expense?: CashExpenseRecord | null;
   onClose: () => void;
   onConfirm: (title: string, amountCents: number) => void;
+  onDelete?: () => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
+  const [title, setTitle] = useState(expense?.title ?? "");
+  const [amount, setAmount] = useState(expense ? formatCurrencyInput(String(expense.amountCents)) : "");
   const amountCents = parseCurrencyCents(amount);
+  const isEditing = Boolean(expense);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -5576,17 +7424,23 @@ function ExpenseModal({
 
   return (
     <CashierModal
-      title="Lançar despesa"
-      description="Registre uma saída de dinheiro do caixa."
+      title={isEditing ? "Editar despesa" : "Lançar despesa"}
+      description="Saída de dinheiro do caixa."
       onClose={onClose}
       footer={
         <>
           <button className="pdv-secondary-action" type="button" onClick={onClose}>
             Cancelar
           </button>
+          {onDelete ? (
+            <button className="pdv-danger-action" type="button" onClick={onDelete}>
+              <Trash2 aria-hidden="true" size={17} />
+              Excluir
+            </button>
+          ) : null}
           <button className="pdv-confirm-action" type="submit" form="pdv-expense-form" disabled={!title.trim() || amountCents <= 0}>
             <Check aria-hidden="true" size={17} />
-            Salvar despesa
+            {isEditing ? "Salvar" : "Salvar despesa"}
           </button>
         </>
       }
@@ -5761,6 +7615,7 @@ function CashPaymentModal({
   const canConfirm = receivedCents >= totalCents;
   const balanceLabel = receivedCents === 0 ? "Troco" : missingCents > 0 ? "Falta receber" : "Troco";
   const balanceValue = receivedCents > 0 && missingCents > 0 ? missingCents : changeCents;
+  const balanceDisplay = canConfirm && changeCents === 0 ? "Sem troco" : formatCurrency(balanceValue);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -5823,7 +7678,7 @@ function CashPaymentModal({
           aria-live="polite"
         >
           <span>{balanceLabel}</span>
-          <strong>{formatCurrency(balanceValue)}</strong>
+          <strong>{balanceDisplay}</strong>
         </div>
       </form>
     </CashierModal>
@@ -5897,7 +7752,7 @@ function AgreementPaymentModal({
             <span className="pdv-agreement-summary-label">Cliente selecionado</span>
             <div className="pdv-agreement-summary-client">
               <span className="pdv-record-icon">
-                <UserRound aria-hidden="true" size={18} />
+                <AgreementClientIcon client={selectedClient} />
               </span>
               <span className="pdv-record-copy">
                 <strong>{selectedClient.name}</strong>
@@ -5958,7 +7813,7 @@ function AgreementPaymentModal({
                   onClick={() => setSelectedClient(client)}
                 >
                   <span className="pdv-record-icon">
-                    <UserRound aria-hidden="true" size={18} />
+                    <AgreementClientIcon client={client} />
                   </span>
                   <span className="pdv-record-copy">
                     <strong>{client.name}</strong>
@@ -6114,7 +7969,7 @@ function AgreementReceiptPaymentModal({
       <div className="pdv-agreement-detail">
         <section className="pdv-agreement-detail-summary" aria-label="Resumo do cliente">
           <span className="pdv-record-icon">
-            <UserRound aria-hidden="true" size={18} />
+            <AgreementClientIcon client={client} />
           </span>
           <span className="pdv-record-copy">
             <strong>{client.name}</strong>
@@ -6285,7 +8140,8 @@ function CloseSessionModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  const expectedCashCents = salesTotalCents - expensesTotalCents;
+  const cashSalesCents = salesByPayment.find((item) => item.method === "dinheiro")?.totalCents ?? 0;
+  const expectedCashCents = Math.max(cashSalesCents - expensesTotalCents, 0);
   const hasBlockingWork = commandsCount > 0 || pendingSaleItemsCount > 0;
   const salesLabel = `${salesCount} ${salesCount === 1 ? "venda" : "vendas"}`;
 
@@ -6432,24 +8288,19 @@ function SaleSuccessModal({ sale, onClose }: { sale: SaleRecord; onClose: () => 
 function FiscalEmissionModal({
   state,
   isPrinting,
+  printMode,
   onClose,
   onPrint
 }: {
   state: FiscalEmissionModalState;
   isPrinting: boolean;
+  printMode: FiscalPrintMode | null;
   onClose: () => void;
   onPrint: () => void;
 }) {
   const toneClassName = `pdv-fiscal-emission-${state.tone}`;
   const canClose = state.tone !== "pending";
   const canPrint = Boolean(state.xmlPath) && (state.tone === "success" || state.tone === "queued");
-  const shouldShowFiscalKey = Boolean(state.fiscalKey) &&
-    (state.tone === "success" || state.fiscalStatus === "contingencia_emitida");
-  const summaryItems = [
-    formatCurrency(state.sale.totalCents),
-    state.fiscalNumber ? `NFC-e nº ${state.fiscalNumber}` : null,
-    canPrint ? "DANFE disponível" : null
-  ].filter(Boolean);
   const Icon = state.tone === "success"
     ? Check
     : state.tone === "pending"
@@ -6457,50 +8308,51 @@ function FiscalEmissionModal({
       : state.tone === "queued"
         ? History
         : AlertTriangle;
+  const detail = state.detail && state.detail !== state.message ? state.detail : null;
+  const fiscalLabel = getFiscalModelLabel(state.fiscalModel ?? getSaleStoredFiscalModel(state.sale));
+  const fiscalNumberLabel = typeof state.fiscalNumber === "number" && Number.isFinite(state.fiscalNumber)
+    ? `${fiscalLabel} nº ${state.fiscalNumber}`
+    : "Aguardando número";
 
   return (
     <CashierModal
       title={state.title}
-      description={state.tone === "pending" ? "Venda concluída. Emitindo documento fiscal." : "Venda concluída."}
+      description="Venda concluída."
       dismissible={canClose}
+      size="sm"
       onClose={onClose}
       footer={
         canClose ? (
-          <>
-            <button className="pdv-secondary-action" type="button" onClick={onClose}>
+          canPrint ? (
+            <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
+              {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+              {isPrinting
+                ? printMode === "reprint"
+                  ? "Reimprimindo"
+                  : "Imprimindo"
+                : "Reimprimir DANFE"}
+            </button>
+          ) : (
+            <button className="pdv-secondary-action pdv-fiscal-close-action" type="button" onClick={onClose}>
               Fechar
             </button>
-            {canPrint ? (
-              <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
-                {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
-                {isPrinting ? "Imprimindo" : "Imprimir DANFE"}
-              </button>
-            ) : null}
-          </>
+          )
         ) : null
       }
     >
       <div className={`pdv-fiscal-emission ${toneClassName}`}>
-        <section className="pdv-fiscal-emission-main" aria-live="polite">
+        <section className="pdv-fiscal-emission-status" aria-live="polite">
           <span className="pdv-fiscal-emission-icon" aria-hidden="true">
             <Icon className={state.tone === "pending" ? "pdv-spin" : undefined} size={22} strokeWidth={2.6} />
           </span>
           <div>
             <strong>{state.message}</strong>
-            <span>{summaryItems.join(" · ")}</span>
+            <span>{fiscalNumberLabel}</span>
           </div>
         </section>
 
-        {state.fiscalProtocol && state.tone === "success" ? (
-          <p className="pdv-fiscal-emission-note">Protocolo {state.fiscalProtocol}</p>
-        ) : null}
-
-        {state.detail ? (
-          <p className="pdv-fiscal-emission-detail">{state.detail}</p>
-        ) : null}
-
-        {shouldShowFiscalKey ? (
-          <p className="pdv-fiscal-emission-key">Chave {state.fiscalKey}</p>
+        {detail ? (
+          <p className="pdv-fiscal-emission-detail">{detail}</p>
         ) : null}
       </div>
     </CashierModal>
@@ -6584,10 +8436,33 @@ function getFiscalDocumentNumberLabel(document?: FiscalDocumentRecord | null, op
   return `${modelLabel} ${document.numero}`;
 }
 
+function getHistoryFiscalTitle(title: string) {
+  return title
+    .replace(/^NFC-e\b/i, "NFC-E")
+    .replace(/^NF-e\b/i, "NF-E");
+}
+
+function getSaleOrdinalTitle(sale: SaleRecord, sales: SaleRecord[]) {
+  const index = sales.findIndex((currentSale) => currentSale.id === sale.id);
+
+  if (index < 0) {
+    return "Venda";
+  }
+
+  return `Venda ${sales.length - index}`;
+}
+
 function getFiscalDocumentStatus(document: FiscalDocumentRecord) {
   const status = String(document.status || "").toLowerCase();
 
-  if (status === "autorizada" || status === "emitida" || status === "sucesso") {
+  if (status === "autorizada") {
+    return {
+      label: isFiscalDocumentContingencyPrint(document) ? "Autorizada" : "Emitida",
+      tone: "success" as const
+    };
+  }
+
+  if (status === "emitida" || status === "sucesso") {
     return { label: "Emitida", tone: "success" as const };
   }
 
@@ -6619,6 +8494,12 @@ function getMainFiscalDocument(documents: FiscalDocumentRecord[]) {
   const sortedDocuments = [...documents].sort((first, second) =>
     String(second.updated_at || second.created_at || "").localeCompare(String(first.updated_at || first.created_at || ""))
   );
+  const latestStatus = String(sortedDocuments[0]?.status || "").toLowerCase();
+
+  if (latestStatus === "cancelada" || latestStatus === "inutilizada") {
+    return sortedDocuments[0];
+  }
+
   const successDocument = sortedDocuments.find((document) => getFiscalDocumentStatus(document).tone === "success");
 
   if (successDocument) {
@@ -6630,7 +8511,7 @@ function getMainFiscalDocument(documents: FiscalDocumentRecord[]) {
   return contingencyDocument ?? sortedDocuments[0];
 }
 
-function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = false) {
+function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = false, sale?: SaleRecord | null) {
   if (isLoading) {
     return {
       title: "Fiscal",
@@ -6643,8 +8524,10 @@ function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = fal
   const document = getMainFiscalDocument(documents);
 
   if (!document) {
+    const modelLabel = getFiscalModelLabel(sale ? getSaleStoredFiscalModel(sale) : "65");
+
     return {
-      title: "NFC-e",
+      title: modelLabel,
       label: "Não emitida",
       tone: "error" as const,
       document
@@ -6656,7 +8539,7 @@ function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = fal
   if (status.tone === "success") {
     return {
       title: getFiscalDocumentNumberLabel(document),
-      label: "Emitida",
+      label: status.label,
       tone: "success" as const,
       document
     };
@@ -6667,6 +8550,15 @@ function getSaleFiscalSummary(documents: FiscalDocumentRecord[], isLoading = fal
       title: getFiscalDocumentNumberLabel(document),
       label: "Em contingência",
       tone: "warning" as const,
+      document
+    };
+  }
+
+  if (status.tone === "neutral") {
+    return {
+      title: getFiscalDocumentNumberLabel(document),
+      label: status.label,
+      tone: "neutral" as const,
       document
     };
   }
@@ -6690,6 +8582,10 @@ function getFiscalDocumentSyncStatusLabel(status?: string | null) {
 
   if (status === "failed") {
     return "Falha na sincronização";
+  }
+
+  if (status === "ignored") {
+    return "Sincronização ignorada";
   }
 
   if (status === "pending") {
@@ -6716,10 +8612,71 @@ function getFiscalDocumentXmlPath(document: FiscalDocumentRecord) {
   ).trim() || null;
 }
 
+function isFiscalDocumentContingencyPrint(document: {
+  command?: string | null;
+  status?: string | null;
+  xmlPath?: string | null;
+  raw_result?: unknown;
+}) {
+  const rawResult = asRecord(document.raw_result);
+  const data = asRecord(rawResult?.data);
+  const payload = asRecord(rawResult?.payload);
+  const status = String(document.status || "").toLowerCase();
+  const command = String(document.command || "").toLowerCase();
+  const xmlPath = String(
+    document.xmlPath ??
+      data?.xmlContingenciaPath ??
+      data?.xmlAutorizadoPath ??
+      data?.xmlPath ??
+      payload?.xmlPath ??
+      ""
+  ).toLowerCase();
+  const tpEmis = String(data?.tpEmis ?? payload?.tpEmis ?? "").trim();
+
+  return command.includes("contingencia") ||
+    status.includes("contingencia") ||
+    data?.contingencia === true ||
+    payload?.contingencia === true ||
+    ["4", "5", "6", "7", "8", "9"].includes(tpEmis) ||
+    xmlPath.includes("contingencia");
+}
+
 function canReprintFiscalDocument(document: FiscalDocumentRecord) {
   const status = getFiscalDocumentStatus(document);
 
   return (status.tone === "success" || status.tone === "warning") && Boolean(getFiscalDocumentXmlPath(document));
+}
+
+function canCancelFiscalDocument(document: FiscalDocumentRecord) {
+  const rawStatus = String(document.status || "").toLowerCase();
+  const status = getFiscalDocumentStatus(document);
+
+  return status.tone === "success" &&
+    !rawStatus.includes("cancel") &&
+    !rawStatus.includes("inutil") &&
+    Boolean(document.chave) &&
+    Boolean(document.protocolo);
+}
+
+function getCancelableFiscalDocuments(documents: FiscalDocumentRecord[]) {
+  const unique = new Map<string, FiscalDocumentRecord>();
+  const sortedDocuments = [...documents].sort((first, second) =>
+    String(second.updated_at || second.created_at || "").localeCompare(String(first.updated_at || first.created_at || ""))
+  );
+
+  for (const document of sortedDocuments) {
+    if (!canCancelFiscalDocument(document)) {
+      continue;
+    }
+
+    const key = document.chave || `${document.modelo || ""}:${document.serie || ""}:${document.numero || ""}`;
+
+    if (!unique.has(key)) {
+      unique.set(key, document);
+    }
+  }
+
+  return Array.from(unique.values());
 }
 
 function canRetryFiscalDocuments(documents: FiscalDocumentRecord[]) {
@@ -6750,7 +8707,7 @@ function SaleFiscalDetailsModal({
   onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
   onRetryFiscal: (sale: SaleRecord) => void;
 }) {
-  const summary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading);
+  const summary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading, sale);
   const canRetryFiscal = !isSaleCanceled(sale) && !isFiscalLoading && canRetryFiscalDocuments(fiscalDocuments);
 
   return (
@@ -6767,7 +8724,7 @@ function SaleFiscalDetailsModal({
           {canRetryFiscal ? (
             <button className="pdv-confirm-action" type="button" onClick={() => onRetryFiscal(sale)}>
               <RefreshCw aria-hidden="true" size={17} />
-              Tentar emitir NFC-e
+              Tentar emitir fiscal
             </button>
           ) : null}
         </>
@@ -6843,7 +8800,7 @@ function SaleFiscalDetailsModal({
           ) : (
             <div className="pdv-fiscal-history-empty">
               <ReceiptText aria-hidden="true" size={18} />
-              <span>Nenhuma NFC-e registrada para esta venda.</span>
+              <span>Nenhum documento fiscal registrado para esta venda.</span>
             </div>
           )}
         </section>
@@ -6854,7 +8811,9 @@ function SaleFiscalDetailsModal({
 
 function SaleDetailsModal({
   sale,
+  saleDisplayTitle,
   fiscalDocuments,
+  isFiscalEmissionEnabled,
   isFiscalLoading,
   reprintingFiscalDocumentId,
   onClose,
@@ -6863,7 +8822,9 @@ function SaleDetailsModal({
   onRetryFiscal
 }: {
   sale: SaleRecord;
+  saleDisplayTitle: string;
   fiscalDocuments: FiscalDocumentRecord[];
+  isFiscalEmissionEnabled: boolean;
   isFiscalLoading: boolean;
   reprintingFiscalDocumentId: string | null;
   onClose: () => void;
@@ -6877,8 +8838,8 @@ function SaleDetailsModal({
   const isCommandSale = Boolean(sale.originCommandTitle);
   const OriginIcon = isCommandSale ? ReceiptText : ShoppingCart;
   const canceled = isSaleCanceled(sale);
-  const canRetryFiscal = !canceled && !isFiscalLoading && canRetryFiscalDocuments(fiscalDocuments);
-  const fiscalSummary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading);
+  const fiscalSummary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading, sale);
+  const fiscalTitle = isFiscalEmissionEnabled ? getHistoryFiscalTitle(fiscalSummary.title) : saleDisplayTitle;
 
   return (
     <>
@@ -6896,12 +8857,6 @@ function SaleDetailsModal({
               <button className="pdv-danger-action" type="button" onClick={() => onCancelRequest(sale)}>
                 <Trash2 aria-hidden="true" size={17} />
                 Cancelar venda
-              </button>
-            ) : null}
-            {canRetryFiscal ? (
-              <button className="pdv-confirm-action" type="button" onClick={() => onRetryFiscal(sale)}>
-                <RefreshCw aria-hidden="true" size={17} />
-                Tentar emitir NFC-e
               </button>
             ) : null}
           </>
@@ -6934,26 +8889,27 @@ function SaleDetailsModal({
                 <strong>{isCommandSale ? sale.originCommandTitle : "Venda direta"}</strong>
               </span>
             </span>
-            <span className="pdv-sale-detail-token">
-              <span className="pdv-sale-detail-token-icon">
-                <Package aria-hidden="true" size={18} />
-              </span>
-              <span>
-                <em>Itens</em>
-                <strong>{getCartQuantity(sale.items)} itens</strong>
-              </span>
-            </span>
-          </div>
-
-          <div className={`pdv-sale-fiscal-summary pdv-sale-fiscal-summary-${fiscalSummary.tone}`} aria-label="Resumo fiscal da venda">
-            <ReceiptText aria-hidden="true" size={18} />
-            <div>
-              <strong>{fiscalSummary.title}</strong>
-              <span>{fiscalSummary.label}</span>
-            </div>
-            <button type="button" disabled={isFiscalLoading} onClick={() => setIsFiscalDetailsOpen(true)}>
-              Ver detalhes
-            </button>
+            {isFiscalEmissionEnabled ? (
+              <button
+                className={`pdv-sale-detail-token pdv-sale-detail-token-fiscal pdv-sale-detail-token-fiscal-${fiscalSummary.tone}`}
+                disabled={isFiscalLoading}
+                type="button"
+                onClick={() => setIsFiscalDetailsOpen(true)}
+              >
+                <span className="pdv-sale-detail-token-icon">
+                  <ReceiptText aria-hidden="true" size={18} />
+                </span>
+                <span className="pdv-sale-detail-token-content">
+                  <em>Documento fiscal</em>
+                  <strong className="pdv-sale-detail-fiscal-title">
+                    <span className="pdv-sale-detail-fiscal-number">{fiscalTitle}</span>
+                    <span className="pdv-sale-detail-fiscal-separator" aria-hidden="true">|</span>
+                    <span className="pdv-sale-detail-fiscal-status">{fiscalSummary.label}</span>
+                  </strong>
+                </span>
+                <span className="pdv-sale-detail-fiscal-action">Ver detalhes</span>
+              </button>
+            ) : null}
           </div>
 
           <section className="pdv-checkout-list pdv-sale-details-list" aria-label="Itens da venda">
@@ -6997,7 +8953,7 @@ function SaleDetailsModal({
           </div>
         </div>
       </CashierModal>
-      {isFiscalDetailsOpen ? (
+      {isFiscalEmissionEnabled && isFiscalDetailsOpen ? (
         <SaleFiscalDetailsModal
           fiscalDocuments={fiscalDocuments}
           isFiscalLoading={isFiscalLoading}

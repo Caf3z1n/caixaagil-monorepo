@@ -10,6 +10,7 @@ dist/
 build/
 bin/
 obj/
+pdv/electron/resources/fiscal-worker/
 
 # local env
 .env

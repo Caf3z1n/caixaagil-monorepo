@@ -39,6 +39,7 @@ import {
   Sparkles,
   Store,
   Utensils,
+  UserRound,
   Warehouse,
   Wrench,
   X
@@ -68,6 +69,8 @@ type CaixaSession = {
   situacao: string;
   funcionario_abertura_id: string | null;
   funcionario_abertura_nome: string | null;
+  funcionario_fechamento_id: string | null;
+  funcionario_fechamento_nome: string | null;
 };
 
 type PaymentSummary = {
@@ -420,6 +423,7 @@ function sessionMatchesSearch(summary: SessionSummary, normalizedSearchValue: st
     formatDateTime(session.fechado_em),
     session.situacao,
     session.funcionario_abertura_nome,
+    session.funcionario_fechamento_nome,
     summary.status_conferencia === "conferido" ? "conferido" : "pendente"
   ].filter(Boolean).join(" "));
   const haystackDigits = haystack.replace(/\D/g, "");
@@ -433,6 +437,10 @@ function sessionMatchesSearch(summary: SessionSummary, normalizedSearchValue: st
 
 function getPaymentSummary(summary: SessionSummary, paymentKey: PaymentKey) {
   return summary.formas_pagamento.find(payment => payment.chave === paymentKey) ?? null;
+}
+
+function getMovementTotalCents(sales: CashSale[]) {
+  return sales.reduce((total, sale) => total + Math.max(Number(sale.total_centavos) || 0, 0), 0);
 }
 
 function getDifferenceClassName(status: DifferenceStatus | null) {
@@ -538,6 +546,25 @@ function getDraftTotals(draft: DraftTotals): PaymentTotals {
   };
 }
 
+function getSessionEmployeeLabel(session: CaixaSession) {
+  const openedBy = session.funcionario_abertura_nome?.trim() ?? "";
+  const closedBy = session.funcionario_fechamento_nome?.trim() ?? "";
+
+  if (openedBy && closedBy && openedBy !== closedBy) {
+    return `Abertura: ${openedBy} · Fechamento: ${closedBy}`;
+  }
+
+  if (closedBy) {
+    return closedBy;
+  }
+
+  if (openedBy) {
+    return openedBy;
+  }
+
+  return null;
+}
+
 function SessionCard({
   summary,
   onOpen
@@ -549,6 +576,7 @@ function SessionCard({
   const differenceClassName = getDifferenceClassName(summary.status_geral);
   const differenceText = getDifferenceText(summary.diferenca_total_centavos);
   const movementCount = summary.vendas_count + summary.despesas_count;
+  const employeeLabel = getSessionEmployeeLabel(summary.sessao);
 
   return (
     <button className="cash-session-card" type="button" onClick={() => onOpen(summary.sessao.id)}>
@@ -563,6 +591,18 @@ function SessionCard({
           {movementCount} movimento{movementCount === 1 ? "" : "s"} · {summary.itens_count} {summary.itens_count === 1 ? "item" : "itens"}
         </em>
       </span>
+
+      {employeeLabel ? (
+        <span className="cash-session-employee">
+          <UserRound aria-hidden="true" size={14} />
+          <span>
+            <small>Funcionário</small>
+            <strong>{employeeLabel}</strong>
+          </span>
+        </span>
+      ) : (
+        <span className="cash-session-employee cash-session-employee-empty" aria-hidden="true" />
+      )}
 
       <span className="cash-session-total">
         <small>{isReviewed ? "Diferença" : "Esperado"}</small>
@@ -853,6 +893,8 @@ export function CashConferenceManager() {
   const modalSummary = details?.resumo ?? null;
   const isReadOnly = modalSummary?.status_conferencia === "conferido";
   const convenioSummary = modalSummary ? getPaymentSummary(modalSummary, "convenio") : null;
+  const modalEmployeeLabel = modalSummary ? getSessionEmployeeLabel(modalSummary.sessao) : null;
+  const modalMovementTotalCents = details ? getMovementTotalCents(details.vendas) : 0;
   const activeListTitle = activeView === "pending" ? "Caixas pendentes" : "Histórico conferido";
   const activeSessionsCount = activeView === "pending" ? filteredPendingSessions.length : filteredReviewedSessions.length;
   const lastUpdatedLabel = snapshot?.gerado_em ? `Atualizado ${formatDateTime(snapshot.gerado_em)}` : "Aguardando dados";
@@ -968,7 +1010,7 @@ export function CashConferenceManager() {
               </h2>
               <p>
                 {modalSummary
-                  ? `Aberto em ${formatDateTime(modalSummary.sessao.aberto_em)}. Fechado em ${formatDateTime(modalSummary.sessao.fechado_em)}.`
+                  ? `Aberto em ${formatDateTime(modalSummary.sessao.aberto_em)}. Fechado em ${formatDateTime(modalSummary.sessao.fechado_em)}.${modalEmployeeLabel ? ` ${modalEmployeeLabel}.` : ""}`
                   : "Carregando os valores deste turno."}
               </p>
             </header>
@@ -1007,10 +1049,12 @@ export function CashConferenceManager() {
                           ? `, ${payment.recebimentos_count} recebimento${payment.recebimentos_count === 1 ? "" : "s"}`
                           : ""
                       }`;
-                      const adjustmentLabel = [
-                        payment?.descontos_centavos ? `descontos ${formatCurrencyFromCents(payment.descontos_centavos)}` : "",
-                        payment?.despesas_centavos ? `despesas ${formatCurrencyFromCents(payment.despesas_centavos)}` : ""
-                      ].filter(Boolean).join(" · ");
+                      const discountLabel = payment?.descontos_centavos
+                        ? `descontos ${formatCurrencyFromCents(payment.descontos_centavos)}`
+                        : "";
+                      const expenseLabel = payment?.despesas_centavos
+                        ? `despesas ${formatCurrencyFromCents(payment.despesas_centavos)}`
+                        : "";
 
                       return (
                         <label className={`cash-payment-confirm-row ${visual.className}`} key={paymentKey}>
@@ -1020,7 +1064,21 @@ export function CashConferenceManager() {
                             </span>
                             <div>
                               <strong>{payment?.rotulo ?? paymentKey}</strong>
-                              <small>{adjustmentLabel ? `${movementLabel} · ${adjustmentLabel}` : movementLabel}</small>
+                              <small className={discountLabel || expenseLabel ? "cash-payment-confirm-meta" : undefined}>
+                                <span>{movementLabel}</span>
+                                {discountLabel ? (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span>{discountLabel}</span>
+                                  </>
+                                ) : null}
+                                {expenseLabel ? (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="cash-payment-expense-note">{expenseLabel}</span>
+                                  </>
+                                ) : null}
+                              </small>
                             </div>
                           </span>
 
@@ -1090,7 +1148,7 @@ export function CashConferenceManager() {
                       <p>{details.vendas.length} registro{details.vendas.length === 1 ? "" : "s"}</p>
                     </span>
                     <span className="cash-movement-toggle-meta">
-                      <strong>{formatCurrencyFromCents(modalSummary.total_esperado_centavos)}</strong>
+                      <strong>{formatCurrencyFromCents(modalMovementTotalCents)}</strong>
                       <span>
                         {isMovementsExpanded ? "Recolher" : "Ver movimentos"}
                         <ChevronDown aria-hidden="true" size={17} />

@@ -1,10 +1,11 @@
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const sequelize = require('../../database');
 const {
   Arquivo,
   CategoriaProduto,
   Estoque,
   GrupoFiscal,
+  MovimentacaoEstoque,
   Produto,
   SaldoEstoqueProduto,
 } = require('../models');
@@ -125,10 +126,15 @@ function formatDecimalNumber(value) {
 
 function sanitizeCategoria(categoria, produtosCount = 0) {
   const data = categoria.get ? categoria.get({ plain: true }) : { ...categoria };
+  const registrosVinculados = Number(produtosCount ?? data.registros_vinculados ?? 0);
 
   return {
     ...data,
-    produtos_count: produtosCount,
+    ativo: data.ativo !== false,
+    produtos_count: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
   };
 }
 
@@ -159,6 +165,7 @@ function sanitizeGrupoFiscalResumo(grupoFiscal) {
   return {
     id: data.id,
     nome: data.nome,
+    ativo: Boolean(data.ativo),
     regime_tributario: data.regime_tributario,
     cfop: data.cfop,
     ncm: data.ncm,
@@ -192,14 +199,18 @@ function getProdutoEstoqueVenda(data) {
   return formatDecimalNumber(saldoPrincipal.quantidade);
 }
 
-function sanitizeProduto(produto) {
+function sanitizeProduto(produto, extra = {}) {
   const data = produto.get ? produto.get({ plain: true }) : { ...produto };
+  const registrosVinculados = Number(extra.registros_vinculados ?? data.registros_vinculados ?? 0);
 
   return {
     ...data,
     preco_custo_centavos: parseInteger(data.preco_custo_centavos),
     preco_venda_centavos: parseInteger(data.preco_venda_centavos),
     quantidade_estoque: data.controla_estoque ? getProdutoEstoqueVenda(data) : null,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
     categoria: data.categoria ? sanitizeCategoria(data.categoria) : null,
     grupo_fiscal: sanitizeGrupoFiscalResumo(data.grupo_fiscal),
     imagem: sanitizeArquivoResumo(data.imagem),
@@ -235,6 +246,7 @@ async function ensureDefaultEstoque(usuarioId, transaction) {
         nome: 'Estoque principal',
         principal_venda: true,
         permite_venda: true,
+        ativo: true,
         ordem: 0,
       },
       { transaction }
@@ -262,6 +274,7 @@ async function ensureDefaultEstoque(usuarioId, transaction) {
       nome: 'Estoque principal',
       principal_venda: true,
       permite_venda: true,
+      ativo: true,
       ordem: 0,
     },
     { transaction }
@@ -332,6 +345,56 @@ async function findUserProduto(usuarioId, id, options = {}) {
   });
 }
 
+async function countVendasComProduto(usuarioId, produtoId, options = {}) {
+  const [result] = await sequelize.query(
+    `
+      SELECT COUNT(*)::int AS total
+      FROM vendas
+      WHERE usuario_id = :usuarioId
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(COALESCE(itens, '[]'::jsonb)) AS item
+          WHERE item->>'produto_id' = :produtoId
+             OR item->>'productId' = :produtoId
+             OR item->>'id' = :produtoId
+        )
+    `,
+    {
+      replacements: {
+        usuarioId,
+        produtoId: String(produtoId),
+      },
+      type: QueryTypes.SELECT,
+      transaction: options.transaction,
+    }
+  );
+
+  return Number(result?.total || 0);
+}
+
+async function getProdutoRegistrosVinculados(usuarioId, produtoId, options = {}) {
+  const [movimentacoes, saldosPositivos, vendas] = await Promise.all([
+    MovimentacaoEstoque.count({
+      where: {
+        usuario_id: usuarioId,
+        produto_id: produtoId,
+      },
+      ...options,
+    }),
+    SaldoEstoqueProduto.count({
+      where: {
+        usuario_id: usuarioId,
+        produto_id: produtoId,
+        quantidade: { [Op.gt]: 0 },
+      },
+      ...options,
+    }),
+    countVendasComProduto(usuarioId, produtoId, options),
+  ]);
+
+  return movimentacoes + saldosPositivos + vendas;
+}
+
 function buildCategoriaPayload(body) {
   const icone = iconesPermitidos.has(body?.icone) ? body.icone : 'package';
   const cor = coresPermitidas.has(body?.cor) ? body.cor : 'laranja';
@@ -387,11 +450,19 @@ async function validateProdutoPayload(usuarioId, payload, options = {}) {
     return 'Categoria não encontrada.';
   }
 
+  if (categoria.ativo === false && categoria.id !== options.allowInactiveCategoriaId) {
+    return 'Categoria desativada não pode receber novos produtos.';
+  }
+
   if (payload.grupo_fiscal_id) {
     const grupoFiscal = await findUserGrupoFiscal(usuarioId, payload.grupo_fiscal_id, options);
 
     if (!grupoFiscal) {
       return 'Grupo fiscal não encontrado.';
+    }
+
+    if (grupoFiscal.ativo === false && grupoFiscal.id !== options.allowInactiveGrupoFiscalId) {
+      return 'Grupo fiscal desativado não pode ser usado em novos produtos.';
     }
   }
 
@@ -448,19 +519,28 @@ async function setProdutoEstoquePrincipal(usuarioId, produtoId, quantidade, tran
   );
 }
 
-async function loadSnapshot(usuarioId) {
+async function loadSnapshot(usuarioId, options = {}) {
   await ensureDefaultEstoque(usuarioId);
+  const onlyActive = options.onlyActive === true || options.includeInactive === false;
+  const productWhere = {
+    usuario_id: usuarioId,
+    ...(onlyActive ? { ativo: true } : {}),
+  };
+  const activeScopedWhere = {
+    usuario_id: usuarioId,
+    ...(onlyActive ? { ativo: true } : {}),
+  };
 
   const [categorias, produtos, gruposFiscais, estoques] = await Promise.all([
     CategoriaProduto.findAll({
-      where: { usuario_id: usuarioId },
+      where: activeScopedWhere,
       order: [
         ['ordem', 'ASC'],
         ['nome', 'ASC'],
       ],
     }),
     Produto.findAll({
-      where: { usuario_id: usuarioId },
+      where: productWhere,
       include: [
         {
           model: CategoriaProduto,
@@ -503,7 +583,7 @@ async function loadSnapshot(usuarioId) {
       ],
     }),
     Estoque.findAll({
-      where: { usuario_id: usuarioId },
+      where: activeScopedWhere,
       order: [
         ['ordem', 'ASC'],
         ['id', 'ASC'],
@@ -523,7 +603,13 @@ async function loadSnapshot(usuarioId) {
     categorias: categorias.map(categoria =>
       sanitizeCategoria(categoria, countByCategoria.get(categoria.id) ?? 0)
     ),
-    produtos: produtos.map(sanitizeProduto),
+    produtos: await Promise.all(
+      produtos.map(async produto =>
+        sanitizeProduto(produto, {
+          registros_vinculados: await getProdutoRegistrosVinculados(usuarioId, produto.id),
+        })
+      )
+    ),
     grupos_fiscais: gruposFiscais.map(sanitizeGrupoFiscalResumo),
     estoques: estoques.map(sanitizeEstoque),
   };
@@ -682,16 +768,53 @@ module.exports = {
       });
 
       if (produtosCount > 0) {
-        return res.status(409).json({
-          message: 'Não é possível excluir uma categoria com produtos vinculados.',
+        await categoria.update({ ativo: false });
+
+        return res.json({
+          action: 'deactivated',
+          categoria: sanitizeCategoria(categoria, produtosCount),
+          message: 'Categoria desativada para preservar os produtos vinculados.',
         });
       }
 
       await categoria.destroy();
 
-      return res.status(204).send();
+      return res.json({
+        action: 'deleted',
+        id: categoria.id,
+        message: 'Categoria excluída.',
+      });
     } catch (error) {
       return handleCatalogError(res, error, 'Erro ao excluir categoria.');
+    }
+  },
+
+  async activateCategoria(req, res) {
+    try {
+      const categoria = await findUserCategoria(req.user.id, req.params.id);
+
+      if (!categoria) {
+        return res.status(404).json({ message: 'Categoria não encontrada.' });
+      }
+
+      const produtosCount = await Produto.count({
+        where: {
+          usuario_id: req.user.id,
+          categoria_id: categoria.id,
+        },
+      });
+
+      if (!categoria.ativo) {
+        await categoria.update({ ativo: true });
+      }
+
+      return res.json({
+        action: 'activated',
+        categoria: sanitizeCategoria(categoria, produtosCount),
+        message: 'Categoria ativada.',
+      });
+    } catch (error) {
+      return handleCatalogError(res, error, 'Erro ao ativar categoria.');
     }
   },
 
@@ -779,6 +902,8 @@ module.exports = {
       const payload = buildProdutoPayload(req.body);
       const validationError = await validateProdutoPayload(req.user.id, payload, {
         transaction,
+        allowInactiveCategoriaId: produto.categoria_id,
+        allowInactiveGrupoFiscalId: produto.grupo_fiscal_id,
       });
 
       if (validationError) {
@@ -801,13 +926,133 @@ module.exports = {
         { transaction }
       );
 
-      if (payload.controla_estoque) {
-        await setProdutoEstoquePrincipal(
-          req.user.id,
-          produto.id,
-          payload.quantidade_estoque,
-          transaction
-        );
+      await transaction.commit();
+      committed = true;
+
+      const savedProduto = await findUserProduto(req.user.id, produto.id, {
+        include: [
+          { model: CategoriaProduto, as: 'categoria', required: false },
+          { model: GrupoFiscal, as: 'grupo_fiscal', required: false },
+          { model: Arquivo, as: 'imagem', required: false },
+          {
+            model: SaldoEstoqueProduto,
+            as: 'saldos_estoque',
+            required: false,
+            include: [{ model: Estoque, as: 'estoque', required: false }],
+          },
+        ],
+      });
+
+      return res.json(
+        sanitizeProduto(savedProduto, {
+          registros_vinculados: await getProdutoRegistrosVinculados(req.user.id, produto.id),
+        })
+      );
+    } catch (error) {
+      if (!committed) {
+        await transaction.rollback();
+      }
+      return handleCatalogError(res, error, 'Erro ao atualizar produto.');
+    }
+  },
+
+  async deleteProduto(req, res) {
+    const transaction = await sequelize.transaction();
+    let committed = false;
+
+    try {
+      const produto = await findUserProduto(req.user.id, req.params.id, { transaction });
+
+      if (!produto) {
+        return res.status(404).json({ message: 'Produto não encontrado.' });
+      }
+
+      const registrosVinculados = await getProdutoRegistrosVinculados(req.user.id, produto.id, { transaction });
+
+      if (registrosVinculados > 0) {
+        await produto.update({ ativo: false }, { transaction });
+        await transaction.commit();
+        committed = true;
+
+        const savedProduto = await findUserProduto(req.user.id, produto.id, {
+          include: [
+            { model: CategoriaProduto, as: 'categoria', required: false },
+            { model: GrupoFiscal, as: 'grupo_fiscal', required: false },
+            { model: Arquivo, as: 'imagem', required: false },
+            {
+              model: SaldoEstoqueProduto,
+              as: 'saldos_estoque',
+              required: false,
+              include: [{ model: Estoque, as: 'estoque', required: false }],
+            },
+          ],
+        });
+
+        return res.json({
+          action: 'deactivated',
+          produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados }),
+          message: 'Produto desativado para preservar os registros vinculados.',
+        });
+      }
+
+      await SaldoEstoqueProduto.destroy({
+        where: {
+          usuario_id: req.user.id,
+          produto_id: produto.id,
+        },
+        transaction,
+      });
+      await produto.destroy({ transaction });
+      await transaction.commit();
+      committed = true;
+
+      return res.json({
+        action: 'deleted',
+        id: produto.id,
+        message: 'Produto excluído.',
+      });
+    } catch (error) {
+      if (!committed) {
+        await transaction.rollback();
+      }
+      return handleCatalogError(res, error, 'Erro ao excluir produto.');
+    }
+  },
+
+  async activateProduto(req, res) {
+    const transaction = await sequelize.transaction();
+    let committed = false;
+
+    try {
+      const produto = await findUserProduto(req.user.id, req.params.id, { transaction });
+
+      if (!produto) {
+        await transaction.rollback();
+        return res.status(404).json({ message: 'Produto não encontrado.' });
+      }
+
+      const categoria = await findUserCategoria(req.user.id, produto.categoria_id, { transaction });
+
+      if (!categoria || categoria.ativo === false) {
+        await transaction.rollback();
+        return res.status(409).json({
+          message: 'Ative a categoria do produto antes de ativar o produto.',
+        });
+      }
+
+      if (produto.grupo_fiscal_id) {
+        const grupoFiscal = await findUserGrupoFiscal(req.user.id, produto.grupo_fiscal_id, { transaction });
+
+        if (!grupoFiscal || grupoFiscal.ativo === false) {
+          await transaction.rollback();
+          return res.status(409).json({
+            message: 'Ative o grupo fiscal do produto antes de ativar o produto.',
+          });
+        }
+      }
+
+      if (!produto.ativo) {
+        await produto.update({ ativo: true }, { transaction });
       }
 
       await transaction.commit();
@@ -826,29 +1071,18 @@ module.exports = {
           },
         ],
       });
+      const registrosVinculados = await getProdutoRegistrosVinculados(req.user.id, produto.id);
 
-      return res.json(sanitizeProduto(savedProduto));
+      return res.json({
+        action: 'activated',
+        produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados }),
+        message: 'Produto ativado.',
+      });
     } catch (error) {
       if (!committed) {
         await transaction.rollback();
       }
-      return handleCatalogError(res, error, 'Erro ao atualizar produto.');
-    }
-  },
-
-  async deleteProduto(req, res) {
-    try {
-      const produto = await findUserProduto(req.user.id, req.params.id);
-
-      if (!produto) {
-        return res.status(404).json({ message: 'Produto não encontrado.' });
-      }
-
-      await produto.destroy();
-
-      return res.status(204).send();
-    } catch (error) {
-      return handleCatalogError(res, error, 'Erro ao excluir produto.');
+      return handleCatalogError(res, error, 'Erro ao ativar produto.');
     }
   },
 };

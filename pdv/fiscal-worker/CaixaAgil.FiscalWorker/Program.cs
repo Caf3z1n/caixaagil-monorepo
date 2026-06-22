@@ -1,21 +1,31 @@
-using System.Drawing;
 using System.Drawing.Printing;
-using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Printing;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
 using Unimake.Business.DFe.Security;
 using Unimake.Business.DFe.Servicos;
 using Unimake.Business.DFe.Utility;
 using Unimake.Business.DFe.Xml.NFe;
+using Unimake.Unidanfe;
+using Unimake.Unidanfe.Configurations;
+using NfeAutorizacao = Unimake.Business.DFe.Servicos.NFe.Autorizacao;
+using NfeConsultaProtocolo = Unimake.Business.DFe.Servicos.NFe.ConsultaProtocolo;
+using NfeInutilizacao = Unimake.Business.DFe.Servicos.NFe.Inutilizacao;
+using NfeRecepcaoEvento = Unimake.Business.DFe.Servicos.NFe.RecepcaoEvento;
 using NfceAutorizacao = Unimake.Business.DFe.Servicos.NFCe.Autorizacao;
 using NfceConsultaProtocolo = Unimake.Business.DFe.Servicos.NFCe.ConsultaProtocolo;
+using NfceInutilizacao = Unimake.Business.DFe.Servicos.NFCe.Inutilizacao;
+using NfceRecepcaoEvento = Unimake.Business.DFe.Servicos.NFCe.RecepcaoEvento;
 
 namespace CaixaAgil.FiscalWorker;
 
@@ -35,6 +45,7 @@ internal static class Program
         try
         {
             var rawRequest = await Console.In.ReadToEndAsync();
+            rawRequest = rawRequest.TrimStart('\uFEFF');
 
             if (string.IsNullOrWhiteSpace(rawRequest))
             {
@@ -80,12 +91,14 @@ internal static class Program
             "validar-configuracao" => ValidateConfiguration(request),
             "consultar-status-sefaz" => SefazStatusPending(request),
             "emitir-nfce" => EmitirDocumento(request, "65"),
-            "emitir-nfce-contingencia" => EmitirDocumentoContingencia(request),
-            "transmitir-nfce-contingencia" => TransmitirNfceContingencia(request),
+            "emitir-nfce-contingencia" => EmitirDocumentoContingencia(request, "65"),
+            "transmitir-nfce-contingencia" => TransmitirDocumentoContingencia(request, "65"),
             "emitir-nfe" => EmitirDocumento(request, "55"),
+            "emitir-nfe-contingencia" => EmitirDocumentoContingencia(request, "55"),
+            "transmitir-nfe-contingencia" => TransmitirDocumentoContingencia(request, "55"),
             "consultar-protocolo" => IntegrationPending(request, "consulta_protocolo_pendente", "Consulta de protocolo preparada para Unimake.DFe."),
-            "cancelar" => IntegrationPending(request, "cancelamento_pendente", "Cancelamento preparado para Unimake.DFe."),
-            "inutilizar" => IntegrationPending(request, "inutilizacao_pendente", "Inutilização preparada para Unimake.DFe."),
+            "cancelar" => CancelarDocumento(request),
+            "inutilizar" => InutilizarNumero(request),
             "imprimir-danfe" => PrintDanfe(request),
             "reimprimir-danfe" => PrintDanfe(request),
             "gerar-pdf-danfe" => GenerateDanfePdfPending(request),
@@ -102,6 +115,7 @@ internal static class Program
     private static FiscalResponse ValidateConfiguration(FiscalRequest request)
     {
         var config = FiscalConfig.FromJson(request.Config);
+        var modelo = ResolveRequestModel(request);
         var issues = new List<string>();
         var technical = new List<string>();
 
@@ -112,7 +126,7 @@ internal static class Program
         Require(config.Emitente.InscricaoEstadual, "inscrição estadual", issues);
         Require(config.Certificado.PfxPath, "certificado A1/PFX", issues);
 
-        if (config.ModeloPrioritario is "65" or null)
+        if (modelo == "65")
         {
             Require(config.Nfce.CscId, "ID CSC da NFC-e", issues);
             Require(config.Nfce.CscToken, "CSC/Token da NFC-e", issues);
@@ -123,6 +137,12 @@ internal static class Program
         RequireDirectory(config.Diretorios.Xml, "diretório de XMLs", issues, technical);
         RequireDirectory(config.Diretorios.Logs, "diretório de logs", issues, technical);
 
+        if (modelo == "55")
+        {
+            RequirePositive(config.Nfe.Serie, "serie NF-e", issues);
+            RequireNonNegative(config.Nfe.UltimoNumero, "ultimo numero NF-e", issues);
+        }
+
         var certificateInfo = ValidateCertificate(config.Certificado, issues, technical);
         var printerInfo = ValidateConfiguredPrinter(config.Impressao, issues, technical);
 
@@ -130,7 +150,7 @@ internal static class Program
         {
             ["ambiente"] = config.Ambiente,
             ["uf"] = config.Uf,
-            ["modeloPrioritario"] = config.ModeloPrioritario ?? "65",
+            ["modeloPrioritario"] = modelo,
             ["certificate"] = certificateInfo,
             ["printer"] = printerInfo,
             ["directories"] = new
@@ -196,18 +216,10 @@ internal static class Program
             };
         }
 
-        if (modelo != "65")
-        {
-            return IntegrationPending(
-                request,
-                "nfe_adapter_pendente",
-                "Emissao NF-e preparada, mas a transmissao real ainda nao foi habilitada neste worker.");
-        }
-
         try
         {
             var config = FiscalConfig.FromJson(request.Config);
-            var emission = BuildNfceEmission(config, request.Payload);
+            var emission = BuildNfceEmission(config, request.Payload, modelo);
             var xml = BuildNfceXml(emission);
             var xmlPath = Path.Combine(config.Diretorios.Xml!, $"{emission.Chave}-nfe.xml");
 
@@ -223,27 +235,23 @@ internal static class Program
                 NFe = new List<NFe> { nfe }
             };
             var serviceConfig = BuildUnimakeNfceConfig(config, emission);
-            var autorizacao = new NfceAutorizacao(enviNFe, serviceConfig);
-
-            autorizacao.Executar();
+            var authorization = ExecuteAuthorization(emission, enviNFe, serviceConfig);
 
             var signedXmlPath = Path.Combine(config.Diretorios.Xml!, $"{emission.Chave}-assinado.xml");
-            var signedXml = autorizacao.ConteudoXMLAssinado?.OuterXml;
+            var signedXml = authorization.SignedXml;
 
             if (!string.IsNullOrWhiteSpace(signedXml))
             {
                 File.WriteAllText(signedXmlPath, signedXml, Encoding.UTF8);
             }
 
-            var protocol = autorizacao.Result?.ProtNFe?.InfProt ?? autorizacao.NfeProcResult?.ProtNFe?.InfProt;
-            var cStat = protocol?.CStat ?? autorizacao.Result?.CStat ?? 0;
-            var xMotivo = protocol?.XMotivo ?? autorizacao.Result?.XMotivo ?? "Retorno fiscal sem motivo informado.";
+            var cStat = authorization.CStat;
+            var xMotivo = authorization.XMotivo;
             var procPath = Path.Combine(config.Diretorios.Xml!, $"{emission.Chave}-procNFe.xml");
-            string? procXml = null;
+            var procXml = authorization.ProcXml;
 
-            if (autorizacao.NfeProcResult is not null && cStat == 100)
+            if (!string.IsNullOrWhiteSpace(procXml) && cStat == 100)
             {
-                procXml = autorizacao.NfeProcResult.GerarXML().OuterXml;
                 File.WriteAllText(procPath, procXml, Encoding.UTF8);
             }
 
@@ -254,23 +262,23 @@ internal static class Program
                 ["serie"] = emission.Serie,
                 ["numero"] = emission.Numero,
                 ["chave"] = emission.Chave,
-                ["protocolo"] = protocol?.NProt,
+                ["protocolo"] = authorization.Protocolo,
                 ["cStat"] = cStat,
                 ["xMotivo"] = xMotivo,
                 ["xmlEnviadoPath"] = xmlPath,
                 ["xmlAssinadoPath"] = File.Exists(signedXmlPath) ? signedXmlPath : null,
                 ["xmlAutorizadoPath"] = File.Exists(procPath) ? procPath : null,
                 ["xmlProc"] = procXml,
-                ["httpStatusCode"] = (int)autorizacao.HttpStatusCode,
+                ["httpStatusCode"] = authorization.HttpStatusCode,
                 ["adapter"] = "Unimake.DFe"
             };
 
-            if (cStat == 100 && !string.IsNullOrWhiteSpace(protocol?.NProt))
+            if (cStat == 100 && !string.IsNullOrWhiteSpace(authorization.Protocolo))
             {
                 return FiscalResponse.Ok(
                     request.Command,
                     "autorizada",
-                    $"NFC-e autorizada pela SEFAZ: {cStat} - {xMotivo}",
+                    $"{GetFiscalModelLabel(modelo)} autorizada pela SEFAZ: {cStat} - {xMotivo}",
                     null,
                     responseData);
             }
@@ -286,16 +294,16 @@ internal static class Program
                     normalXmlPath: xmlPath,
                     normalSignedXmlPath: File.Exists(signedXmlPath) ? signedXmlPath : null,
                     reason: operatorMessage,
-                    technicalMessage: autorizacao.RetornoWSString);
+                    technicalMessage: authorization.RetornoWSString);
             }
 
             responseData["mensagemOperador"] = operatorMessage;
 
             return FiscalResponse.Fail(
                 request.Command,
-                IsDuplicateNumberResponse(cStat, xMotivo) ? "duplicidade_nfce" : "rejeitada",
+                IsDuplicateNumberResponse(cStat, xMotivo) ? "duplicidade_fiscal" : "rejeitada",
                 operatorMessage,
-                autorizacao.RetornoWSString,
+                authorization.RetornoWSString,
                 responseData);
         }
         catch (Exception error)
@@ -307,7 +315,7 @@ internal static class Program
                 try
                 {
                     var config = FiscalConfig.FromJson(request.Config);
-                    var emission = BuildNfceEmission(config, request.Payload);
+                    var emission = BuildNfceEmission(config, request.Payload, modelo);
 
                     return EmitirNfceContingencia(
                         config,
@@ -323,13 +331,13 @@ internal static class Program
                     return FiscalResponse.Fail(
                         request.Command,
                         "erro_contingencia_nfce",
-                        "Não foi possível emitir a NFC-e em contingência.",
+                        $"Não foi possível emitir a {GetFiscalModelLabel(modelo)} em contingencia.",
                         contingencyError.ToString(),
                         new
                         {
                             modelo,
                             adapter = "Unimake.DFe",
-                            mensagemOperador = "Não foi possível emitir a NFC-e em contingência.",
+                            mensagemOperador = $"Não foi possível emitir a {GetFiscalModelLabel(modelo)} em contingencia.",
                             erroComunicacaoOriginal = operatorMessage,
                             tipoErro = contingencyError.GetType().Name
                         });
@@ -352,7 +360,7 @@ internal static class Program
 
     }
 
-    private static FiscalResponse EmitirDocumentoContingencia(FiscalRequest request)
+    private static FiscalResponse EmitirDocumentoContingencia(FiscalRequest request, string modelo)
     {
         var validation = ValidateConfiguration(request);
 
@@ -368,7 +376,7 @@ internal static class Program
         try
         {
             var config = FiscalConfig.FromJson(request.Config);
-            var emission = BuildNfceEmission(config, request.Payload);
+            var emission = BuildNfceEmission(config, request.Payload, modelo);
 
             return EmitirNfceContingencia(
                 config,
@@ -384,13 +392,13 @@ internal static class Program
             return FiscalResponse.Fail(
                 request.Command,
                 "erro_contingencia_nfce",
-                "Não foi possível emitir a NFC-e em contingência.",
+                $"Não foi possível emitir a {GetFiscalModelLabel(modelo)} em contingencia.",
                 error.ToString(),
                 new
                 {
-                    modelo = "65",
+                    modelo,
                     adapter = "Unimake.DFe",
-                    mensagemOperador = "Não foi possível emitir a NFC-e em contingência.",
+                    mensagemOperador = $"Não foi possível emitir a {GetFiscalModelLabel(modelo)} em contingencia.",
                     tipoErro = error.GetType().Name
                 });
         }
@@ -417,25 +425,26 @@ internal static class Program
 
         var signedXml = SignNfceXml(contingencyXml, config, contingencyEmission);
         File.WriteAllText(signedPath, signedXml, Encoding.UTF8);
+        var modelLabel = GetFiscalModelLabel(contingencyEmission.Modelo);
 
         return FiscalResponse.Ok(
             request.Command,
             "contingencia_emitida",
-            "NFC-e emitida em contingência offline.",
+            $"{modelLabel} emitida em contingencia offline.",
             technicalMessage,
             new Dictionary<string, object?>
             {
                 ["documentId"] = GetString(request.Payload, "documentId"),
-                ["modelo"] = "65",
+                ["modelo"] = contingencyEmission.Modelo,
                 ["serie"] = contingencyEmission.Serie,
                 ["numero"] = contingencyEmission.Numero,
                 ["chave"] = contingencyEmission.Chave,
                 ["protocolo"] = null,
                 ["cStat"] = null,
-                ["xMotivo"] = "Emitida em contingência offline.",
-                ["mensagemOperador"] = "NFC-e emitida em contingência offline. Transmita quando a internet voltar.",
+                ["xMotivo"] = "Emitida em contingencia offline.",
+                ["mensagemOperador"] = $"{modelLabel} emitida em contingencia offline. Transmita quando a internet voltar.",
                 ["contingencia"] = true,
-                ["tpEmis"] = "9",
+                ["tpEmis"] = contingencyEmission.TipoEmissao,
                 ["dhCont"] = contingencyEmission.DhCont?.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture),
                 ["xJust"] = xJust,
                 ["xmlNormalPath"] = normalXmlPath,
@@ -450,7 +459,7 @@ internal static class Program
             });
     }
 
-    private static FiscalResponse TransmitirNfceContingencia(FiscalRequest request)
+    private static FiscalResponse TransmitirDocumentoContingencia(FiscalRequest request, string expectedModelo)
     {
         var validation = ValidateConfiguration(request);
 
@@ -459,7 +468,7 @@ internal static class Program
             return validation with
             {
                 Command = request.Command,
-                FriendlyMessage = "Revise a configuração fiscal antes de transmitir a NFC-e em contingência."
+                FriendlyMessage = $"Revise a configuração fiscal antes de transmitir a {GetFiscalModelLabel(expectedModelo)} em contingencia."
             };
         }
 
@@ -477,7 +486,7 @@ internal static class Program
                 $"Arquivo informado: {xmlPath}",
                 new
                 {
-                    modelo = "65",
+                    modelo = expectedModelo,
                     xmlPath,
                     mensagemOperador = "XML de contingência não encontrado para transmissão."
                 });
@@ -487,22 +496,39 @@ internal static class Program
         {
             var config = FiscalConfig.FromJson(request.Config);
             var emission = ReadNfceEmissionFromXml(config, xmlPath);
+            var modelLabel = GetFiscalModelLabel(emission.Modelo);
 
-            if (emission.TipoEmissao != "9")
+            if (emission.Modelo != expectedModelo)
+            {
+                return FiscalResponse.Fail(
+                    request.Command,
+                    "contingencia_modelo_invalido",
+                    $"O XML informado nÃ£o Ã© uma {GetFiscalModelLabel(expectedModelo)} em contingÃªncia.",
+                    $"Modelo encontrado: {emission.Modelo}",
+                    new
+                    {
+                        modelo = emission.Modelo,
+                        modeloEsperado = expectedModelo,
+                        xmlPath,
+                        mensagemOperador = $"O XML informado nÃ£o Ã© uma {GetFiscalModelLabel(expectedModelo)} em contingÃªncia."
+                    });
+            }
+
+            if (!IsContingencyEmissionType(emission))
             {
                 return FiscalResponse.Fail(
                     request.Command,
                     "contingencia_xml_invalido",
-                    "O XML informado não é uma NFC-e emitida em contingência.",
+                    $"O XML informado não é uma {modelLabel} emitida em contingencia.",
                     $"tpEmis encontrado: {emission.TipoEmissao}",
                     new
                     {
-                        modelo = "65",
+                        modelo = emission.Modelo,
                         serie = emission.Serie,
                         numero = emission.Numero,
                         chave = emission.Chave,
                         xmlPath,
-                        mensagemOperador = "O XML informado não é uma NFC-e emitida em contingência."
+                        mensagemOperador = $"O XML informado não é uma {modelLabel} emitida em contingencia."
                     });
             }
 
@@ -539,7 +565,7 @@ internal static class Program
                     "Assinatura XMLDSig não encontrada.",
                     new
                     {
-                        modelo = "65",
+                        modelo = emission.Modelo,
                         serie = emission.Serie,
                         numero = emission.Numero,
                         chave = emission.Chave,
@@ -548,42 +574,41 @@ internal static class Program
                     });
             }
 
-            AppendNfceSupplement(xmlDocument, namespaceManager, config, emission);
+            if (emission.Modelo == "65")
+            {
+                AppendNfceSupplement(xmlDocument, namespaceManager, config, emission);
+            }
             xml = xmlDocument.OuterXml;
             File.WriteAllText(xmlPath, xml, Encoding.UTF8);
 
             var serviceConfig = BuildUnimakeNfceConfig(config, emission);
             var envioXml = BuildNfceEnviNFeXml(xml, emission);
-            var autorizacao = new NfceAutorizacao(envioXml, serviceConfig);
+            var authorization = ExecuteAuthorization(emission, envioXml, serviceConfig);
 
-            autorizacao.Executar();
-
-            var protocol = autorizacao.Result?.ProtNFe?.InfProt ?? autorizacao.NfeProcResult?.ProtNFe?.InfProt;
-            var cStat = protocol?.CStat ?? autorizacao.Result?.CStat ?? 0;
-            var xMotivo = protocol?.XMotivo ?? autorizacao.Result?.XMotivo ?? "Retorno fiscal sem motivo informado.";
-            string? procXml = null;
+            var cStat = authorization.CStat;
+            var xMotivo = authorization.XMotivo;
+            var procXml = authorization.ProcXml;
 
             Directory.CreateDirectory(config.Diretorios.Xml!);
 
-            if (autorizacao.NfeProcResult is not null)
+            if (!string.IsNullOrWhiteSpace(procXml))
             {
-                procXml = autorizacao.NfeProcResult.GerarXML().OuterXml;
                 File.WriteAllText(procPath, procXml, Encoding.UTF8);
             }
 
             var responseData = new Dictionary<string, object?>
             {
                 ["documentId"] = GetString(request.Payload, "documentId"),
-                ["modelo"] = "65",
+                ["modelo"] = emission.Modelo,
                 ["serie"] = emission.Serie,
                 ["numero"] = emission.Numero,
                 ["chave"] = emission.Chave,
-                ["protocolo"] = protocol?.NProt,
+                ["protocolo"] = authorization.Protocolo,
                 ["cStat"] = cStat,
                 ["xMotivo"] = xMotivo,
                 ["mensagemOperador"] = BuildSefazOperatorMessage(cStat, xMotivo),
                 ["contingencia"] = true,
-                ["tpEmis"] = "9",
+                ["tpEmis"] = emission.TipoEmissao,
                 ["dhCont"] = emission.DhCont?.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture),
                 ["xJust"] = emission.XJust,
                 ["xmlEnviadoPath"] = xmlPath,
@@ -591,19 +616,19 @@ internal static class Program
                 ["xmlAutorizadoPath"] = File.Exists(procPath) ? procPath : null,
                 ["xmlContingenciaPath"] = xmlPath,
                 ["xmlProc"] = procXml,
-                ["httpStatusCode"] = (int)autorizacao.HttpStatusCode,
+                ["httpStatusCode"] = authorization.HttpStatusCode,
                 ["adapter"] = "Unimake.DFe",
                 ["modoEmissao"] = "transmissao_contingencia_offline"
             };
 
-            if (cStat == 100 && !string.IsNullOrWhiteSpace(protocol?.NProt))
+            if (cStat == 100 && !string.IsNullOrWhiteSpace(authorization.Protocolo))
             {
-                responseData["mensagemOperador"] = "NFC-e em contingência transmitida e autorizada pela SEFAZ.";
+                responseData["mensagemOperador"] = $"{modelLabel} em contingencia transmitida e autorizada pela SEFAZ.";
 
                 return FiscalResponse.Ok(
                     request.Command,
                     "autorizada",
-                    $"NFC-e em contingência autorizada pela SEFAZ: {cStat} - {xMotivo}",
+                    $"{modelLabel} em contingencia autorizada pela SEFAZ: {cStat} - {xMotivo}",
                     null,
                     responseData);
             }
@@ -624,7 +649,7 @@ internal static class Program
                         recoveredProcXml);
                 }
 
-                if (cStat == 204 && !string.IsNullOrWhiteSpace(protocol?.NProt))
+                if (cStat == 204 && !string.IsNullOrWhiteSpace(authorization.Protocolo))
                 {
                     return BuildAuthorizedContingencyResponse(
                         request.Command,
@@ -632,7 +657,7 @@ internal static class Program
                         emission,
                         xmlPath,
                         procPath,
-                        protocol.NProt,
+                        authorization.Protocolo,
                         cStat,
                         xMotivo,
                         procXml);
@@ -640,9 +665,9 @@ internal static class Program
 
                 return FiscalResponse.Fail(
                     request.Command,
-                    "duplicidade_nfce",
-                    "SEFAZ informou duplicidade para a NFC-e em contingência. Consulte a chave antes de tentar novamente.",
-                    autorizacao.RetornoWSString,
+                    "duplicidade_fiscal",
+                    $"SEFAZ informou duplicidade para a {modelLabel} em contingencia. Consulte a chave antes de tentar novamente.",
+                    authorization.RetornoWSString,
                     responseData);
             }
 
@@ -650,7 +675,7 @@ internal static class Program
                 request.Command,
                 "rejeitada",
                 BuildSefazOperatorMessage(cStat, xMotivo),
-                autorizacao.RetornoWSString,
+                authorization.RetornoWSString,
                 responseData);
         }
         catch (Exception error)
@@ -674,6 +699,359 @@ internal static class Program
                         ? "Sem comunicação com a SEFAZ para transmitir a contingência."
                         : operatorMessage,
                     tipoErro = error.GetType().Name
+                });
+        }
+    }
+
+    private static FiscalResponse InutilizarNumero(FiscalRequest request)
+    {
+        var validation = ValidateConfiguration(request);
+
+        if (!validation.Success)
+        {
+            return validation with
+            {
+                Command = request.Command,
+                FriendlyMessage = "Revise a configuracao fiscal antes de inutilizar a numeracao."
+            };
+        }
+
+        try
+        {
+            var config = FiscalConfig.FromJson(request.Config);
+            var modelo = ResolveRequestModel(request);
+            var serie = ParseInt(GetString(request.Payload, "serie"), modelo == "55" ? config.Nfe.Serie ?? 1 : config.Nfce.Serie ?? 1);
+            var numeroInicial = FirstInt(
+                GetInt(request.Payload, "nNFIni"),
+                GetInt(request.Payload, "numeroInicial"),
+                GetInt(request.Payload, "numero_inicial"),
+                GetInt(request.Payload, "numero"));
+            var numeroFinal = FirstInt(
+                GetInt(request.Payload, "nNFFin"),
+                GetInt(request.Payload, "numeroFinal"),
+                GetInt(request.Payload, "numero_final"),
+                numeroInicial);
+
+            if (serie <= 0 || !numeroInicial.HasValue || numeroInicial.Value <= 0 || !numeroFinal.HasValue || numeroFinal.Value < numeroInicial.Value)
+            {
+                return FiscalResponse.Fail(
+                    request.Command,
+                    "inutilizacao_dados_invalidos",
+                    "Informe serie e numeracao valida para inutilizar.",
+                    null,
+                    new
+                    {
+                        modelo,
+                        serie,
+                        numeroInicial,
+                        numeroFinal,
+                        mensagemOperador = "Informe serie e numeracao valida para inutilizar."
+                    });
+            }
+
+            var codigoUf = GetUfCode(config.Uf);
+            var cnpjCpf = OnlyDigits(config.Emitente.CnpjCpf);
+            var ano = ResolveInutilizationYear(request.Payload);
+            var justificativa = BuildFiscalEventJustification(
+                FirstNonBlank(
+                    GetString(request.Payload, "justificativa"),
+                    GetString(request.Payload, "xJust"),
+                    GetString(request.Payload, "motivo")),
+                "Erro tecnico na emissao fiscal do PDV.");
+            var inutNFe = new InutNFe
+            {
+                Versao = "4.00",
+                InfInut = new InutNFeInfInut
+                {
+                    Id = BuildInutilizationId(codigoUf, ano, cnpjCpf, modelo, serie, numeroInicial.Value, numeroFinal.Value),
+                    TpAmb = ToUnimakeEnvironment(config.Ambiente),
+                    XServ = "INUTILIZAR",
+                    CUF = (UFBrasil)codigoUf,
+                    Ano = ano,
+                    Mod = modelo == "55" ? ModeloDFe.NFe : ModeloDFe.NFCe,
+                    Serie = serie,
+                    NNFIni = numeroInicial.Value,
+                    NNFFin = numeroFinal.Value,
+                    XJust = justificativa
+                }
+            };
+
+            if (cnpjCpf.Length == 11)
+            {
+                inutNFe.InfInut.CPF = cnpjCpf;
+            }
+            else
+            {
+                inutNFe.InfInut.CNPJ = cnpjCpf.PadLeft(14, '0');
+            }
+
+            var serviceConfig = BuildUnimakeFiscalServiceConfig(config, modelo, codigoUf, "1");
+            serviceConfig.Servico = Servico.NFeInutilizacao;
+            object inutilizacao = modelo == "55"
+                ? new NfeInutilizacao(inutNFe, serviceConfig)
+                : new NfceInutilizacao(inutNFe, serviceConfig);
+
+            ExecuteService(inutilizacao);
+
+            var signedXml = GetPropertyValue(inutilizacao, "ConteudoXMLAssinado") as XmlDocument;
+            var result = GetPropertyValue(inutilizacao, "Result");
+            var procResult = GetPropertyValue(inutilizacao, "ProcInutNFeResult");
+            var infInut = GetNestedPropertyValue(result, "InfInut") ??
+                GetNestedPropertyValue(procResult, "RetInutNFe", "InfInut");
+            var cStat = GetIntProperty(infInut, "CStat") ?? 0;
+            var xMotivo = GetStringProperty(infInut, "XMotivo") ?? "Retorno fiscal sem motivo informado.";
+            var protocolo = GetStringProperty(infInut, "NProt");
+            var procXml = GetGeneratedXml(procResult);
+            var eventDir = EnsureFiscalXmlSubdirectory(config, "inutilizacoes");
+            var baseName = $"{modelo}-serie-{serie.ToString(CultureInfo.InvariantCulture).PadLeft(3, '0')}-{numeroInicial.Value.ToString(CultureInfo.InvariantCulture).PadLeft(9, '0')}";
+            var signedPath = Path.Combine(eventDir, $"{baseName}-inutNFe.xml");
+            var procPath = Path.Combine(eventDir, $"{baseName}-procInutNFe.xml");
+
+            if (signedXml is not null)
+            {
+                File.WriteAllText(signedPath, signedXml.OuterXml, Encoding.UTF8);
+            }
+
+            if (!string.IsNullOrWhiteSpace(procXml))
+            {
+                File.WriteAllText(procPath, procXml, Encoding.UTF8);
+            }
+
+            var responseData = new Dictionary<string, object?>
+            {
+                ["documentId"] = GetString(request.Payload, "documentId"),
+                ["modelo"] = modelo,
+                ["serie"] = serie,
+                ["numero"] = numeroInicial.Value,
+                ["numeroInicial"] = numeroInicial.Value,
+                ["numeroFinal"] = numeroFinal.Value,
+                ["ano"] = ano,
+                ["cStat"] = cStat,
+                ["xMotivo"] = xMotivo,
+                ["protocolo"] = protocolo,
+                ["mensagemOperador"] = BuildFiscalEventOperatorMessage("Inutilizacao", cStat, xMotivo),
+                ["xmlEnviadoPath"] = File.Exists(signedPath) ? signedPath : null,
+                ["xmlAutorizadoPath"] = File.Exists(procPath) ? procPath : null,
+                ["xmlProc"] = procXml,
+                ["adapter"] = "Unimake.DFe"
+            };
+
+            if (IsInutilizationAccepted(cStat, xMotivo))
+            {
+                return FiscalResponse.Ok(
+                    request.Command,
+                    "inutilizada",
+                    $"Numeracao {modelo} serie {serie} numero {numeroInicial.Value} inutilizada na SEFAZ.",
+                    null,
+                    responseData);
+            }
+
+            return FiscalResponse.Fail(
+                request.Command,
+                "inutilizacao_rejeitada",
+                BuildFiscalEventOperatorMessage("Inutilizacao", cStat, xMotivo),
+                GetStringProperty(inutilizacao, "RetornoWSString"),
+                responseData);
+        }
+        catch (Exception error)
+        {
+            var operatorMessage = ExtractFiscalOperatorMessage(error);
+
+            return FiscalResponse.Fail(
+                request.Command,
+                "erro_inutilizacao",
+                operatorMessage,
+                error.ToString(),
+                new
+                {
+                    modelo = ResolveRequestModel(request),
+                    mensagemOperador = operatorMessage,
+                    tipoErro = error.GetType().Name,
+                    adapter = "Unimake.DFe"
+                });
+        }
+    }
+
+    private static FiscalResponse CancelarDocumento(FiscalRequest request)
+    {
+        var validation = ValidateConfiguration(request);
+
+        if (!validation.Success)
+        {
+            return validation with
+            {
+                Command = request.Command,
+                FriendlyMessage = "Revise a configuracao fiscal antes de cancelar a nota."
+            };
+        }
+
+        try
+        {
+            var config = FiscalConfig.FromJson(request.Config);
+            var modelo = ResolveRequestModel(request);
+            var codigoUf = GetUfCode(config.Uf);
+            var chave = OnlyDigits(FirstNonBlank(
+                GetString(request.Payload, "chave"),
+                GetString(request.Payload, "chaveAcesso"),
+                GetString(request.Payload, "chNFe")));
+            var xmlPath = FirstNonBlank(
+                GetString(request.Payload, "xmlPath"),
+                GetString(request.Payload, "xmlAutorizadoPath"),
+                GetString(request.Payload, "xml_autorizado_path"));
+            var protocolo = FirstNonBlank(
+                GetString(request.Payload, "protocolo"),
+                GetString(request.Payload, "nProt"),
+                GetString(request.Payload, "protocoloAutorizacao"),
+                TryReadAuthorizationProtocol(xmlPath, chave));
+            var serie = ParseInt(GetString(request.Payload, "serie"), 0);
+            var numero = ParseInt(GetString(request.Payload, "numero"), 0);
+
+            if (chave.Length != 44 || string.IsNullOrWhiteSpace(protocolo))
+            {
+                return FiscalResponse.Fail(
+                    request.Command,
+                    "cancelamento_dados_invalidos",
+                    "Informe chave e protocolo de autorizacao para cancelar a nota.",
+                    null,
+                    new
+                    {
+                        modelo,
+                        serie = serie > 0 ? (int?)serie : null,
+                        numero = numero > 0 ? (int?)numero : null,
+                        chave = string.IsNullOrWhiteSpace(chave) ? null : chave,
+                        mensagemOperador = "Informe chave e protocolo de autorizacao para cancelar a nota."
+                    });
+            }
+
+            var cnpjCpf = OnlyDigits(config.Emitente.CnpjCpf);
+            var justificativa = BuildFiscalEventJustification(
+                FirstNonBlank(
+                    GetString(request.Payload, "justificativa"),
+                    GetString(request.Payload, "xJust"),
+                    GetString(request.Payload, "motivo")),
+                "Cancelamento da venda no PDV Caixa Agil.");
+            var detEvento = new DetEventoCanc
+            {
+                Versao = "1.00",
+                DescEvento = "Cancelamento",
+                NProt = protocolo,
+                XJust = justificativa
+            };
+            var infEvento = new InfEvento(detEvento)
+            {
+                Id = $"ID{((int)TipoEventoNFe.Cancelamento).ToString(CultureInfo.InvariantCulture)}{chave}01",
+                COrgao = (UFBrasil)codigoUf,
+                TpAmb = ToUnimakeEnvironment(config.Ambiente),
+                ChNFe = chave,
+                DhEvento = DateTimeOffset.Now,
+                TpEvento = TipoEventoNFe.Cancelamento,
+                NSeqEvento = 1,
+                VerEvento = "1.00"
+            };
+
+            if (cnpjCpf.Length == 11)
+            {
+                infEvento.CPF = cnpjCpf;
+            }
+            else
+            {
+                infEvento.CNPJ = cnpjCpf.PadLeft(14, '0');
+            }
+
+            var envEvento = new EnvEvento
+            {
+                Versao = "1.00",
+                IdLote = DateTimeOffset.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture),
+                Evento = new List<Evento>
+                {
+                    new()
+                    {
+                        Versao = "1.00",
+                        InfEvento = infEvento
+                    }
+                }
+            };
+            var serviceConfig = BuildUnimakeFiscalServiceConfig(config, modelo, codigoUf, "1");
+            serviceConfig.Servico = Servico.NFeRecepcaoEvento;
+            object recepcaoEvento = modelo == "55"
+                ? new NfeRecepcaoEvento(envEvento, serviceConfig)
+                : new NfceRecepcaoEvento(envEvento, serviceConfig);
+
+            ExecuteService(recepcaoEvento);
+
+            var signedXml = GetPropertyValue(recepcaoEvento, "ConteudoXMLAssinado") as XmlDocument;
+            var result = GetPropertyValue(recepcaoEvento, "Result");
+            var retEvento = GetFirstEnumerableItem(GetPropertyValue(result, "RetEvento"));
+            var infEventoRet = GetPropertyValue(retEvento, "InfEvento");
+            var procResult = GetPropertyValue(recepcaoEvento, "ProcEventoNFeResult");
+            var cStat = GetIntProperty(infEventoRet, "CStat") ?? GetIntProperty(result, "CStat") ?? 0;
+            var xMotivo = GetStringProperty(infEventoRet, "XMotivo") ?? GetStringProperty(result, "XMotivo") ?? "Retorno fiscal sem motivo informado.";
+            var protocoloCancelamento = GetStringProperty(infEventoRet, "NProt");
+            var procXml = GetGeneratedXml(GetFirstEnumerableItem(procResult)) ?? GetGeneratedXml(procResult);
+            var eventDir = EnsureFiscalXmlSubdirectory(config, "eventos");
+            var signedPath = Path.Combine(eventDir, $"{chave}-cancelamento-envEvento.xml");
+            var procPath = Path.Combine(eventDir, $"{chave}-procEventoCancelamento.xml");
+
+            if (signedXml is not null)
+            {
+                File.WriteAllText(signedPath, signedXml.OuterXml, Encoding.UTF8);
+            }
+
+            if (!string.IsNullOrWhiteSpace(procXml))
+            {
+                File.WriteAllText(procPath, procXml, Encoding.UTF8);
+            }
+
+            var responseData = new Dictionary<string, object?>
+            {
+                ["documentId"] = GetString(request.Payload, "documentId"),
+                ["modelo"] = modelo,
+                ["serie"] = serie > 0 ? serie : null,
+                ["numero"] = numero > 0 ? numero : null,
+                ["chave"] = chave,
+                ["protocolo"] = protocoloCancelamento,
+                ["protocoloAutorizacao"] = protocolo,
+                ["cStat"] = cStat,
+                ["xMotivo"] = xMotivo,
+                ["mensagemOperador"] = BuildFiscalEventOperatorMessage("Cancelamento", cStat, xMotivo),
+                ["xmlEnviadoPath"] = File.Exists(signedPath) ? signedPath : null,
+                ["xmlAutorizadoPath"] = File.Exists(procPath) ? procPath : null,
+                ["xmlProc"] = procXml,
+                ["adapter"] = "Unimake.DFe"
+            };
+
+            if (IsCancellationAccepted(cStat, xMotivo))
+            {
+                return FiscalResponse.Ok(
+                    request.Command,
+                    "cancelada",
+                    $"{GetFiscalModelLabel(modelo)} cancelada na SEFAZ.",
+                    null,
+                    responseData);
+            }
+
+            return FiscalResponse.Fail(
+                request.Command,
+                "cancelamento_rejeitado",
+                BuildFiscalEventOperatorMessage("Cancelamento", cStat, xMotivo),
+                GetStringProperty(recepcaoEvento, "RetornoWSString"),
+                responseData);
+        }
+        catch (Exception error)
+        {
+            var operatorMessage = ExtractFiscalOperatorMessage(error);
+
+            return FiscalResponse.Fail(
+                request.Command,
+                "erro_cancelamento",
+                operatorMessage,
+                error.ToString(),
+                new
+                {
+                    modelo = ResolveRequestModel(request),
+                    mensagemOperador = operatorMessage,
+                    tipoErro = error.GetType().Name,
+                    adapter = "Unimake.DFe"
                 });
         }
     }
@@ -731,14 +1109,15 @@ internal static class Program
         string xMotivo,
         string? procXml)
     {
+        var modelLabel = GetFiscalModelLabel(emission.Modelo);
         var operatorMessage = cStat == 204
-            ? "NFC-e em contingencia ja consta autorizada na SEFAZ para esta chave."
-            : "NFC-e em contingencia transmitida e autorizada pela SEFAZ.";
+            ? $"{modelLabel} em contingencia ja consta autorizada na SEFAZ para esta chave."
+            : $"{modelLabel} em contingencia transmitida e autorizada pela SEFAZ.";
 
         var responseData = new Dictionary<string, object?>
         {
             ["documentId"] = GetString(payload, "documentId"),
-            ["modelo"] = "65",
+            ["modelo"] = emission.Modelo,
             ["serie"] = emission.Serie,
             ["numero"] = emission.Numero,
             ["chave"] = emission.Chave,
@@ -747,7 +1126,7 @@ internal static class Program
             ["xMotivo"] = xMotivo,
             ["mensagemOperador"] = operatorMessage,
             ["contingencia"] = true,
-            ["tpEmis"] = "9",
+            ["tpEmis"] = emission.TipoEmissao,
             ["dhCont"] = emission.DhCont?.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture),
             ["xJust"] = emission.XJust,
             ["xmlEnviadoPath"] = xmlPath,
@@ -764,8 +1143,8 @@ internal static class Program
             command,
             "autorizada",
             cStat == 204
-                ? "NFC-e em contingencia recuperada como autorizada pela SEFAZ para esta chave."
-                : $"NFC-e em contingencia autorizada pela SEFAZ: {cStat} - {xMotivo}",
+                ? $"{modelLabel} em contingencia recuperada como autorizada pela SEFAZ para esta chave."
+                : $"{modelLabel} em contingencia autorizada pela SEFAZ: {cStat} - {xMotivo}",
             null,
             responseData);
     }
@@ -789,14 +1168,19 @@ internal static class Program
         {
             var consultaConfig = BuildUnimakeNfceConfig(config, emission);
             consultaConfig.Servico = Servico.NFeConsultaProtocolo;
-            var consulta = new NfceConsultaProtocolo(
-                emission.Chave,
-                IsProduction(config.Ambiente) ? TipoAmbiente.Producao : TipoAmbiente.Homologacao,
-                consultaConfig);
+            object consulta = emission.Modelo == "55"
+                ? new NfeConsultaProtocolo(
+                    emission.Chave,
+                    IsProduction(config.Ambiente) ? TipoAmbiente.Producao : TipoAmbiente.Homologacao,
+                    consultaConfig)
+                : new NfceConsultaProtocolo(
+                    emission.Chave,
+                    IsProduction(config.Ambiente) ? TipoAmbiente.Producao : TipoAmbiente.Homologacao,
+                    consultaConfig);
 
-            consulta.Executar();
+            consulta.GetType().GetMethod("Executar")?.Invoke(consulta, null);
 
-            var retornoXml = consulta.RetornoWSString;
+            var retornoXml = Convert.ToString(GetPropertyValue(consulta, "RetornoWSString"), CultureInfo.InvariantCulture);
 
             if (string.IsNullOrWhiteSpace(retornoXml))
             {
@@ -1022,18 +1406,20 @@ internal static class Program
     private static NfceEmission BuildContingencyEmission(NfceEmission normalEmission, string xJust)
     {
         var dhCont = DateTimeOffset.Now;
+        var tipoEmissao = GetContingencyEmissionType(normalEmission);
         var chave = BuildAccessKey(
             normalEmission.CodigoUf,
             normalEmission.IssueDate,
             OnlyDigits(normalEmission.Emitter.CnpjCpf).PadLeft(14, '0'),
+            normalEmission.Modelo,
             normalEmission.Serie,
             normalEmission.Numero,
             normalEmission.CNf,
-            "9");
+            tipoEmissao);
 
         return normalEmission with
         {
-            TipoEmissao = "9",
+            TipoEmissao = tipoEmissao,
             CDv = chave[^1].ToString(),
             Chave = chave,
             DhCont = dhCont,
@@ -1113,6 +1499,11 @@ internal static class Program
 
     private static Unimake.Business.DFe.Servicos.Configuracao BuildUnimakeNfceConfig(FiscalConfig config, NfceEmission emission)
     {
+        return BuildUnimakeFiscalServiceConfig(config, emission.Modelo, emission.CodigoUf, emission.TipoEmissao);
+    }
+
+    private static Unimake.Business.DFe.Servicos.Configuracao BuildUnimakeFiscalServiceConfig(FiscalConfig config, string modelo, int codigoUf, string? tipoEmissao)
+    {
         var certificado = new X509Certificate2(
             config.Certificado.PfxPath!,
             config.Certificado.PfxPassword ?? string.Empty,
@@ -1120,12 +1511,12 @@ internal static class Program
 
         return new Unimake.Business.DFe.Servicos.Configuracao
         {
-            TipoDFe = TipoDFe.NFCe,
-            Modelo = ModeloDFe.NFCe,
+            TipoDFe = modelo == "55" ? TipoDFe.NFe : TipoDFe.NFCe,
+            Modelo = modelo == "55" ? ModeloDFe.NFe : ModeloDFe.NFCe,
             Servico = Servico.NFeAutorizacao,
-            TipoAmbiente = IsProduction(config.Ambiente) ? TipoAmbiente.Producao : TipoAmbiente.Homologacao,
-            TipoEmissao = emission.TipoEmissao == "9" ? TipoEmissao.ContingenciaOffLine : TipoEmissao.Normal,
-            CodigoUF = emission.CodigoUf,
+            TipoAmbiente = ToUnimakeEnvironment(config.Ambiente),
+            TipoEmissao = ToUnimakeTipoEmissao(tipoEmissao),
+            CodigoUF = codigoUf,
             CertificadoDigital = certificado,
             CertificadoArquivo = config.Certificado.PfxPath,
             CertificadoSenha = config.Certificado.PfxPassword,
@@ -1174,12 +1565,15 @@ internal static class Program
         var signedTpEmis = document.SelectSingleNode("//nfe:ide/nfe:tpEmis", namespaceManager)?.InnerText;
         var signedChave = OnlyDigits(infNfe?.GetAttribute("Id") ?? string.Empty);
 
-        if (signedTpEmis != "9" || signedChave != emission.Chave)
+        if (signedTpEmis != emission.TipoEmissao || signedChave != emission.Chave)
         {
             throw new InvalidOperationException("XML de contingÃªncia assinado diverge da chave ou do tipo de emissÃ£o.");
         }
 
-        AppendNfceSupplement(document, namespaceManager, config, emission);
+        if (emission.Modelo == "65")
+        {
+            AppendNfceSupplement(document, namespaceManager, config, emission);
+        }
         MoveNfceSignatureToSchemaPosition(document);
 
         return document.OuterXml;
@@ -1406,6 +1800,9 @@ internal static class Program
 
         var dhEmiText = ReadXmlValue(ide, "dhEmi");
         var dhContText = ReadXmlValue(ide, "dhCont");
+        var modelo = ReadXmlValue(ide, "mod") == "55" ? "55" : "65";
+        var serieFallback = modelo == "55" ? config.Nfe.Serie ?? 1 : config.Nfce.Serie ?? 1;
+        var numeroFallback = modelo == "55" ? config.Nfe.UltimoNumero ?? 1 : config.Nfce.UltimoNumero ?? 1;
         var issueDate = DateTimeOffset.TryParse(dhEmiText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedIssueDate)
             ? parsedIssueDate
             : DateTimeOffset.Now;
@@ -1414,11 +1811,12 @@ internal static class Program
             : null;
 
         return new NfceEmission(
+            Modelo: modelo,
             Ambiente: ReadXmlValue(ide, "tpAmb") == "1" ? "producao" : "homologacao",
             CodigoUf: ParseInt(ReadXmlValue(ide, "cUF"), GetUfCode(config.Uf)),
             Uf: NormalizeUf(ReadXmlValue(ender, "UF") ?? config.Uf),
-            Serie: ParseInt(ReadXmlValue(ide, "serie"), config.Nfce.Serie ?? 1),
-            Numero: ParseInt(ReadXmlValue(ide, "nNF"), config.Nfce.UltimoNumero ?? 1),
+            Serie: ParseInt(ReadXmlValue(ide, "serie"), serieFallback),
+            Numero: ParseInt(ReadXmlValue(ide, "nNF"), numeroFallback),
             CNf: OnlyDigits(ReadXmlValue(ide, "cNF")).PadLeft(8, '0'),
             CDv: OnlyDigits(ReadXmlValue(ide, "cDV")) is { Length: > 0 } cDv ? cDv[^1].ToString() : chave[^1].ToString(),
             Chave: chave,
@@ -1428,6 +1826,7 @@ internal static class Program
             XJust: ReadXmlValue(ide, "xJust"),
             PaymentMethod: "dinheiro",
             Emitter: config.Emitente,
+            Recipient: null,
             Lines: new List<NfceLine>
             {
                 new(
@@ -1449,20 +1848,22 @@ internal static class Program
             });
     }
 
-    private static NfceEmission BuildNfceEmission(FiscalConfig config, JsonObject? payload)
+    private static NfceEmission BuildNfceEmission(FiscalConfig config, JsonObject? payload, string modelo = "65")
     {
+        modelo = modelo == "55" ? "55" : "65";
         var sale = GetObject(payload, "sale");
         var items = GetArray(payload, "itens") ?? GetArray(payload, "items") ?? GetArray(sale, "items") ?? new JsonArray();
         var saleId = GetString(payload, "vendaId") ?? GetString(payload, "venda_id") ?? GetString(sale, "id") ?? Guid.NewGuid().ToString("N");
         var paymentMethod = GetString(payload, "paymentMethod") ?? GetString(sale, "paymentMethod") ?? "dinheiro";
         var issueDate = ResolveFiscalIssueDate(payload);
-        var serie = ParseInt(GetString(payload, "serie"), config.Nfce.Serie ?? 1);
-        var numero = ParseInt(GetString(payload, "numero"), Math.Max(1, config.Nfce.UltimoNumero ?? 1));
+        var serie = ParseInt(GetString(payload, "serie"), modelo == "55" ? config.Nfe.Serie ?? 1 : config.Nfce.Serie ?? 1);
+        var numero = ParseInt(GetString(payload, "numero"), Math.Max(1, modelo == "55" ? config.Nfe.UltimoNumero ?? 1 : config.Nfce.UltimoNumero ?? 1));
         var codigoUf = GetUfCode(config.Uf);
         var cnpj = OnlyDigits(config.Emitente.CnpjCpf).PadLeft(14, '0');
         var cNf = BuildStableRandomCode(saleId, numero);
-        var chave = BuildAccessKey(codigoUf, issueDate, cnpj, serie, numero, cNf, "1");
-        var lines = BuildNfceLines(items, sale);
+        var chave = BuildAccessKey(codigoUf, issueDate, cnpj, modelo, serie, numero, cNf, "1");
+        var lines = BuildNfceLines(items, sale, modelo);
+        var recipient = modelo == "55" ? BuildRecipientConfig(payload) : null;
 
         if (lines.Count == 0)
         {
@@ -1486,6 +1887,7 @@ internal static class Program
         }
 
         return new NfceEmission(
+            Modelo: modelo,
             Ambiente: IsProduction(config.Ambiente) ? "producao" : "homologacao",
             CodigoUf: codigoUf,
             Uf: NormalizeUf(config.Uf),
@@ -1500,10 +1902,11 @@ internal static class Program
             XJust: null,
             PaymentMethod: paymentMethod,
             Emitter: config.Emitente,
+            Recipient: recipient,
             Lines: lines);
     }
 
-    private static List<NfceLine> BuildNfceLines(JsonArray items, JsonObject? sale)
+    private static List<NfceLine> BuildNfceLines(JsonArray items, JsonObject? sale, string modelo = "65")
     {
         var lines = new List<NfceLine>();
 
@@ -1531,7 +1934,7 @@ internal static class Program
 
             if (ncm.Length != 8)
             {
-                throw new InvalidOperationException($"Informe o NCM válido do produto \"{Limit(productName, 80)}\" antes de emitir a NFC-e.");
+                throw new InvalidOperationException($"Informe o NCM válido do produto \"{Limit(productName, 80)}\" antes de emitir a {GetFiscalModelLabel(modelo)}.");
             }
 
             lines.Add(new NfceLine(
@@ -1574,14 +1977,14 @@ internal static class Program
                 Tag("cUF", emission.CodigoUf) +
                 Tag("cNF", emission.CNf) +
                 Tag("natOp", "Venda") +
-                Tag("mod", "65") +
+                Tag("mod", emission.Modelo) +
                 Tag("serie", emission.Serie) +
                 Tag("nNF", emission.Numero) +
                 Tag("dhEmi", issueDate) +
                 Tag("tpNF", "1") +
-                Tag("idDest", "1") +
+                Tag("idDest", GetDestinationIndicator(emission)) +
                 Tag("cMunFG", OnlyDigits(emission.Emitter.CodigoMunicipio).PadLeft(7, '0')) +
-                Tag("tpImp", "4") +
+                Tag("tpImp", emission.Modelo == "55" ? "1" : "4") +
                 Tag("tpEmis", tipoEmissao) +
                 Tag("cDV", emission.CDv) +
                 Tag("tpAmb", emission.Ambiente == "producao" ? "1" : "2") +
@@ -1593,6 +1996,7 @@ internal static class Program
                 OptionalTag("dhCont", emission.DhCont?.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture)) +
                 OptionalTag("xJust", emission.XJust)) +
             BuildEmitterXml(emission.Emitter, emission.Uf) +
+            (emission.Modelo == "55" ? BuildRecipientXml(emission) : "") +
             details +
             BuildTotalXml(totalProducts, emission.Lines, emission.Emitter.Crt) +
             Wrap("transp", Tag("modFrete", "9")) +
@@ -1628,6 +2032,160 @@ internal static class Program
                 OptionalTag("fone", OnlyDigits(emitter.Telefone))) +
             Tag("IE", OnlyDigits(emitter.InscricaoEstadual)) +
             Tag("CRT", NormalizeCrt(emitter.Crt)));
+    }
+
+    private static RecipientConfig BuildRecipientConfig(JsonObject? payload)
+    {
+        var sale = GetObject(payload, "sale");
+        var source =
+            GetObject(payload, "destinatario") ??
+            GetObject(payload, "destinatarioFiscal") ??
+            GetObject(payload, "clienteFiscal") ??
+            GetObject(payload, "clienteConvenio") ??
+            GetObject(payload, "cliente_convenio") ??
+            GetObject(payload, "cliente") ??
+            GetObject(sale, "destinatario") ??
+            GetObject(sale, "clienteFiscal") ??
+            GetObject(sale, "clienteConvenioDadosFiscais") ??
+            GetObject(sale, "cliente_convenio_dados_fiscais");
+        var address = GetObject(source, "endereco") ?? GetObject(source, "address") ?? source;
+        var cnpj = OnlyDigits(FirstNonBlank(
+            GetString(source, "cnpj_cpf"),
+            GetString(source, "cnpjCpf"),
+            GetString(source, "cnpj"),
+            GetString(source, "documento"),
+            GetString(source, "taxId")));
+        var razaoSocial = FirstNonBlank(
+            GetString(source, "razao_social"),
+            GetString(source, "razaoSocial"),
+            GetString(source, "xNome"),
+            GetString(source, "nome"),
+            GetString(source, "name"),
+            GetString(source, "nome_fantasia"),
+            GetString(source, "nomeFantasia"));
+        var nomeFantasia = FirstNonBlank(
+            GetString(source, "nome_fantasia"),
+            GetString(source, "nomeFantasia"),
+            GetString(source, "fantasia"),
+            GetString(source, "alias"));
+        var inscricaoEstadual = OnlyDigits(FirstNonBlank(
+            GetString(source, "inscricao_estadual"),
+            GetString(source, "inscricaoEstadual"),
+            GetString(source, "ie")));
+        var logradouro = FirstNonBlank(GetString(address, "logradouro"), GetString(address, "xLgr"), GetString(address, "rua"), GetString(address, "street"));
+        var numero = FirstNonBlank(GetString(address, "numero"), GetString(address, "nro"), GetString(address, "number")) ?? "S/N";
+        var complemento = FirstNonBlank(GetString(address, "complemento"), GetString(address, "xCpl"), GetString(address, "details"));
+        var bairro = FirstNonBlank(GetString(address, "bairro"), GetString(address, "xBairro"), GetString(address, "district"));
+        var codigoMunicipio = OnlyDigits(FirstNonBlank(
+            GetString(address, "codigo_municipio"),
+            GetString(address, "codigoMunicipio"),
+            GetString(address, "codigo_ibge"),
+            GetString(address, "codigoIbge"),
+            GetString(address, "cMun"),
+            GetString(address, "municipality")));
+        var municipio = FirstNonBlank(GetString(address, "municipio"), GetString(address, "xMun"), GetString(address, "cidade"), GetString(address, "city"));
+        var rawUf = FirstNonBlank(GetString(address, "uf"), GetString(address, "UF"));
+        var uf = string.IsNullOrWhiteSpace(rawUf) ? string.Empty : NormalizeUf(rawUf);
+        var cep = OnlyDigits(FirstNonBlank(GetString(address, "cep"), GetString(address, "postalCode"), GetString(address, "zip"), GetString(address, "code")));
+        var telefone = OnlyDigits(FirstNonBlank(GetString(source, "telefone"), GetString(source, "fone"), GetString(address, "fone")));
+        var email = FirstNonBlank(GetString(source, "email"), GetString(source, "mail"));
+        var missing = new List<string>();
+
+        if (cnpj.Length != 14)
+        {
+            missing.Add("CNPJ");
+        }
+
+        if (string.IsNullOrWhiteSpace(razaoSocial))
+        {
+            missing.Add("razao social");
+        }
+
+        if (string.IsNullOrWhiteSpace(logradouro))
+        {
+            missing.Add("logradouro");
+        }
+
+        if (string.IsNullOrWhiteSpace(bairro))
+        {
+            missing.Add("bairro");
+        }
+
+        if (codigoMunicipio.Length != 7)
+        {
+            missing.Add("codigo IBGE");
+        }
+
+        if (string.IsNullOrWhiteSpace(municipio))
+        {
+            missing.Add("municipio");
+        }
+
+        if (uf.Length != 2)
+        {
+            missing.Add("UF");
+        }
+
+        if (cep.Length != 8)
+        {
+            missing.Add("CEP");
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException($"Complete o cadastro fiscal do cliente PJ antes de emitir a NF-e. Campos pendentes: {string.Join(", ", missing)}.");
+        }
+
+        return new RecipientConfig(
+            Cnpj: cnpj,
+            RazaoSocial: razaoSocial!,
+            NomeFantasia: nomeFantasia,
+            InscricaoEstadual: inscricaoEstadual,
+            Logradouro: logradouro!,
+            Numero: string.IsNullOrWhiteSpace(numero) ? "S/N" : numero,
+            Complemento: complemento,
+            Bairro: bairro!,
+            CodigoMunicipio: codigoMunicipio,
+            Municipio: municipio!,
+            Uf: uf,
+            Cep: cep,
+            Telefone: string.IsNullOrWhiteSpace(telefone) ? null : telefone,
+            Email: email);
+    }
+
+    private static string BuildRecipientXml(NfceEmission emission)
+    {
+        var recipient = emission.Recipient;
+
+        if (recipient is null)
+        {
+            throw new InvalidOperationException("Destinatario da NF-e nao informado.");
+        }
+
+        var ie = OnlyDigits(recipient.InscricaoEstadual);
+        var indIeDest = ie.Length > 0 ? "1" : "9";
+        var recipientName = emission.Ambiente == "producao"
+            ? recipient.RazaoSocial
+            : "NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL";
+
+        return Wrap("dest",
+            Tag("CNPJ", recipient.Cnpj.PadLeft(14, '0')) +
+            Tag("xNome", Limit(recipientName, 60)) +
+            Wrap("enderDest",
+                Tag("xLgr", Limit(recipient.Logradouro, 60)) +
+                Tag("nro", Limit(string.IsNullOrWhiteSpace(recipient.Numero) ? "S/N" : recipient.Numero, 60)) +
+                OptionalTag("xCpl", Limit(recipient.Complemento, 60)) +
+                Tag("xBairro", Limit(recipient.Bairro, 60)) +
+                Tag("cMun", recipient.CodigoMunicipio.PadLeft(7, '0')) +
+                Tag("xMun", Limit(recipient.Municipio, 60)) +
+                Tag("UF", recipient.Uf) +
+                Tag("CEP", recipient.Cep.PadLeft(8, '0')) +
+                Tag("cPais", "1058") +
+                Tag("xPais", "Brasil") +
+                OptionalTag("fone", recipient.Telefone)) +
+            Tag("indIEDest", indIeDest) +
+            OptionalTag("IE", ie) +
+            OptionalTag("email", Limit(recipient.Email, 60)));
     }
 
     private static string BuildNfceDetailXml(NfceLine line, int index, string ambiente, string? crt)
@@ -1800,6 +2358,391 @@ internal static class Program
         return Wrap("pag", Wrap("detPag", Tag("tPag", code) + Tag("vPag", FormatDecimal(total, 2)) + card));
     }
 
+    private sealed record AuthorizationExecution(
+        string? SignedXml,
+        string? Protocolo,
+        int CStat,
+        string XMotivo,
+        string? ProcXml,
+        int HttpStatusCode,
+        string? RetornoWSString);
+
+    private static AuthorizationExecution ExecuteAuthorization(
+        NfceEmission emission,
+        EnviNFe enviNFe,
+        Unimake.Business.DFe.Servicos.Configuracao serviceConfig)
+    {
+        object authorization = emission.Modelo == "55"
+            ? new NfeAutorizacao(enviNFe, serviceConfig)
+            : new NfceAutorizacao(enviNFe, serviceConfig);
+
+        return ExecuteAuthorizationService(authorization);
+    }
+
+    private static AuthorizationExecution ExecuteAuthorization(
+        NfceEmission emission,
+        string envioXml,
+        Unimake.Business.DFe.Servicos.Configuracao serviceConfig)
+    {
+        object authorization = emission.Modelo == "55"
+            ? new NfeAutorizacao(envioXml, serviceConfig)
+            : new NfceAutorizacao(envioXml, serviceConfig);
+
+        return ExecuteAuthorizationService(authorization);
+    }
+
+    private static AuthorizationExecution ExecuteAuthorizationService(object authorization)
+    {
+        try
+        {
+            authorization.GetType().GetMethod("Executar")?.Invoke(authorization, null);
+        }
+        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+        {
+            throw error.InnerException;
+        }
+
+        var signedXml = GetPropertyValue(authorization, "ConteudoXMLAssinado") as XmlDocument;
+        var result = GetPropertyValue(authorization, "Result");
+        var procResult = GetPropertyValue(authorization, "NfeProcResult");
+        var protocol = GetNestedPropertyValue(result, "ProtNFe", "InfProt") ??
+            GetNestedPropertyValue(procResult, "ProtNFe", "InfProt");
+        var cStat = GetIntProperty(protocol, "CStat") ?? GetIntProperty(result, "CStat") ?? 0;
+        var xMotivo = GetStringProperty(protocol, "XMotivo") ??
+            GetStringProperty(result, "XMotivo") ??
+            "Retorno fiscal sem motivo informado.";
+        var protocolo = GetStringProperty(protocol, "NProt");
+        var procXml = GetGeneratedXml(procResult);
+        var httpStatusCode = GetIntProperty(authorization, "HttpStatusCode") ?? 0;
+        var retornoWsString = GetStringProperty(authorization, "RetornoWSString");
+
+        return new AuthorizationExecution(
+            SignedXml: signedXml?.OuterXml,
+            Protocolo: protocolo,
+            CStat: cStat,
+            XMotivo: xMotivo,
+            ProcXml: procXml,
+            HttpStatusCode: httpStatusCode,
+            RetornoWSString: retornoWsString);
+    }
+
+    private static object? GetPropertyValue(object? target, string propertyName)
+    {
+        return target?.GetType().GetProperty(propertyName)?.GetValue(target);
+    }
+
+    private static object? GetNestedPropertyValue(object? target, params string[] propertyNames)
+    {
+        var current = target;
+
+        foreach (var propertyName in propertyNames)
+        {
+            current = GetPropertyValue(current, propertyName);
+
+            if (current is null)
+            {
+                return null;
+            }
+        }
+
+        return current;
+    }
+
+    private static string? GetStringProperty(object? target, string propertyName)
+    {
+        var value = GetPropertyValue(target, propertyName);
+        return value is null ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    private static int? GetIntProperty(object? target, string propertyName)
+    {
+        var value = GetPropertyValue(target, propertyName);
+
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (value is int number)
+        {
+            return number;
+        }
+
+        if (value is Enum)
+        {
+            return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        return int.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : null;
+    }
+
+    private static string? GetGeneratedXml(object? procResult)
+    {
+        var generated = procResult?.GetType().GetMethod("GerarXML")?.Invoke(procResult, null);
+
+        return generated switch
+        {
+            XmlDocument document => document.OuterXml,
+            XDocument document => document.ToString(SaveOptions.DisableFormatting),
+            _ => null
+        };
+    }
+
+    private static object? GetFirstEnumerableItem(object? value)
+    {
+        if (value is string || value is null)
+        {
+            return null;
+        }
+
+        if (value is System.Collections.IEnumerable enumerable)
+        {
+            foreach (var item in enumerable)
+            {
+                return item;
+            }
+        }
+
+        return null;
+    }
+
+    private static void ExecuteService(object service)
+    {
+        try
+        {
+            service.GetType().GetMethod("Executar")?.Invoke(service, null);
+        }
+        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is not null)
+        {
+            throw error.InnerException;
+        }
+    }
+
+    private static string ResolveRequestModel(FiscalRequest request)
+    {
+        var payloadModel = GetString(request.Payload, "modelo");
+
+        if (payloadModel == "55" || request.Command.Contains("nfe", StringComparison.OrdinalIgnoreCase))
+        {
+            return "55";
+        }
+
+        return "65";
+    }
+
+    private static string GetFiscalModelLabel(string? modelo)
+    {
+        return modelo == "55" ? "NF-e" : "NFC-e";
+    }
+
+    private static string GetDestinationIndicator(NfceEmission emission)
+    {
+        if (emission.Modelo != "55" || emission.Recipient is null)
+        {
+            return "1";
+        }
+
+        return string.Equals(NormalizeUf(emission.Uf), emission.Recipient.Uf, StringComparison.OrdinalIgnoreCase)
+            ? "1"
+            : "2";
+    }
+
+    private static string GetContingencyEmissionType(NfceEmission emission)
+    {
+        return emission.Modelo == "55" ? "6" : "9";
+    }
+
+    private static bool IsContingencyEmissionType(NfceEmission emission)
+    {
+        return emission.TipoEmissao is "4" or "5" or "6" or "7" or "8" or "9";
+    }
+
+    private static TipoEmissao ToUnimakeTipoEmissao(string? tipoEmissao)
+    {
+        return tipoEmissao switch
+        {
+            "4" => TipoEmissao.ContingenciaEPEC,
+            "5" => TipoEmissao.ContingenciaFSDA,
+            "6" => TipoEmissao.ContingenciaSVCAN,
+            "7" => TipoEmissao.ContingenciaSVCRS,
+            "8" => TipoEmissao.ContingenciaSVCSP,
+            "9" => TipoEmissao.ContingenciaOffLine,
+            _ => TipoEmissao.Normal
+        };
+    }
+
+    private static TipoAmbiente ToUnimakeEnvironment(string? ambiente)
+    {
+        return IsProduction(ambiente) ? TipoAmbiente.Producao : TipoAmbiente.Homologacao;
+    }
+
+    private static string BuildFiscalEventJustification(string? value, string fallback)
+    {
+        var text = Regex.Replace(value ?? string.Empty, "\\s+", " ").Trim();
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = fallback;
+        }
+
+        text = Regex.Replace(text, @"\s*\[[^\]]+\]", "", RegexOptions.IgnoreCase).Trim();
+
+        if (text.Length < 15)
+        {
+            text = $"{text} Caixa Agil".Trim();
+        }
+
+        if (text.Length < 15)
+        {
+            text = fallback;
+        }
+
+        return text.Length > 255 ? text[..255].TrimEnd('.', ' ', ';', ':') : text;
+    }
+
+    private static string ResolveInutilizationYear(JsonObject? payload)
+    {
+        var value = FirstNonBlank(
+            GetString(payload, "ano"),
+            GetString(payload, "year"),
+            GetString(payload, "issuedAt"),
+            GetString(payload, "createdAt"),
+            GetString(payload, "dhEmi"));
+
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            var digits = OnlyDigits(value);
+
+            if (digits.Length == 2)
+            {
+                return digits;
+            }
+
+            if (digits.Length >= 4)
+            {
+                return digits[..4][2..];
+            }
+
+            if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed))
+            {
+                return parsed.ToString("yy", CultureInfo.InvariantCulture);
+            }
+        }
+
+        return DateTimeOffset.Now.ToString("yy", CultureInfo.InvariantCulture);
+    }
+
+    private static string BuildInutilizationId(int codigoUf, string ano, string cnpjCpf, string modelo, int serie, int numeroInicial, int numeroFinal)
+    {
+        return string.Concat(
+            "ID",
+            codigoUf.ToString(CultureInfo.InvariantCulture).PadLeft(2, '0'),
+            OnlyDigits(ano).PadLeft(2, '0')[^2..],
+            OnlyDigits(cnpjCpf).PadLeft(14, '0'),
+            modelo == "55" ? "55" : "65",
+            serie.ToString(CultureInfo.InvariantCulture).PadLeft(3, '0'),
+            numeroInicial.ToString(CultureInfo.InvariantCulture).PadLeft(9, '0'),
+            numeroFinal.ToString(CultureInfo.InvariantCulture).PadLeft(9, '0'));
+    }
+
+    private static string BuildFiscalEventOperatorMessage(string eventName, int cStat, string? xMotivo)
+    {
+        var message = Regex.Replace(xMotivo ?? string.Empty, "\\s+", " ").Trim();
+
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return $"{eventName} retornou codigo {cStat}.";
+        }
+
+        return message.Length > 180
+            ? $"{eventName} {cStat}: {message[..180].TrimEnd('.', ' ', ';', ':')}."
+            : $"{eventName} {cStat}: {message}";
+    }
+
+    private static string RemoveDiacritics(string value)
+    {
+        var normalized = value.Normalize(NormalizationForm.FormD);
+        var builder = new StringBuilder(normalized.Length);
+
+        foreach (var character in normalized)
+        {
+            var category = CharUnicodeInfo.GetUnicodeCategory(character);
+
+            if (category != UnicodeCategory.NonSpacingMark)
+            {
+                builder.Append(character);
+            }
+        }
+
+        return builder.ToString().Normalize(NormalizationForm.FormC);
+    }
+
+    private static bool IsInutilizationAccepted(int cStat, string? xMotivo)
+    {
+        var normalized = RemoveDiacritics(xMotivo ?? string.Empty).ToLowerInvariant();
+
+        return cStat == 102 ||
+            (cStat == 563 && normalized.Contains("inutilizacao")) ||
+            normalized.Contains("inutilizacao homologada") ||
+            normalized.Contains("ja existe pedido de inutilizacao");
+    }
+
+    private static bool IsCancellationAccepted(int cStat, string? xMotivo)
+    {
+        var normalized = RemoveDiacritics(xMotivo ?? string.Empty).ToLowerInvariant();
+
+        return cStat is 101 or 135 or 155 ||
+            normalized.Contains("evento registrado") ||
+            normalized.Contains("cancelamento homologado") ||
+            normalized.Contains("duplicidade de evento");
+    }
+
+    private static string? TryReadAuthorizationProtocol(string? xmlPath, string chave)
+    {
+        if (string.IsNullOrWhiteSpace(xmlPath) || !File.Exists(xmlPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var document = new XmlDocument { PreserveWhitespace = true };
+            document.Load(xmlPath);
+            var namespaceManager = new XmlNamespaceManager(document.NameTable);
+            namespaceManager.AddNamespace("nfe", "http://www.portalfiscal.inf.br/nfe");
+            var infProt = document.SelectSingleNode("//nfe:protNFe/nfe:infProt", namespaceManager) as XmlElement;
+
+            if (infProt is null)
+            {
+                return null;
+            }
+
+            var protocolChave = OnlyDigits(ReadXmlChildValue(infProt, "chNFe"));
+
+            if (!string.IsNullOrWhiteSpace(chave) && protocolChave != chave)
+            {
+                return null;
+            }
+
+            return FirstNonBlank(
+                ReadXmlChildValue(infProt, "nProt"),
+                ReadXmlChildValue(infProt, "NProt"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string EnsureFiscalXmlSubdirectory(FiscalConfig config, string name)
+    {
+        var directory = Path.Combine(config.Diretorios.Xml!, name);
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
     private static (decimal Base, decimal Value) CalculateIcms(NfceLine line)
     {
         var baseIcms = Math.Round(Math.Max(0m, line.TotalPrice), 2);
@@ -1808,13 +2751,13 @@ internal static class Program
         return (baseIcms, value);
     }
 
-    private static string BuildAccessKey(int codigoUf, DateTimeOffset date, string cnpj, int serie, int numero, string cNf, string tpEmis)
+    private static string BuildAccessKey(int codigoUf, DateTimeOffset date, string cnpj, string modelo, int serie, int numero, string cNf, string tpEmis)
     {
         var baseKey = string.Concat(
             codigoUf.ToString(CultureInfo.InvariantCulture).PadLeft(2, '0'),
             date.ToString("yyMM", CultureInfo.InvariantCulture),
             OnlyDigits(cnpj).PadLeft(14, '0'),
-            "65",
+            modelo == "55" ? "55" : "65",
             serie.ToString(CultureInfo.InvariantCulture).PadLeft(3, '0'),
             numero.ToString(CultureInfo.InvariantCulture).PadLeft(9, '0'),
             OnlyDigits(tpEmis).PadLeft(1, '0')[^1].ToString(),
@@ -2074,6 +3017,7 @@ internal static class Program
     }
 
     private sealed record NfceEmission(
+        string Modelo,
         string Ambiente,
         int CodigoUf,
         string Uf,
@@ -2088,7 +3032,24 @@ internal static class Program
         string? XJust,
         string PaymentMethod,
         EmitterConfig Emitter,
+        RecipientConfig? Recipient,
         List<NfceLine> Lines);
+
+    private sealed record RecipientConfig(
+        string Cnpj,
+        string RazaoSocial,
+        string? NomeFantasia,
+        string? InscricaoEstadual,
+        string Logradouro,
+        string Numero,
+        string? Complemento,
+        string Bairro,
+        string CodigoMunicipio,
+        string Municipio,
+        string Uf,
+        string Cep,
+        string? Telefone,
+        string? Email);
 
     private sealed record NfceLine(
         string? ProductId,
@@ -2137,6 +3098,7 @@ internal static class Program
     {
         var config = FiscalConfig.FromJson(request.Config);
         var xmlPath = GetString(request.Payload, "xmlPath") ?? GetString(request.Payload, "caminhoXml");
+        var isContingencyPrint = IsContingencyDanfePrint(xmlPath, request.Payload);
         var issues = new List<string>();
         var technical = new List<string>();
 
@@ -2153,7 +3115,8 @@ internal static class Program
         {
             ["xmlPath"] = xmlPath,
             ["printer"] = printerInfo,
-            ["adapter"] = "UniDANFE"
+            ["adapter"] = "Unimake.Unidanfe.NET6",
+            ["contingencia"] = isContingencyPrint
         };
 
         if (issues.Count > 0)
@@ -2170,11 +3133,12 @@ internal static class Program
         {
             var selectedPrinter = ResolveConfiguredPrinterName(config.Impressao);
             var danfe = ReadNfceDanfe(xmlPath!);
-            var unidanfeResult = PrintWithUniDanfe(xmlPath!, config, request.Payload, selectedPrinter);
+            var modelo = GetString(request.Payload, "modelo") == "55" ? "55" : ReadFiscalModelFromXml(xmlPath!) ?? "65";
+            var unidanfeResult = PrintWithIntegratedUniDanfe(xmlPath!, config, request.Payload, selectedPrinter);
 
-            data["adapter"] = "UniDANFE";
+            data["adapter"] = "Unimake.Unidanfe.NET6";
             data["unidanfe"] = unidanfeResult;
-            data["modelo"] = "65";
+            data["modelo"] = modelo;
             data["serie"] = danfe.Serie;
             data["numero"] = danfe.Numero;
             data["chave"] = danfe.Chave;
@@ -2183,41 +3147,13 @@ internal static class Program
             return FiscalResponse.Ok(
                 request.Command,
                 "danfe_impresso",
-                "DANFE NFC-e enviado para a UniDANFE.",
+                $"DANFE {GetFiscalModelLabel(modelo)} enviado pela UniDANFE integrada.",
                 null,
                 data);
         }
         catch (Exception error)
         {
-            if (config.Danfe.UseNativeFallback)
-            {
-                try
-                {
-                    var selectedPrinter = ResolveConfiguredPrinterName(config.Impressao);
-                    var danfe = ReadNfceDanfe(xmlPath!);
-
-                    PrintNativeNfceDanfe(danfe, config.Impressao, selectedPrinter);
-
-                    data["adapter"] = "CaixaAgil.NativePrint";
-                    data["fallbackReason"] = ExtractFiscalOperatorMessage(error);
-                    data["modelo"] = "65";
-                    data["serie"] = danfe.Serie;
-                    data["numero"] = danfe.Numero;
-                    data["chave"] = danfe.Chave;
-                    data["printerName"] = selectedPrinter;
-
-                    return FiscalResponse.Ok(
-                        request.Command,
-                        "danfe_impresso_fallback",
-                        "DANFE NFC-e enviado pela impressão nativa.",
-                        error.Message,
-                        data);
-                }
-                catch (Exception fallbackError)
-                {
-                    data["fallbackError"] = fallbackError.Message;
-                }
-            }
+            data["fallbackDisabled"] = "dll-only";
 
             return FiscalResponse.Fail(
                 request.Command,
@@ -2228,141 +3164,347 @@ internal static class Program
         }
     }
 
-    private static object PrintWithUniDanfe(string xmlPath, FiscalConfig config, JsonObject? payload, string? selectedPrinter)
+    private static bool IsContingencyDanfePrint(string? xmlPath, JsonObject? payload)
     {
-        var exePath = ResolveUniDanfeExePath(config.Danfe);
-
-        if (string.IsNullOrWhiteSpace(exePath))
+        if (GetBool(payload, "contingencia", false))
         {
-            throw new InvalidOperationException("Informe o caminho do executável unidanfe.exe nas configurações fiscais locais do PDV.");
+            return true;
         }
 
-        if (!File.Exists(exePath))
+        if (GetString(payload, "tpEmis") is "4" or "5" or "6" or "7" or "8" or "9")
         {
-            throw new FileNotFoundException($"Executável UniDANFE não encontrado: {exePath}", exePath);
+            return true;
         }
 
+        if (string.IsNullOrWhiteSpace(xmlPath))
+        {
+            return false;
+        }
+
+        var normalizedPath = xmlPath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var pathSegments = normalizedPath.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+
+        if (pathSegments.Any(segment => string.Equals(segment, "contingencia", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (!File.Exists(xmlPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var document = XDocument.Load(xmlPath, LoadOptions.PreserveWhitespace);
+            return ReadXmlValue(document, "tpEmis") is "4" or "5" or "6" or "7" or "8" or "9";
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static object PrintWithIntegratedUniDanfe(string xmlPath, FiscalConfig config, JsonObject? payload, string? selectedPrinter)
+    {
         var modelo = GetString(payload, "modelo") == "55" ? "55" : "65";
         var configName = GetString(payload, "configName") ??
             GetString(payload, "configuracao") ??
             config.Danfe.ConfigName ??
             (modelo == "55" ? "DANFE_SIMPL" : null);
-        var args = new List<string>
+        var configurationDir = ResolveUniDanfeConfigurationDir(config, xmlPath);
+        var errorPath = Path.Combine(configurationDir, "erros-unidanfe.txt");
+        var pdfDir = !string.IsNullOrWhiteSpace(config.Diretorios.Pdf)
+            ? config.Diretorios.Pdf!
+            : Path.Combine(configurationDir, "pdf");
+        var bobinaMm = Math.Clamp(config.Impressao.BobinaMm ?? 80, 58, 210);
+        var printerName = string.IsNullOrWhiteSpace(selectedPrinter) ? "padrao" : selectedPrinter.Trim();
+        var printJobName = BuildDanfePrintJobName(payload);
+        var auxiliaryPath = WriteUniDanfeAuxiliaryXml(xmlPath, configurationDir, copies: 1);
+
+        Directory.CreateDirectory(configurationDir);
+        Directory.CreateDirectory(pdfDir);
+
+        using var printMonitor = StartDuplicatePrintJobMonitor(printJobName, printerName, maxJobsToKeep: 1);
+        var unidanfeConfig = new UnidanfeConfiguration
         {
-            $"a={xmlPath}",
-            "v=0",
-            "m=1"
+            AcaoDLL = Unimake.Unidanfe.Enumerations.AcoesDLL.Dfe,
+            Arquivo = xmlPath,
+            ArquivoAuxiliar = auxiliaryPath,
+            ArquivoErros = errorPath,
+            Configuracao = string.IsNullOrWhiteSpace(configName) ? null : configName,
+            Copias = 1,
+            Impressora = printerName,
+            Imprimir = true,
+            LarguraBobina = bobinaMm,
+            NomeImpressao = printJobName,
+            PastaConfiguracao = configurationDir,
+            PastaPDF = pdfDir,
+            PreencherIdentificacaoEmitente = true,
+            PublicidadeUnidanfe = false,
+            SaidaErros = Unimake.Unidanfe.Enumerations.SaidaErros.Arquivo,
+            Visualizar = false,
+            WaitProcess = true
         };
 
-        if (!string.IsNullOrWhiteSpace(configName))
-        {
-            args.Add($"c={configName}");
-        }
-
-        if (!string.IsNullOrWhiteSpace(selectedPrinter))
-        {
-            args.Add($"i={selectedPrinter}");
-        }
-
-        var result = ExecuteUniDanfe(exePath, args);
+        UnidanfeServices.ConfigureService(configurationDir);
+        UnidanfeServices.Execute(unidanfeConfig);
+        var duplicatePrintJobs = printMonitor.StopAndGetResult();
 
         return new
         {
-            exePath,
-            args,
-            exitCode = result.ExitCode,
-            stdout = Limit(result.Stdout, 1200),
-            stderr = Limit(result.Stderr, 1200)
+            configurationDir,
+            pdfDir,
+            errorPath,
+            auxiliaryPath,
+            printerName = unidanfeConfig.Impressora,
+            printJobName,
+            configName = unidanfeConfig.Configuracao,
+            widthMm = unidanfeConfig.LarguraBobina,
+            copies = unidanfeConfig.Copias,
+            duplicatePrintJobs,
+            printerForcedByParameter = true,
+            copiesForcedByParameter = true,
+            adapter = "Unimake.Unidanfe.NET6"
         };
     }
 
-    private static (int ExitCode, string Stdout, string Stderr) ExecuteUniDanfe(string exePath, IReadOnlyList<string> args)
+    private static string BuildDanfePrintJobName(JsonObject? payload)
     {
-        using var process = new Process();
+        var serie = FirstNonBlank(GetString(payload, "serie"), GetString(payload, "serieFiscal")) ?? "0";
+        var numero = FirstNonBlank(GetString(payload, "numero"), GetString(payload, "nNF")) ?? "0";
+        var modelo = GetString(payload, "modelo") == "55" ? "NFe" : "NFCe";
+        var suffix = Guid.NewGuid().ToString("N")[..8];
 
-        process.StartInfo = new ProcessStartInfo
-        {
-            FileName = exePath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
-            WorkingDirectory = Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
+        return $"CaixaAgil DANFE {modelo} {serie}-{numero} {suffix}";
+    }
 
-        foreach (var arg in args)
+    private static DuplicatePrintJobMonitor StartDuplicatePrintJobMonitor(string printJobName, string printerName, int maxJobsToKeep)
+    {
+        var monitor = new DuplicatePrintJobMonitor(printJobName, printerName, maxJobsToKeep);
+        monitor.Start();
+        return monitor;
+    }
+
+    private static string WriteUniDanfeAuxiliaryXml(string xmlPath, string fallbackDir, int copies)
+    {
+        var xmlDir = Path.GetDirectoryName(xmlPath);
+        var targetDir = string.IsNullOrWhiteSpace(xmlDir) ? fallbackDir : xmlDir;
+        var xmlFileName = Path.GetFileName(xmlPath);
+        var auxiliaryFileName = $"aux-{(string.IsNullOrWhiteSpace(xmlFileName) ? "danfe.xml" : xmlFileName)}";
+        var auxiliaryPath = Path.Combine(targetDir!, auxiliaryFileName);
+
+        Directory.CreateDirectory(targetDir!);
+
+        var document = new XDocument(
+            new XDeclaration("1.0", "UTF-8", null),
+            new XElement("outrasInf",
+                new XElement("copias", copies.ToString(CultureInfo.InvariantCulture))));
+
+        document.Save(auxiliaryPath);
+
+        return auxiliaryPath;
+    }
+
+    private static string ResolveUniDanfeConfigurationDir(FiscalConfig config, string xmlPath)
+    {
+        var baseDir = config.Diretorios.Logs;
+
+        if (string.IsNullOrWhiteSpace(baseDir))
         {
-            process.StartInfo.ArgumentList.Add(arg);
+            var xmlDir = Path.GetDirectoryName(xmlPath) ?? Environment.CurrentDirectory;
+            baseDir = Path.Combine(xmlDir, "..", "unidanfe");
+        }
+        else
+        {
+            baseDir = Path.Combine(baseDir, "unidanfe");
         }
 
-        if (!process.Start())
+        return Path.GetFullPath(baseDir);
+    }
+
+    private sealed class DuplicatePrintJobMonitor : IDisposable
+    {
+        private readonly string printJobName;
+        private readonly string printerName;
+        private readonly int maxJobsToKeep;
+        private readonly object syncRoot = new();
+        private readonly HashSet<string> observedJobKeys = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<PrintJobInfo> observedJobs = new();
+        private readonly List<PrintJobInfo> keptJobs = new();
+        private readonly List<PrintJobInfo> canceledJobs = new();
+        private readonly List<string> errors = new();
+        private CancellationTokenSource? cancellation;
+        private Task? monitorTask;
+
+        public DuplicatePrintJobMonitor(string printJobName, string printerName, int maxJobsToKeep)
         {
-            throw new InvalidOperationException("Não foi possível iniciar a UniDANFE.");
+            this.printJobName = printJobName;
+            this.printerName = printerName;
+            this.maxJobsToKeep = Math.Max(1, maxJobsToKeep);
         }
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
-
-        if (!process.WaitForExit(90000))
+        public void Start()
         {
+            cancellation = new CancellationTokenSource();
+            monitorTask = Task.Run(() => Monitor(cancellation.Token));
+        }
+
+        public object StopAndGetResult()
+        {
+            if (cancellation is null || monitorTask is null)
+            {
+                return BuildResult("not_started");
+            }
+
+            Thread.Sleep(1500);
+            cancellation.Cancel();
+
             try
             {
-                process.Kill(entireProcessTree: true);
+                monitorTask.Wait(TimeSpan.FromSeconds(3));
             }
-            catch
+            catch (AggregateException error)
             {
-                // Ignore kill failures, the timeout is already the actionable error.
+                lock (syncRoot)
+                {
+                    errors.Add(error.Flatten().InnerException?.Message ?? error.Message);
+                }
             }
 
-            throw new TimeoutException("Timeout aguardando retorno da UniDANFE.");
+            return BuildResult("completed");
         }
 
-        var stdout = stdoutTask.GetAwaiter().GetResult();
-        var stderr = stderrTask.GetAwaiter().GetResult();
-
-        if (process.ExitCode != 0)
+        public void Dispose()
         {
-            var output = Regex.Replace($"{stderr} {stdout}", "\\s+", " ").Trim();
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(output)
-                ? $"UniDANFE finalizou com código {process.ExitCode}."
-                : output);
+            cancellation?.Cancel();
+            cancellation?.Dispose();
         }
 
-        return (process.ExitCode, stdout, stderr);
-    }
-
-    private static string? ResolveUniDanfeExePath(DanfeConfig config)
-    {
-        var configuredCandidates = new[]
+        private void Monitor(CancellationToken token)
         {
-            config.ExePath,
-            Environment.GetEnvironmentVariable("UNINFE_DANFE_EXE"),
-            Environment.GetEnvironmentVariable("UNIDANFE_EXE")
-        };
-        var configuredPath = configuredCandidates
-            .Select(value => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Trim('"'))
-            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
 
-        if (!string.IsNullOrWhiteSpace(configuredPath))
-        {
-            return configuredPath;
+            while (!token.IsCancellationRequested && DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    InspectPrintQueues();
+                }
+                catch (Exception error)
+                {
+                    lock (syncRoot)
+                    {
+                        errors.Add(error.Message);
+                    }
+                }
+
+                Thread.Sleep(80);
+            }
         }
 
-        var autoCandidates = new[]
+        private void InspectPrintQueues()
         {
-            @"C:\Unimake\UniNFe\unidanfe.exe",
-            @"C:\UniNFe\unidanfe.exe",
-            @"C:\Unimake\UniDANFE\unidanfe.exe",
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Unimake", "UniNFe", "unidanfe.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Unimake", "UniNFe", "unidanfe.exe")
-        };
+            using var server = new LocalPrintServer();
+            var queues = server.GetPrintQueues(new[]
+            {
+                EnumeratedPrintQueueTypes.Local,
+                EnumeratedPrintQueueTypes.Connections
+            });
 
-        return autoCandidates
-            .Select(value => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Trim('"'))
-            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && File.Exists(value));
+            foreach (var queue in queues)
+            {
+                queue.Refresh();
+
+                foreach (var job in queue.GetPrintJobInfoCollection())
+                {
+                    if (!string.Equals(job.Name, printJobName, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var info = new PrintJobInfo(
+                        QueueName: queue.Name,
+                        JobId: job.JobIdentifier,
+                        DocumentName: job.Name,
+                        Status: job.JobStatus.ToString(),
+                        SubmittedAt: job.TimeJobSubmitted);
+                    var key = $"{info.QueueName}:{info.JobId}";
+
+                    lock (syncRoot)
+                    {
+                        if (observedJobKeys.Add(key))
+                        {
+                            observedJobs.Add(info);
+                        }
+
+                        if (keptJobs.Any(item => string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+
+                        if (keptJobs.Count < maxJobsToKeep)
+                        {
+                            keptJobs.Add(info);
+                            continue;
+                        }
+
+                        if (canceledJobs.Any(item => string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+                    }
+
+                    try
+                    {
+                        job.Cancel();
+
+                        lock (syncRoot)
+                        {
+                            canceledJobs.Add(info);
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        lock (syncRoot)
+                        {
+                            errors.Add($"Falha ao cancelar job {key}: {error.Message}");
+                        }
+                    }
+                }
+            }
+        }
+
+        private object BuildResult(string status)
+        {
+            lock (syncRoot)
+            {
+                return new
+                {
+                    status,
+                    printJobName,
+                    requestedPrinter = printerName,
+                    maxJobsToKeep,
+                    observedCount = observedJobs.Count,
+                    keptCount = keptJobs.Count,
+                    canceledCount = canceledJobs.Count,
+                    observedJobs = observedJobs.ToArray(),
+                    keptJobs = keptJobs.ToArray(),
+                    canceledJobs = canceledJobs.ToArray(),
+                    errors = errors.Distinct().Take(5).ToArray()
+                };
+            }
+        }
+
+        private sealed record PrintJobInfo(
+            string QueueName,
+            int JobId,
+            string DocumentName,
+            string Status,
+            DateTime SubmittedAt)
+        {
+            public string Key => $"{QueueName}:{JobId}";
+        }
     }
 
     private static string ExtractDanfeOperatorMessage(Exception error)
@@ -2371,13 +3513,7 @@ internal static class Program
 
         if (string.IsNullOrWhiteSpace(message))
         {
-            return "Não foi possível imprimir o DANFE pela UniDANFE.";
-        }
-
-        if (message.Contains("unidanfe.exe", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("UNINFE_DANFE_EXE", StringComparison.OrdinalIgnoreCase))
-        {
-            return message;
+            return "Não foi possível imprimir o DANFE pela UniDANFE integrada.";
         }
 
         if (message.Length > 220)
@@ -2385,7 +3521,7 @@ internal static class Program
             message = message[..220].TrimEnd('.', ' ', ';', ':') + ".";
         }
 
-        return $"Falha na UniDANFE: {message}";
+        return $"Falha na UniDANFE integrada: {message}";
     }
 
     private static DanfeNfceData ReadNfceDanfe(string xmlPath)
@@ -2448,121 +3584,19 @@ internal static class Program
             Items: items);
     }
 
-    private static void PrintNativeNfceDanfe(DanfeNfceData danfe, PrintConfig config, string? selectedPrinter)
+    private static string? ReadFiscalModelFromXml(string xmlPath)
     {
-        if (string.IsNullOrWhiteSpace(selectedPrinter))
+        try
         {
-            throw new InvalidOperationException("Impressora do Windows nao encontrada.");
+            var document = XDocument.Load(xmlPath, LoadOptions.PreserveWhitespace);
+            var modelo = ReadXmlValue(document, "mod");
+
+            return modelo is "55" or "65" ? modelo : null;
         }
-
-        var bobinaMm = Math.Clamp(config.BobinaMm ?? 80, 58, 210);
-        var lines = BuildNfceDanfeLines(danfe, bobinaMm);
-        var paperWidth = Math.Max(220, (int)Math.Round(bobinaMm / 25.4m * 100m));
-        var paperHeight = Math.Max(1200, lines.Count * 18 + 120);
-        var lineIndex = 0;
-
-        using var document = new PrintDocument
+        catch
         {
-            DocumentName = $"NFC-e {danfe.Serie}/{danfe.Numero}"
-        };
-
-        document.PrinterSettings.PrinterName = selectedPrinter;
-        document.DefaultPageSettings.PaperSize = new PaperSize("Bobina NFC-e", paperWidth, paperHeight);
-        document.DefaultPageSettings.Margins = new Margins(4, 4, 4, 4);
-        document.PrintPage += (_, args) =>
-        {
-            using var font = new Font("Consolas", bobinaMm >= 80 ? 8.2f : 7.2f, FontStyle.Regular, GraphicsUnit.Point);
-            using var brush = new SolidBrush(Color.Black);
-            var graphics = args.Graphics ?? throw new InvalidOperationException("Contexto de impressao indisponivel.");
-            var lineHeight = font.GetHeight(graphics) + 2f;
-            var x = (float)args.MarginBounds.Left;
-            var y = (float)args.MarginBounds.Top;
-            var bottom = (float)args.MarginBounds.Bottom;
-            var width = (float)args.MarginBounds.Width;
-
-            while (lineIndex < lines.Count)
-            {
-                if (y + lineHeight > bottom)
-                {
-                    args.HasMorePages = true;
-                    return;
-                }
-
-                graphics.DrawString(lines[lineIndex], font, brush, new RectangleF(x, y, width, lineHeight));
-                y += lineHeight;
-                lineIndex += 1;
-            }
-
-            args.HasMorePages = false;
-        };
-
-        document.Print();
-    }
-
-    private static List<string> BuildNfceDanfeLines(DanfeNfceData danfe, int bobinaMm)
-    {
-        var width = bobinaMm >= 80 ? 48 : 36;
-        var separator = new string('-', width);
-        var lines = new List<string>();
-
-        AddCentered(lines, Limit(danfe.EmitenteNome, width), width);
-        if (!string.IsNullOrWhiteSpace(danfe.EmitenteFantasia) && !string.Equals(danfe.EmitenteFantasia, danfe.EmitenteNome, StringComparison.OrdinalIgnoreCase))
-        {
-            AddCentered(lines, Limit(danfe.EmitenteFantasia, width), width);
+            return null;
         }
-
-        AddWrapped(lines, $"CNPJ {FormatCnpj(danfe.Cnpj)}  IE {danfe.Ie}", width);
-        AddWrapped(lines, danfe.Endereco, width);
-        AddWrapped(lines, $"{danfe.Municipio} - {danfe.Uf}", width);
-        lines.Add(separator);
-        AddCentered(lines, "DANFE NFC-e", width);
-        AddCentered(lines, "Documento Auxiliar da Nota Fiscal", width);
-        AddCentered(lines, "Eletronica para Consumidor Final", width);
-        lines.Add(separator);
-        lines.Add($"NFC-e {danfe.Numero}  Serie {danfe.Serie}");
-        if (!string.IsNullOrWhiteSpace(danfe.DhEmi))
-        {
-            lines.Add($"Emissao {FormatXmlDateTime(danfe.DhEmi)}");
-        }
-        if (!string.IsNullOrWhiteSpace(danfe.Protocolo))
-        {
-            lines.Add($"Protocolo {danfe.Protocolo}");
-        }
-        lines.Add(separator);
-        lines.Add("COD  DESCRICAO");
-        lines.Add("QTD x VL UNIT                 TOTAL");
-        lines.Add(separator);
-
-        foreach (var item in danfe.Items)
-        {
-            AddWrapped(lines, $"{item.Codigo} {item.Descricao}", width);
-            lines.Add(AlignLeftRight(
-                $"{FormatQuantity(item.Quantidade)} {item.Unidade} x {FormatMoney(item.ValorUnitario)}",
-                FormatMoney(item.Total),
-                width));
-        }
-
-        lines.Add(separator);
-        lines.Add(AlignLeftRight("TOTAL", FormatMoney(danfe.Total), width));
-        lines.Add(AlignLeftRight("VALOR PAGO", FormatMoney(danfe.Pago > 0 ? danfe.Pago : danfe.Total), width));
-        lines.Add(separator);
-        AddCentered(lines, "Consulte pela chave de acesso", width);
-        AddWrapped(lines, FormatAccessKey(danfe.Chave), width);
-
-        if (!string.IsNullOrWhiteSpace(danfe.QrCode))
-        {
-            lines.Add(separator);
-            AddCentered(lines, "QR Code NFC-e", width);
-            AddWrapped(lines, danfe.QrCode, width);
-        }
-
-        lines.Add(separator);
-        AddCentered(lines, "Caixa Agil PDV", width);
-        lines.Add("");
-        lines.Add("");
-        lines.Add("");
-
-        return lines;
     }
 
     private static XElement? FirstXmlElement(XContainer? container, string localName)
@@ -2582,86 +3616,6 @@ internal static class Program
         return decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : 0m;
-    }
-
-    private static void AddCentered(ICollection<string> lines, string value, int width)
-    {
-        var normalized = Limit(value, width);
-        var left = Math.Max(0, (width - normalized.Length) / 2);
-        lines.Add(new string(' ', left) + normalized);
-    }
-
-    private static void AddWrapped(ICollection<string> lines, string? value, int width)
-    {
-        var text = Regex.Replace(value ?? string.Empty, "\\s+", " ").Trim();
-
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return;
-        }
-
-        while (text.Length > width)
-        {
-            var splitAt = text.LastIndexOf(' ', Math.Min(width, text.Length - 1));
-
-            if (splitAt <= 0)
-            {
-                splitAt = width;
-            }
-
-            lines.Add(text[..splitAt].Trim());
-            text = text[splitAt..].Trim();
-        }
-
-        if (!string.IsNullOrWhiteSpace(text))
-        {
-            lines.Add(text);
-        }
-    }
-
-    private static string AlignLeftRight(string left, string right, int width)
-    {
-        left = Limit(left, width);
-        right = Limit(right, width);
-        var spaces = Math.Max(1, width - left.Length - right.Length);
-
-        return left + new string(' ', spaces) + right;
-    }
-
-    private static string FormatMoney(decimal value)
-    {
-        return value.ToString("C2", CultureInfo.GetCultureInfo("pt-BR")).Replace("\u00A0", " ");
-    }
-
-    private static string FormatQuantity(decimal value)
-    {
-        return value.ToString("0.####", CultureInfo.GetCultureInfo("pt-BR"));
-    }
-
-    private static string FormatCnpj(string value)
-    {
-        var digits = OnlyDigits(value).PadLeft(14, '0');
-
-        return $"{digits[..2]}.{digits.Substring(2, 3)}.{digits.Substring(5, 3)}/{digits.Substring(8, 4)}-{digits.Substring(12, 2)}";
-    }
-
-    private static string FormatAccessKey(string value)
-    {
-        var digits = OnlyDigits(value);
-
-        if (digits.Length != 44)
-        {
-            return value;
-        }
-
-        return string.Join(" ", Enumerable.Range(0, 11).Select(index => digits.Substring(index * 4, 4)));
-    }
-
-    private static string FormatXmlDateTime(string value)
-    {
-        return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed)
-            ? parsed.ToLocalTime().ToString("dd/MM/yyyy HH:mm:ss", CultureInfo.GetCultureInfo("pt-BR"))
-            : value;
     }
 
     private static FiscalResponse GenerateDanfePdfPending(FiscalRequest request)
@@ -2981,20 +3935,106 @@ internal static class Program
         return null;
     }
 
-    private static bool GetBool(JsonObject? node, string propertyName, bool fallback = false)
+    private static bool? GetOptionalBool(JsonObject? node, string propertyName)
     {
         if (node is null || !node.TryGetPropertyValue(propertyName, out var value) || value is null)
         {
-            return fallback;
+            return null;
+        }
+
+        if (value.GetValueKind() == JsonValueKind.String)
+        {
+            var text = value.GetValue<string>()?.Trim();
+
+            if (bool.TryParse(text, out var parsedBool))
+            {
+                return parsedBool;
+            }
+
+            return text?.ToLowerInvariant() switch
+            {
+                "1" or "sim" or "s" or "yes" or "y" => true,
+                "0" or "nao" or "n" or "no" => false,
+                _ => null
+            };
+        }
+
+        if (value.GetValueKind() == JsonValueKind.Number &&
+            value is JsonValue jsonValue &&
+            jsonValue.TryGetValue<int>(out var parsedNumber))
+        {
+            return parsedNumber != 0;
         }
 
         return value.GetValueKind() switch
         {
             JsonValueKind.True => true,
             JsonValueKind.False => false,
-            JsonValueKind.String when bool.TryParse(value.GetValue<string>(), out var parsed) => parsed,
-            _ => fallback
+            _ => null
         };
+    }
+
+    private static bool GetBool(JsonObject? node, string propertyName, bool fallback = false)
+    {
+        return GetOptionalBool(node, propertyName) ?? fallback;
+    }
+
+    private static string? FirstNonBlank(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static int? FirstInt(params int?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (value.HasValue)
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static PrintConfig BuildPrintConfig(JsonObject? impressao, JsonObject? printing)
+    {
+        var printerName = FirstNonBlank(
+            GetString(printing, "printerName"),
+            GetString(printing, "impressora"),
+            GetString(printing, "nomeImpressora"),
+            GetString(printing, "nome_impressora"),
+            GetString(impressao, "printerName"),
+            GetString(impressao, "impressora"),
+            GetString(impressao, "nomeImpressora"),
+            GetString(impressao, "nome_impressora"));
+
+        var useDefaultPrinter =
+            GetOptionalBool(printing, "useDefaultPrinter") ??
+            GetOptionalBool(printing, "usarImpressoraPadrao") ??
+            GetOptionalBool(printing, "usar_impressora_padrao") ??
+            GetOptionalBool(impressao, "useDefaultPrinter") ??
+            GetOptionalBool(impressao, "usarImpressoraPadrao") ??
+            GetOptionalBool(impressao, "usar_impressora_padrao") ??
+            string.IsNullOrWhiteSpace(printerName);
+
+        var bobinaMm = FirstInt(
+            GetInt(printing, "bobinaMm"),
+            GetInt(printing, "larguraBobinaMm"),
+            GetInt(printing, "largura_bobina_mm"),
+            GetInt(impressao, "bobinaMm"),
+            GetInt(impressao, "larguraBobinaMm"),
+            GetInt(impressao, "largura_bobina_mm"));
+
+        return new PrintConfig(printerName, useDefaultPrinter, bobinaMm);
     }
 
     private static JsonObject? GetObject(JsonObject? node, string propertyName)
@@ -3036,7 +4076,8 @@ internal static class Program
             var certificado = GetObject(node, "certificado") ?? GetObject(node, "certificate");
             var nfce = GetObject(node, "nfce");
             var nfe = GetObject(node, "nfe");
-            var impressao = GetObject(node, "impressao") ?? GetObject(node, "printing");
+            var impressao = GetObject(node, "impressao");
+            var printing = GetObject(node, "printing");
             var danfe = GetObject(node, "danfe") ?? GetObject(node, "unidanfe") ?? GetObject(node, "uninfe");
             var diretorios = GetObject(node, "diretorios") ?? GetObject(node, "directories");
             var endereco = GetObject(emitente, "endereco") ?? GetObject(emitente, "address");
@@ -3070,20 +4111,9 @@ internal static class Program
                 Nfe: new NfeConfig(
                     Serie: GetInt(nfe, "serie"),
                     UltimoNumero: GetInt(nfe, "ultimoNumero") ?? GetInt(nfe, "ultimo_numero") ?? GetInt(nfe, "proximoNumero") ?? GetInt(nfe, "proximo_numero")),
-                Impressao: new PrintConfig(
-                    PrinterName: GetString(impressao, "printerName") ?? GetString(impressao, "impressora") ?? GetString(impressao, "nomeImpressora"),
-                    UseDefaultPrinter: GetBool(impressao, "useDefaultPrinter", true) || GetBool(impressao, "usarImpressoraPadrao", false),
-                    BobinaMm: GetInt(impressao, "bobinaMm") ?? GetInt(impressao, "larguraBobinaMm")),
+                Impressao: BuildPrintConfig(impressao, printing),
                 Danfe: new DanfeConfig(
-                    ExePath: GetString(danfe, "exePath") ??
-                        GetString(danfe, "danfeExePath") ??
-                        GetString(danfe, "caminhoExe") ??
-                        GetString(node, "danfeExePath") ??
-                        GetString(node, "uninfeDanfeExePath") ??
-                        GetString(node, "uninfe_danfe_exe"),
-                    ConfigName: GetString(danfe, "configName") ?? GetString(danfe, "configuracao"),
-                    UseNativeFallback: GetBool(danfe, "useNativeFallback", false) ||
-                        GetBool(danfe, "usarFallbackNativo", false)),
+                    ConfigName: GetString(danfe, "configName") ?? GetString(danfe, "configuracao")),
                 Diretorios: new DirectoryConfig(
                     Xml: GetString(diretorios, "xml") ?? GetString(diretorios, "xmlDir"),
                     Logs: GetString(diretorios, "logs") ?? GetString(diretorios, "logsDir"),
@@ -3114,7 +4144,7 @@ internal static class Program
 
     private sealed record PrintConfig(string? PrinterName, bool UseDefaultPrinter, int? BobinaMm);
 
-    private sealed record DanfeConfig(string? ExePath, string? ConfigName, bool UseNativeFallback);
+    private sealed record DanfeConfig(string? ConfigName);
 
     private sealed record DirectoryConfig(string? Xml, string? Logs, string? Pdf);
 

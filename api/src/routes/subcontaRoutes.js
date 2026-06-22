@@ -12,6 +12,7 @@ router.post('/', controller.create);
 router.put('/:id/dados', controller.updateData);
 router.put('/:id/senha', controller.updatePassword);
 router.put('/:id/permissoes', controller.updatePermissions);
+router.post('/:id/ativar', controller.activate);
 router.delete('/:id', controller.remove);
 
 module.exports = router;

@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Subconta, Usuario } = require('../models');
+const { DespesaCaixa, Subconta, Usuario } = require('../models');
 
 const permissoesDisponiveis = [
   {
@@ -59,6 +59,7 @@ function normalizePermissoes(value) {
 
 function sanitizeSubconta(subconta) {
   const data = subconta.get ? subconta.get({ plain: true }) : { ...subconta };
+  const registrosVinculados = Number(data.registros_vinculados ?? 0);
 
   delete data.senha_hash;
   delete data.token_redefinicao_senha;
@@ -66,8 +67,20 @@ function sanitizeSubconta(subconta) {
 
   return {
     ...data,
+    registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
+    pode_excluir: registrosVinculados <= 0,
+    acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
     tipo_conta: 'subconta',
   };
+}
+
+async function getSubcontaRegistrosVinculados(usuarioId, subcontaId) {
+  return DespesaCaixa.count({
+    where: {
+      usuario_id: usuarioId,
+      lancado_por_subconta_id: subcontaId,
+    },
+  });
 }
 
 async function isEmailInUse(email, ignoredSubcontaId = null) {
@@ -143,7 +156,23 @@ module.exports = {
         ],
       });
 
-      return res.json(subcontas.map(sanitizeSubconta));
+      const registrosPorSubconta = new Map(
+        await Promise.all(
+          subcontas.map(async subconta => [
+            subconta.id,
+            await getSubcontaRegistrosVinculados(req.user.id, subconta.id),
+          ])
+        )
+      );
+
+      return res.json(
+        subcontas.map(subconta =>
+          sanitizeSubconta({
+            ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+            registros_vinculados: registrosPorSubconta.get(subconta.id) ?? 0,
+          })
+        )
+      );
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao listar subcontas.', detail: error.message });
     }
@@ -220,8 +249,12 @@ module.exports = {
 
       subconta.permissoes = normalizePermissoes(req.body?.permissoes);
       await subconta.save();
+      const registrosVinculados = await getSubcontaRegistrosVinculados(req.user.id, subconta.id);
 
-      return res.json(sanitizeSubconta(subconta));
+      return res.json(sanitizeSubconta({
+        ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+        registros_vinculados: registrosVinculados,
+      }));
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao atualizar permissões.', detail: error.message });
     }
@@ -262,8 +295,12 @@ module.exports = {
       subconta.nome = nome;
       subconta.email = email;
       await subconta.save();
+      const registrosVinculados = await getSubcontaRegistrosVinculados(req.user.id, subconta.id);
 
-      return res.json(sanitizeSubconta(subconta));
+      return res.json(sanitizeSubconta({
+        ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+        registros_vinculados: registrosVinculados,
+      }));
     } catch (error) {
       if (error.name === 'SequelizeUniqueConstraintError') {
         return res.status(409).json({ message: 'Este e-mail já está em uso.' });
@@ -298,9 +335,13 @@ module.exports = {
 
       subconta.senha = senha;
       await subconta.save();
+      const registrosVinculados = await getSubcontaRegistrosVinculados(req.user.id, subconta.id);
 
       return res.json({
-        subconta: sanitizeSubconta(subconta),
+        subconta: sanitizeSubconta({
+          ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+          registros_vinculados: registrosVinculados,
+        }),
         message: 'Senha atualizada.',
       });
     } catch (error) {
@@ -325,11 +366,70 @@ module.exports = {
         return res.status(404).json({ message: 'Subconta não encontrada.' });
       }
 
+      const registrosVinculados = await getSubcontaRegistrosVinculados(req.user.id, subconta.id);
+
+      if (registrosVinculados > 0) {
+        await subconta.update({ ativo: false });
+
+        return res.json({
+          action: 'deactivated',
+          subconta: sanitizeSubconta({
+            ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+            registros_vinculados: registrosVinculados,
+          }),
+          message: 'Subconta desativada para preservar os registros vinculados.',
+        });
+      }
+
       await subconta.destroy();
 
-      return res.status(204).send();
+      return res.json({
+        action: 'deleted',
+        id: subconta.id,
+        message: 'Subconta removida.',
+      });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao remover subconta.', detail: error.message });
+    }
+  },
+
+  async activate(req, res) {
+    try {
+      if (!ensureMainAccount(req, res)) {
+        return null;
+      }
+
+      const subconta = await Subconta.findOne({
+        where: {
+          id: req.params.id,
+          usuario_id: req.user.id,
+        },
+      });
+
+      if (!subconta) {
+        return res.status(404).json({ message: 'Subconta não encontrada.' });
+      }
+
+      if (await isEmailInUse(subconta.email, subconta.id)) {
+        return res.status(409).json({ message: 'Este e-mail já está em uso.' });
+      }
+
+      if (!subconta.ativo) {
+        await subconta.update({ ativo: true });
+      }
+
+      const registrosVinculados = await getSubcontaRegistrosVinculados(req.user.id, subconta.id);
+
+      return res.json({
+        action: 'activated',
+        subconta: sanitizeSubconta({
+          ...(subconta.get ? subconta.get({ plain: true }) : subconta),
+          registros_vinculados: registrosVinculados,
+        }),
+        message: 'Subconta ativada.',
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao ativar subconta.', detail: error.message });
     }
   },
 };

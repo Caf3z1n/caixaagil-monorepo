@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   ArrowRight,
   AtSign,
+  Ban,
   Check,
   Copy,
   Eye,
@@ -47,6 +48,10 @@ type Pdv = {
   ultima_sincronizacao_em: string | null;
   ultima_fila_offline_em: string | null;
   sincronizacao_pendente: boolean;
+  ativo: boolean;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
 };
 
 type PdvForm = {
@@ -66,7 +71,30 @@ type Subconta = {
   nome: string;
   permissoes: string[];
   ativo: boolean;
+  registros_vinculados: number;
+  pode_excluir: boolean;
+  acao_remocao: "excluir" | "desativar";
   ultimo_acesso_em: string | null;
+};
+
+type DeletePdvResponse =
+  | { action: "deleted"; id: number; message?: string }
+  | { action: "deactivated"; pdv: Pdv; message?: string };
+
+type ActivatePdvResponse = {
+  action: "activated";
+  pdv: Pdv;
+  message?: string;
+};
+
+type DeleteSubcontaResponse =
+  | { action: "deleted"; id: number; message?: string }
+  | { action: "deactivated"; subconta: Subconta; message?: string };
+
+type ActivateSubcontaResponse = {
+  action: "activated";
+  subconta: Subconta;
+  message?: string;
 };
 
 type SubcontaStep = "email" | "password" | "permissions" | "menu" | "data";
@@ -432,8 +460,13 @@ export function PdvAccessManager() {
     setFeedback(null);
 
     try {
-      await apiDelete(`/pdvs/${pdvToDelete.id}`, { token });
-      setPdvs((current) => current.filter((item) => item.id !== pdvToDelete.id));
+      const result = await apiDelete<DeletePdvResponse>(`/pdvs/${pdvToDelete.id}`, { token });
+
+      if (result?.action === "deactivated") {
+        setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
+      } else {
+        setPdvs((current) => current.filter((item) => item.id !== pdvToDelete.id));
+      }
 
       if (selectedPdvId === pdvToDelete.id) {
         setSelectedPdvId(null);
@@ -450,6 +483,30 @@ export function PdvAccessManager() {
       setFeedback({
         tone: "error",
         text: getApiMessage(error, "Não foi possível excluir o PDV.")
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleActivatePdv(pdv: Pdv) {
+    if (!token || pdv.ativo) {
+      return;
+    }
+
+    setIsSaving(true);
+    setFeedback(null);
+
+    try {
+      const result = await apiPost<ActivatePdvResponse>(`/pdvs/${pdv.id}/ativar`, {}, { token });
+
+      setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
+      setSelectedPdvId(result.pdv.id);
+      setFeedback({ tone: "success", text: result.message || "PDV ativado." });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text: getApiMessage(error, "Não foi possível ativar o PDV.")
       });
     } finally {
       setIsSaving(false);
@@ -741,13 +798,51 @@ export function PdvAccessManager() {
     setFeedback(null);
 
     try {
-      await apiDelete(`/subcontas/${subcontaToDelete.id}`, { token });
-      setSubcontas((current) => current.filter((subconta) => subconta.id !== subcontaToDelete.id));
+      const result = await apiDelete<DeleteSubcontaResponse>(`/subcontas/${subcontaToDelete.id}`, { token });
+
+      if (result?.action === "deactivated") {
+        setSubcontas((current) =>
+          current.map((subconta) => (subconta.id === result.subconta.id ? result.subconta : subconta))
+        );
+      } else {
+        setSubcontas((current) => current.filter((subconta) => subconta.id !== subcontaToDelete.id));
+      }
+
       setSubcontaToDelete(null);
     } catch (error) {
       setFeedback({
         tone: "error",
         text: getApiMessage(error, "Não foi possível remover a subconta.")
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleActivateSubconta(subconta: Subconta) {
+    if (!token || subconta.ativo) {
+      return;
+    }
+
+    setIsSaving(true);
+    setFeedback(null);
+
+    try {
+      const result = await apiPost<ActivateSubcontaResponse>(`/subcontas/${subconta.id}/ativar`, {}, { token });
+
+      setSubcontas((current) =>
+        current.map((currentSubconta) =>
+          currentSubconta.id === result.subconta.id ? result.subconta : currentSubconta
+        )
+      );
+      if (editingSubcontaId === result.subconta.id) {
+        setEditingSubcontaId(result.subconta.id);
+      }
+      setFeedback({ tone: "success", text: result.message || "Subconta ativada." });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text: getApiMessage(error, "Não foi possível ativar a subconta.")
       });
     } finally {
       setIsSaving(false);
@@ -804,7 +899,7 @@ export function PdvAccessManager() {
               ))
             ) : pdvs.length ? (
               pdvs.map((pdv) => (
-                <div className="platform-access-row" key={pdv.id}>
+                <div className={pdv.ativo ? "platform-access-row" : "platform-access-row platform-record-inactive"} key={pdv.id}>
                   <span className="platform-access-icon">
                     <Monitor aria-hidden="true" size={18} />
                   </span>
@@ -818,7 +913,7 @@ export function PdvAccessManager() {
                           pdv.pareado_em ? "platform-device-state-ok" : "platform-device-state-danger"
                         }
                       >
-                        {pdv.pareado_em ? "Pareado" : "Sem dispositivo"}
+                        {!pdv.ativo ? "Desativado" : pdv.pareado_em ? "Pareado" : "Sem dispositivo"}
                       </span>
                     </small>
                   </span>
@@ -837,7 +932,7 @@ export function PdvAccessManager() {
                     >
                       <Pencil aria-hidden="true" size={15} />
                     </button>
-                    {!pdv.pareado_em ? (
+                    {pdv.ativo && !pdv.pareado_em ? (
                       <button
                         type="button"
                         aria-label={`Gerar código de ativação para ${pdv.nome}`}
@@ -850,16 +945,29 @@ export function PdvAccessManager() {
                         <KeyRound aria-hidden="true" size={15} />
                       </button>
                     ) : null}
-                    <button
-                      type="button"
-                      aria-label={`Excluir ${pdv.nome}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setPdvToDelete(pdv);
-                      }}
-                    >
-                      <Trash2 aria-hidden="true" size={15} />
-                    </button>
+                    {!pdv.ativo ? (
+                      <button
+                        type="button"
+                        aria-label={`Ativar ${pdv.nome}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleActivatePdv(pdv);
+                        }}
+                      >
+                        <RotateCcw aria-hidden="true" size={15} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-label={`Excluir ${pdv.nome}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setPdvToDelete(pdv);
+                        }}
+                      >
+                        <Trash2 aria-hidden="true" size={15} />
+                      </button>
+                    )}
                   </span>
                 </div>
               ))
@@ -904,13 +1012,20 @@ export function PdvAccessManager() {
             </div>
 
             {subcontas.map((subconta) => (
-              <div className="platform-access-row platform-subaccount-row" key={subconta.id}>
+              <div
+                className={
+                  subconta.ativo
+                    ? "platform-access-row platform-subaccount-row"
+                    : "platform-access-row platform-subaccount-row platform-record-inactive"
+                }
+                key={subconta.id}
+              >
                 <span className="platform-access-icon">
                   <UserRound aria-hidden="true" size={18} />
                 </span>
                 <span className="platform-access-main-copy">
                   <strong>{subconta.nome}</strong>
-                  <small>{subconta.email}</small>
+                  <small>{subconta.ativo ? subconta.email : `${subconta.email} · Desativada`}</small>
                 </span>
                 {canManageSubcontas ? (
                   <span className="platform-row-actions">
@@ -921,6 +1036,15 @@ export function PdvAccessManager() {
                     >
                       <Pencil aria-hidden="true" size={15} />
                     </button>
+                  {!subconta.ativo ? (
+                    <button
+                      type="button"
+                      aria-label={`Ativar ${subconta.email}`}
+                      onClick={() => void handleActivateSubconta(subconta)}
+                    >
+                      <RotateCcw aria-hidden="true" size={15} />
+                    </button>
+                  ) : (
                     <button
                       type="button"
                       aria-label={`Remover ${subconta.email}`}
@@ -928,6 +1052,7 @@ export function PdvAccessManager() {
                     >
                       <Trash2 aria-hidden="true" size={15} />
                     </button>
+                  )}
                   </span>
                 ) : (
                   <span className="platform-row-actions" aria-hidden="true" />
@@ -978,14 +1103,30 @@ export function PdvAccessManager() {
                 <button className="platform-secondary-button" type="button" onClick={closePdvModal}>
                   Cancelar
                 </button>
-                <button className="platform-primary-button platform-save-button" disabled={isSaving} type="submit">
-                  {isSaving ? "Salvando" : editingId ? "Salvar" : "Criar PDV"}
-                  {isSaving ? (
-                    <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
-                  ) : (
-                    <Monitor aria-hidden="true" size={17} />
-                  )}
-                </button>
+                {editingId && editingPdv?.ativo === false ? (
+                  <button
+                    className="platform-primary-button platform-save-button"
+                    disabled={isSaving}
+                    type="button"
+                    onClick={() => void handleActivatePdv(editingPdv)}
+                  >
+                    {isSaving ? "Ativando" : "Ativar"}
+                    {isSaving ? (
+                      <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
+                    ) : (
+                      <RotateCcw aria-hidden="true" size={17} />
+                    )}
+                  </button>
+                ) : (
+                  <button className="platform-primary-button platform-save-button" disabled={isSaving} type="submit">
+                    {isSaving ? "Salvando" : editingId ? "Salvar" : "Criar PDV"}
+                    {isSaving ? (
+                      <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
+                    ) : (
+                      <Monitor aria-hidden="true" size={17} />
+                    )}
+                  </button>
+                )}
               </div>
             </form>
           </section>
@@ -1078,7 +1219,9 @@ export function PdvAccessManager() {
               <X aria-hidden="true" size={18} />
             </button>
             <div className="platform-modal-head">
-              <h2 id="platform-delete-modal-title">Excluir PDV?</h2>
+              <h2 id="platform-delete-modal-title">
+                {visiblePdvToDelete.acao_remocao === "desativar" ? "Desativar PDV?" : "Excluir PDV?"}
+              </h2>
               <p>{visiblePdvToDelete.identificacao} · {visiblePdvToDelete.nome}</p>
             </div>
             {modalFeedback}
@@ -1088,9 +1231,17 @@ export function PdvAccessManager() {
                 Cancelar
               </button>
               <button className="platform-primary-button platform-danger-button" disabled={isSaving} type="button" onClick={handleConfirmDelete}>
-                {isSaving ? "Excluindo" : "Excluir"}
+                {isSaving
+                  ? visiblePdvToDelete.acao_remocao === "desativar"
+                    ? "Desativando"
+                    : "Excluindo"
+                  : visiblePdvToDelete.acao_remocao === "desativar"
+                    ? "Desativar"
+                    : "Excluir"}
                 {isSaving ? (
                   <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
+                ) : visiblePdvToDelete.acao_remocao === "desativar" ? (
+                  <Ban aria-hidden="true" size={16} />
                 ) : (
                   <Trash2 aria-hidden="true" size={16} />
                 )}
@@ -1126,53 +1277,79 @@ export function PdvAccessManager() {
                 {modalFeedback}
 
                 <div className="platform-subaccount-action-list" aria-label="Ações da subconta">
-                  <button
-                    className="platform-subaccount-action-card"
-                    type="button"
-                    onClick={() => setSubcontaStep("data")}
-                  >
-                    <span className="platform-subaccount-action-icon">
-                      <AtSign aria-hidden="true" size={18} />
-                    </span>
-                    <span>
-                      <strong>Nome e e-mail</strong>
-                      <small>Atualize a identificação interna e o e-mail de acesso.</small>
-                    </span>
-                    <ArrowRight aria-hidden="true" size={17} />
-                  </button>
+                  {editingSubconta.ativo ? (
+                    <>
+                      <button
+                        className="platform-subaccount-action-card"
+                        type="button"
+                        onClick={() => setSubcontaStep("data")}
+                      >
+                        <span className="platform-subaccount-action-icon">
+                          <AtSign aria-hidden="true" size={18} />
+                        </span>
+                        <span>
+                          <strong>Nome e e-mail</strong>
+                          <small>Atualize a identificação interna e o e-mail de acesso.</small>
+                        </span>
+                        <ArrowRight aria-hidden="true" size={17} />
+                      </button>
 
-                  <button
-                    className="platform-subaccount-action-card"
-                    type="button"
-                    onClick={() => {
-                      setSubcontaForm((current) => ({ ...current, senha: "", confirmarSenha: "" }));
-                      setSubcontaStep("password");
-                    }}
-                  >
-                    <span className="platform-subaccount-action-icon">
-                      <LockKeyhole aria-hidden="true" size={18} />
-                    </span>
-                    <span>
-                      <strong>Nova senha</strong>
-                      <small>Defina uma nova senha para este acesso.</small>
-                    </span>
-                    <ArrowRight aria-hidden="true" size={17} />
-                  </button>
+                      <button
+                        className="platform-subaccount-action-card"
+                        type="button"
+                        onClick={() => {
+                          setSubcontaForm((current) => ({ ...current, senha: "", confirmarSenha: "" }));
+                          setSubcontaStep("password");
+                        }}
+                      >
+                        <span className="platform-subaccount-action-icon">
+                          <LockKeyhole aria-hidden="true" size={18} />
+                        </span>
+                        <span>
+                          <strong>Nova senha</strong>
+                          <small>Defina uma nova senha para este acesso.</small>
+                        </span>
+                        <ArrowRight aria-hidden="true" size={17} />
+                      </button>
 
-                  <button
-                    className="platform-subaccount-action-card"
-                    type="button"
-                    onClick={() => setSubcontaStep("permissions")}
-                  >
-                    <span className="platform-subaccount-action-icon">
-                      <SlidersHorizontal aria-hidden="true" size={18} />
-                    </span>
-                    <span>
-                      <strong>Acessos</strong>
-                      <small>Escolha quais áreas esta subconta pode abrir.</small>
-                    </span>
-                    <ArrowRight aria-hidden="true" size={17} />
-                  </button>
+                      <button
+                        className="platform-subaccount-action-card"
+                        type="button"
+                        onClick={() => setSubcontaStep("permissions")}
+                      >
+                        <span className="platform-subaccount-action-icon">
+                          <SlidersHorizontal aria-hidden="true" size={18} />
+                        </span>
+                        <span>
+                          <strong>Acessos</strong>
+                          <small>Escolha quais áreas esta subconta pode abrir.</small>
+                        </span>
+                        <ArrowRight aria-hidden="true" size={17} />
+                      </button>
+                    </>
+                  ) : null}
+
+                  {!editingSubconta.ativo ? (
+                    <button
+                      className="platform-subaccount-action-card platform-subaccount-action-card-activate"
+                      type="button"
+                      disabled={isSaving}
+                      onClick={() => void handleActivateSubconta(editingSubconta)}
+                    >
+                      <span className="platform-subaccount-action-icon">
+                        <RotateCcw aria-hidden="true" size={18} />
+                      </span>
+                      <span>
+                        <strong>Ativar subconta</strong>
+                        <small>Volta a permitir acesso com este login.</small>
+                      </span>
+                      {isSaving ? (
+                        <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
+                      ) : (
+                        <ArrowRight aria-hidden="true" size={17} />
+                      )}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -1501,7 +1678,9 @@ export function PdvAccessManager() {
               <X aria-hidden="true" size={18} />
             </button>
             <div className="platform-modal-head">
-              <h2 id="platform-delete-subaccount-modal-title">Remover subconta?</h2>
+              <h2 id="platform-delete-subaccount-modal-title">
+                {visibleSubcontaToDelete.acao_remocao === "desativar" ? "Desativar subconta?" : "Remover subconta?"}
+              </h2>
               <p>
                 {visibleSubcontaToDelete.nome} · {visibleSubcontaToDelete.email}
               </p>
@@ -1518,9 +1697,17 @@ export function PdvAccessManager() {
                 type="button"
                 onClick={handleConfirmSubcontaDelete}
               >
-                {isSaving ? "Removendo" : "Remover"}
+                {isSaving
+                  ? visibleSubcontaToDelete.acao_remocao === "desativar"
+                    ? "Desativando"
+                    : "Removendo"
+                  : visibleSubcontaToDelete.acao_remocao === "desativar"
+                    ? "Desativar"
+                    : "Remover"}
                 {isSaving ? (
                   <LoaderCircle className="platform-spin" aria-hidden="true" size={17} />
+                ) : visibleSubcontaToDelete.acao_remocao === "desativar" ? (
+                  <Ban aria-hidden="true" size={16} />
                 ) : (
                   <Trash2 aria-hidden="true" size={16} />
                 )}
