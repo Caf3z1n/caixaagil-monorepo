@@ -6315,7 +6315,7 @@ export function DesktopCashierFlow({
     <>
       <header className="pdv-system-header">
         <div className="pdv-system-brand">
-          <img className="pdv-system-brand-mark" src="/app-icon.png" alt="" />
+          <img className="pdv-system-brand-mark" src="./app-icon.png" alt="" />
           <span>
             <strong>CAIXA ÁGIL PDV</strong>
           </span>

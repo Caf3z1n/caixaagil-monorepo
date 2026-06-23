@@ -16,10 +16,10 @@ export const metadata: Metadata = {
   description: "App desktop do Caixa Ágil para ativação e operação do PDV.",
   icons: {
     icon: [
-      { url: "/favicon.ico" },
-      { url: "/app-icon.png", type: "image/png", sizes: "512x512" }
+      { url: "./favicon.ico" },
+      { url: "./app-icon.png", type: "image/png", sizes: "512x512" }
     ],
-    apple: [{ url: "/app-icon.png", type: "image/png", sizes: "512x512" }]
+    apple: [{ url: "./app-icon.png", type: "image/png", sizes: "512x512" }]
   }
 };
 
