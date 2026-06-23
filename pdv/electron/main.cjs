@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeTheme, shell } = require("electron");
 const path = require("node:path");
 const { createLocalPdvStore } = require("./local-store.cjs");
 const { createFiscalWorkerService } = require("./fiscal-worker-service.cjs");
@@ -181,6 +181,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   app.setName("Caixa Ágil PDV");
+  nativeTheme.themeSource = "light";
   registerUpdateService();
   const localStore = createLocalPdvStore(app);
   localStore.registerIpc(ipcMain);

@@ -1,6 +1,6 @@
 {
   "name": "caixaagil-pdv",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
   "main": "electron/main.cjs",
@@ -11,8 +11,8 @@
     "build:fiscal-worker": "dotnet build fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj",
     "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o electron/resources/fiscal-worker/win-x64",
     "build": "next build",
-    "dist": "npm run build && npm run publish:fiscal-worker && electron-builder --publish never",
-    "dist:dir": "npm run build && npm run publish:fiscal-worker && electron-builder --dir",
+    "dist": "npm run build && npm run publish:fiscal-worker && node scripts/build-electron.mjs --publish never",
+    "dist:dir": "npm run build && npm run publish:fiscal-worker && node scripts/build-electron.mjs --dir",
     "release": "npm run dist",
     "start": "electron electron/main.cjs",
     "typecheck": "tsc --noEmit"
@@ -48,7 +48,6 @@
     "directories": {
       "output": "dist"
     },
-    "artifactName": "caixaagil-pdv-setup.${ext}",
     "files": [
       "electron/**/*",
       "!electron/resources/**",

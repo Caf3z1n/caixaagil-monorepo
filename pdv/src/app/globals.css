@@ -1,4 +1,5 @@
-﻿:root {
+:root {
+  color-scheme: light;
   --surface: oklch(0.996 0.003 76);
   --ink: oklch(0.22 0.02 255);
   --ink-deep: oklch(0.16 0.026 255);

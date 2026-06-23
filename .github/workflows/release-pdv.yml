@@ -49,6 +49,7 @@ jobs:
           }
 
           $tag = "v$releaseVersion"
+          $installerBaseName = "caixa-agil-setup-v$releaseVersion"
 
           if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne $tag) {
             throw "A tag ${{ github.ref_name }} não corresponde à versão do PDV ($tag)."
@@ -57,6 +58,7 @@ jobs:
           "PDV_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PDV_RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PDV_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PDV_INSTALLER_BASENAME=$installerBaseName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Typecheck PDV
         run: npm --prefix pdv run typecheck
@@ -68,8 +70,8 @@ jobs:
         shell: pwsh
         run: |
           $artifacts = @(
-            "pdv/dist/caixaagil-pdv-setup.exe",
-            "pdv/dist/caixaagil-pdv-setup.exe.blockmap",
+            "pdv/dist/${{ env.PDV_INSTALLER_BASENAME }}.exe",
+            "pdv/dist/${{ env.PDV_INSTALLER_BASENAME }}.exe.blockmap",
             "pdv/dist/latest.yml"
           )
 
@@ -94,6 +96,6 @@ jobs:
           prerelease: false
           make_latest: true
           files: |
-            pdv/dist/caixaagil-pdv-setup.exe
-            pdv/dist/caixaagil-pdv-setup.exe.blockmap
+            pdv/dist/${{ env.PDV_INSTALLER_BASENAME }}.exe
+            pdv/dist/${{ env.PDV_INSTALLER_BASENAME }}.exe.blockmap
             pdv/dist/latest.yml
