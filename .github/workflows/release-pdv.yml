@@ -81,6 +81,28 @@ jobs:
             }
           }
 
+      - name: Verify updater bundle
+        shell: pwsh
+        run: |
+          $appAsar = "pdv/dist/win-unpacked/resources/app.asar"
+          $asarCli = "pdv/node_modules/.bin/asar.cmd"
+
+          if (-not (Test-Path $appAsar)) {
+            throw "Pacote app.asar nao encontrado: $appAsar"
+          }
+
+          $entries = & $asarCli list $appAsar
+          $requiredEntries = @(
+            "\node_modules\electron-updater\out\AppUpdater.js",
+            "\node_modules\debug\src\index.js"
+          )
+
+          foreach ($entry in $requiredEntries) {
+            if ($entries -notcontains $entry) {
+              throw "Dependencia do updater ausente no app.asar: $entry"
+            }
+          }
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:

@@ -1,6 +1,6 @@
 {
   "name": "caixaagil-pdv",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
   "main": "electron/main.cjs",
@@ -56,10 +56,10 @@
       "!**/*.map",
       "!**/*.pdb",
       "!**/*.log",
-      "!**/.next/**",
-      "!**/src/**",
-      "!**/fiscal-worker/**",
-      "!**/docs/**"
+      "!.next/**",
+      "!src/**",
+      "!fiscal-worker/**",
+      "!docs/**"
     ],
     "extraResources": [
       {
