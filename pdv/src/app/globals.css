@@ -2845,6 +2845,24 @@ button {
   padding-right: 36px;
 }
 
+.pdv-modal-head-with-icon {
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 14px;
+}
+
+.pdv-modal-head-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pdv-modal-head-icon {
+  display: inline-grid;
+  align-self: center;
+  justify-self: start;
+}
+
 .pdv-modal-head h2 {
   margin: 0;
   color: var(--ink-deep);
@@ -2869,11 +2887,12 @@ button {
 
 .pdv-update-modal-body {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .pdv-update-modal-icon {
   display: inline-grid;
+  flex: none;
   place-items: center;
   width: 48px;
   height: 48px;
@@ -2882,65 +2901,70 @@ button {
   color: var(--orange);
 }
 
-.pdv-update-modal-summary {
-  display: grid;
-  overflow: hidden;
-  border: 1px solid var(--line-cool);
-  border-radius: 12px;
-  background: oklch(0.99 0.002 248);
-}
-
-.pdv-update-modal-summary div {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  padding: 12px 14px;
-}
-
-.pdv-update-modal-summary div + div {
-  border-top: 1px solid var(--line-cool);
-}
-
-.pdv-update-modal-summary small {
-  color: var(--muted);
-  font-size: 0.76rem;
-  font-weight: 850;
-}
-
-.pdv-update-modal-summary strong {
-  min-width: 0;
-  color: var(--ink-deep);
-  font-size: 0.96rem;
-  font-weight: 950;
-  line-height: 1.2;
-  overflow-wrap: anywhere;
-  text-align: right;
-}
-
 .pdv-update-modal-progress {
-  height: 10px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 28px;
   overflow: hidden;
   border-radius: 999px;
   background: oklch(0.93 0.011 252);
 }
 
-.pdv-update-modal-progress span {
+.pdv-update-modal-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
   display: block;
   height: 100%;
-  min-width: 0;
+  width: var(--pdv-update-progress, 0%);
   border-radius: inherit;
   background: linear-gradient(90deg, var(--orange), oklch(0.68 0.19 42));
   transition: width 180ms ease;
 }
 
-.pdv-update-modal-body p {
+.pdv-update-modal-progress-label {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  font-size: 0.78rem;
+  font-weight: 950;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.pdv-update-modal-progress-label-base {
+  color: var(--ink-deep);
+}
+
+.pdv-update-modal-progress-label-fill {
+  z-index: 2;
+  color: var(--surface);
+  clip-path: inset(0 calc(100% - var(--pdv-update-progress, 0%)) 0 0);
+}
+
+.pdv-update-modal-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   margin: 0;
   color: var(--muted);
   font-size: 0.88rem;
   font-weight: 780;
   line-height: 1.45;
+}
+
+.pdv-update-modal-meta span {
+  min-width: 0;
+}
+
+.pdv-update-modal-meta strong {
+  flex: none;
+  color: var(--ink-deep);
+  font-size: 0.88rem;
+  font-weight: 950;
 }
 
 .pdv-delete-command-summary {

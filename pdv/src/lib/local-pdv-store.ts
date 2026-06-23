@@ -96,6 +96,7 @@ export type PdvUpdateStatus = {
   error?: string | null;
   progress?: number | null;
   sizeBytes?: number | null;
+  bytesPerSecond?: number | null;
 };
 
 export type LocalPdvStoreBridge = {

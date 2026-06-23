@@ -11,7 +11,14 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiPost } from "@/lib/api-client";
+import { getLocalPdvStore, type PdvUpdateStatus } from "@/lib/local-pdv-store";
 import { DesktopCashierFlow } from "./cashier-flow";
+import {
+  PdvUpdateModal,
+  pdvUpdatePreviewStatus,
+  previewPdvUpdateModalInDevelopment,
+  shouldShowPdvUpdateModal
+} from "./pdv-update-modal";
 
 type PdvStep = "intro" | "activation" | "success";
 type AppState = "checking" | "activation" | "system";
@@ -181,6 +188,12 @@ export default function PdvActivationPage() {
   const [activationCode, setActivationCode] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
   const [systemMessage, setSystemMessage] = useState("");
+  const [hasCompletedStartupUpdateCheck, setHasCompletedStartupUpdateCheck] = useState(false);
+  const [startupUpdateStatus, setStartupUpdateStatus] = useState<PdvUpdateStatus | null>(() =>
+    previewPdvUpdateModalInDevelopment ? pdvUpdatePreviewStatus : null
+  );
+  const [isStartupUpdateActionRunning, setIsStartupUpdateActionRunning] = useState(false);
+  const [dismissedStartupUpdateVersion, setDismissedStartupUpdateVersion] = useState<string | null>(null);
   const [isActivating, setIsActivating] = useState(false);
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
   const [initialPdvSettings, setInitialPdvSettings] = useState<ApiPdvSettings | null>(null);
@@ -189,8 +202,114 @@ export default function PdvActivationPage() {
   const stageRef = useRef<HTMLDivElement>(null);
   const activeIndex = Math.max(0, progressSteps.findIndex((item) => item.id === step));
   const canActivate = getRawCode(activationCode).length === 6 && !isActivating;
+  const startupUpdateVersionKey = startupUpdateStatus?.availableVersion || "unknown";
+  const shouldShowStartupUpdateModal =
+    shouldShowPdvUpdateModal(startupUpdateStatus) && dismissedStartupUpdateVersion !== startupUpdateVersionKey;
 
   useEffect(() => {
+    if (hasCompletedStartupUpdateCheck) {
+      return undefined;
+    }
+
+    if (previewPdvUpdateModalInDevelopment) {
+      setStartupUpdateStatus(pdvUpdatePreviewStatus);
+      return undefined;
+    }
+
+    const store = getLocalPdvStore();
+    let isMounted = true;
+
+    if (!store?.checkForUpdates) {
+      setHasCompletedStartupUpdateCheck(true);
+      return undefined;
+    }
+
+    const finishIfNoPendingUpdate = (status: PdvUpdateStatus | null) => {
+      if (!shouldShowPdvUpdateModal(status) && status?.status !== "checking") {
+        setHasCompletedStartupUpdateCheck(true);
+      }
+    };
+
+    const unsubscribe = store.onUpdateStatus?.((status) => {
+      if (!isMounted) {
+        return;
+      }
+
+      setStartupUpdateStatus(status);
+      finishIfNoPendingUpdate(status);
+    });
+
+    store.checkForUpdates()
+      .then((status) => {
+        if (!isMounted) {
+          return;
+        }
+
+        setStartupUpdateStatus(status);
+        finishIfNoPendingUpdate(status);
+      })
+      .catch(() => {
+        if (isMounted) {
+          setHasCompletedStartupUpdateCheck(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
+  }, [hasCompletedStartupUpdateCheck]);
+
+  useEffect(() => {
+    if (!previewPdvUpdateModalInDevelopment || startupUpdateStatus?.status !== "downloading") {
+      return undefined;
+    }
+
+    const updateProgressSteps = [
+      { progress: 24, bytesPerSecond: 4.8 * 1024 * 1024 },
+      { progress: 48, bytesPerSecond: 7.2 * 1024 * 1024 },
+      { progress: 72, bytesPerSecond: 6.6 * 1024 * 1024 },
+      { progress: 91, bytesPerSecond: 5.1 * 1024 * 1024 },
+      { progress: 100, bytesPerSecond: null }
+    ];
+    let progressIndex = 0;
+    const timer = window.setInterval(() => {
+      const nextStep = updateProgressSteps[progressIndex] ?? updateProgressSteps[updateProgressSteps.length - 1];
+      progressIndex += 1;
+
+      setStartupUpdateStatus((currentStatus) => {
+        if (currentStatus?.status !== "downloading") {
+          return currentStatus;
+        }
+
+        if (nextStep.progress >= 100) {
+          window.clearInterval(timer);
+          return {
+            ...currentStatus,
+            status: "downloaded",
+            progress: 100,
+            bytesPerSecond: null
+          };
+        }
+
+        return {
+          ...currentStatus,
+          progress: nextStep.progress,
+          bytesPerSecond: nextStep.bytesPerSecond
+        };
+      });
+    }, 600);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [startupUpdateStatus?.status]);
+
+  useEffect(() => {
+    if (!hasCompletedStartupUpdateCheck) {
+      return;
+    }
+
     const storedCredential = getStoredCredential();
     const storedPdv = getStoredPdv();
 
@@ -232,7 +351,7 @@ export default function PdvActivationPage() {
         setSystemMessage("Sem conexão com a API. Mantivemos este PDV aberto com a credencial local salva.");
         setAppState("system");
       });
-  }, []);
+  }, [hasCompletedStartupUpdateCheck]);
 
   useEffect(() => {
     if (appState !== "system" || connectivity !== "offline") {
@@ -330,6 +449,74 @@ export default function PdvActivationPage() {
     setConnectivity("online");
     setSystemMessage("");
     setAppState("system");
+  }
+
+  function continueAfterStartupUpdateCheck() {
+    setDismissedStartupUpdateVersion(startupUpdateVersionKey);
+    setHasCompletedStartupUpdateCheck(true);
+  }
+
+  async function downloadStartupPdvUpdate() {
+    if (previewPdvUpdateModalInDevelopment) {
+      setStartupUpdateStatus((currentStatus) => currentStatus
+        ? {
+            ...currentStatus,
+            status: "downloading",
+            progress: 8,
+            bytesPerSecond: 3.4 * 1024 * 1024
+          }
+        : currentStatus);
+      return;
+    }
+
+    const store = getLocalPdvStore();
+
+    if (!store?.downloadUpdate) {
+      continueAfterStartupUpdateCheck();
+      return;
+    }
+
+    setIsStartupUpdateActionRunning(true);
+
+    try {
+      const status = await store.downloadUpdate();
+      setStartupUpdateStatus(status);
+    } finally {
+      setIsStartupUpdateActionRunning(false);
+    }
+  }
+
+  async function installStartupPdvUpdate() {
+    if (previewPdvUpdateModalInDevelopment) {
+      continueAfterStartupUpdateCheck();
+      return;
+    }
+
+    const store = getLocalPdvStore();
+
+    if (!store?.installUpdate) {
+      continueAfterStartupUpdateCheck();
+      return;
+    }
+
+    setIsStartupUpdateActionRunning(true);
+
+    try {
+      await store.installUpdate();
+    } finally {
+      setIsStartupUpdateActionRunning(false);
+    }
+  }
+
+  async function runStartupPdvUpdateAction() {
+    if (startupUpdateStatus?.status === "downloaded") {
+      await installStartupPdvUpdate();
+      return;
+    }
+
+    if (startupUpdateStatus?.status === "available") {
+      await downloadStartupPdvUpdate();
+    }
   }
 
   async function activatePdv() {
@@ -463,16 +650,33 @@ export default function PdvActivationPage() {
   }
 
   if (appState === "checking") {
+    const loadingTitle = hasCompletedStartupUpdateCheck ? "Validando caixa" : "Validando sistema";
+    const loadingDescription = hasCompletedStartupUpdateCheck
+      ? "Estamos conferindo a credencial local deste PDV."
+      : "Estamos verificando se existe atualização disponível.";
+
     return (
-      <main className="pdv-onboarding-page">
-        <section className="pdv-onboarding-card pdv-onboarding-card-compact" aria-live="polite">
-          <span className="pdv-onboarding-mark">
-            <LoaderCircle aria-hidden="true" className="pdv-spin" size={24} />
-          </span>
-          <h1>Validando caixa</h1>
-          <p>Estamos conferindo a credencial local deste PDV.</p>
-        </section>
-      </main>
+      <>
+        <main className="pdv-onboarding-page">
+          <section className="pdv-onboarding-card pdv-onboarding-card-compact" aria-live="polite">
+            <span className="pdv-onboarding-mark">
+              <LoaderCircle aria-hidden="true" className="pdv-spin" size={24} />
+            </span>
+            <h1>{loadingTitle}</h1>
+            <p>{loadingDescription}</p>
+          </section>
+        </main>
+
+        {shouldShowStartupUpdateModal ? (
+          <PdvUpdateModal
+            hasOpenSession={false}
+            isBusy={isStartupUpdateActionRunning}
+            status={startupUpdateStatus}
+            onPostpone={continueAfterStartupUpdateCheck}
+            onUpdate={runStartupPdvUpdateAction}
+          />
+        ) : null}
+      </>
     );
   }
 

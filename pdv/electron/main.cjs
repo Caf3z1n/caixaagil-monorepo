@@ -10,7 +10,8 @@ const updateState = {
   availableVersion: null,
   error: null,
   progress: null,
-  sizeBytes: null
+  sizeBytes: null,
+  bytesPerSecond: null
 };
 const appIconPath = path.join(
   __dirname,
@@ -54,7 +55,7 @@ function registerUpdateService() {
       updater.autoInstallOnAppQuit = false;
 
       updater.on("checking-for-update", () => {
-        setUpdateState({ status: "checking", error: null, progress: null });
+        setUpdateState({ status: "checking", error: null, progress: null, bytesPerSecond: null });
       });
 
       updater.on("update-available", (info) => {
@@ -63,21 +64,24 @@ function registerUpdateService() {
           availableVersion: info?.version ?? null,
           error: null,
           progress: null,
-          sizeBytes: getUpdateSizeBytes(info)
+          sizeBytes: getUpdateSizeBytes(info),
+          bytesPerSecond: null
         });
       });
 
       updater.on("update-not-available", () => {
-        setUpdateState({ status: "idle", availableVersion: null, error: null, progress: null, sizeBytes: null });
+        setUpdateState({ status: "idle", availableVersion: null, error: null, progress: null, sizeBytes: null, bytesPerSecond: null });
       });
 
       updater.on("download-progress", (progress) => {
         const totalBytes = Number(progress?.total);
+        const bytesPerSecond = Number(progress?.bytesPerSecond);
 
         setUpdateState({
           status: "downloading",
           progress: Math.max(0, Math.min(100, Math.round(Number(progress?.percent ?? 0)))),
-          sizeBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : updateState.sizeBytes
+          sizeBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : updateState.sizeBytes,
+          bytesPerSecond: Number.isFinite(bytesPerSecond) && bytesPerSecond > 0 ? bytesPerSecond : null
         });
       });
 
@@ -86,7 +90,8 @@ function registerUpdateService() {
           status: "downloaded",
           availableVersion: info?.version ?? updateState.availableVersion,
           progress: 100,
-          sizeBytes: getUpdateSizeBytes(info) ?? updateState.sizeBytes
+          sizeBytes: getUpdateSizeBytes(info) ?? updateState.sizeBytes,
+          bytesPerSecond: null
         });
       });
 
@@ -95,7 +100,8 @@ function registerUpdateService() {
           status: "error",
           error: error instanceof Error ? error.message : "Não foi possível verificar atualização.",
           progress: null,
-          sizeBytes: null
+          sizeBytes: null,
+          bytesPerSecond: null
         });
       });
     } catch (error) {
@@ -103,7 +109,8 @@ function registerUpdateService() {
         status: "unsupported",
         error: error instanceof Error ? error.message : "Atualizador indisponível.",
         progress: null,
-        sizeBytes: null
+        sizeBytes: null,
+        bytesPerSecond: null
       });
     }
   }
@@ -134,18 +141,6 @@ function registerUpdateService() {
     return { ok: true };
   });
 
-  if (updater) {
-    setTimeout(() => {
-      updater.checkForUpdates().catch((error) => {
-        setUpdateState({
-          status: "error",
-          error: error instanceof Error ? error.message : "Não foi possível verificar atualização.",
-          progress: null,
-          sizeBytes: null
-        });
-      });
-    }, 6000);
-  }
 }
 
 function createWindow() {

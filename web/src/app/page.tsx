@@ -195,14 +195,19 @@ export default function HomePage() {
             </p>
 
             <div className="hero-actions">
+              <a
+                className="button button-primary hero-download-button"
+                href="/download/pdv"
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                Baixar PDV
+                <Download aria-hidden="true" size={18} />
+              </a>
               <SmoothScrollLink className="button button-primary" href="#planos">
                 Ver planos
                 <ArrowRight aria-hidden="true" size={19} />
               </SmoothScrollLink>
-              <a className="button button-ghost" href="/download/pdv">
-                Baixar PDV
-                <Download aria-hidden="true" size={18} />
-              </a>
             </div>
           </div>
 

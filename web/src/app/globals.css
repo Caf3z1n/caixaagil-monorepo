@@ -2529,6 +2529,14 @@ html[data-auth-step-fallback="true"][data-auth-step-motion="backward"] .auth-ste
     0 28px 56px -28px oklch(0.31 0.14 38 / 0.62);
 }
 
+.hero .hero-download-button {
+  min-width: 168px;
+  min-height: 50px;
+  padding-inline: 22px;
+  border-radius: 14px;
+  font-size: 0.95rem;
+}
+
 .hero .button-primary:hover {
   background: var(--surface);
   box-shadow:
