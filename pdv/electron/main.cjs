@@ -3,6 +3,10 @@ const path = require("node:path");
 const { createLocalPdvStore } = require("./local-store.cjs");
 const { createFiscalWorkerService } = require("./fiscal-worker-service.cjs");
 
+// Mantem o pacote menor evitando backends graficos opcionais removidos no empacotamento.
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch("disable-features", "Vulkan,D3D12Rasterization");
+
 const isDev = !app.isPackaged;
 const updateState = {
   status: isDev ? "unsupported" : "idle",

@@ -25,6 +25,12 @@ npm run build:web
 - Use uma frase curta, objetiva e no imperativo ou presente, por exemplo: `Ajusta fluxo de convênios no PDV`.
 - Evite mensagens genéricas como `update`, `fix` ou `changes`; descreva a mudança principal feita no projeto.
 
+## Versões do PDV
+
+- Releases do PDV devem usar versão pública com uma casa decimal, por exemplo `v0.8`, `v0.9`, `v1.0`.
+- Como `package.json` exige semver, use `x.y.0` em `pdv/package.json`; o build já transforma isso em instalador/tag `vx.y`.
+- Não publique versões públicas em formato patch como `v0.8.1`, salvo pedido explícito.
+
 ## Direção de produto
 
 - Este monorepo é a v2 do Caixa Ágil.
