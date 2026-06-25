@@ -151,9 +151,17 @@ async function cancelMercadoPagoPreapproval(preapprovalId) {
     return null;
   }
 
-  return mercadoPagoPut(`/preapproval/${encodeURIComponent(preapprovalId)}`, {
-    status: 'canceled',
-  });
+  try {
+    return await updateMercadoPagoPreapprovalStatus(preapprovalId, 'canceled');
+  } catch (error) {
+    const message = String(error?.message || '').toLowerCase();
+
+    if (error?.statusCode !== 400 || !message.includes('invalid preapproval status param')) {
+      throw error;
+    }
+
+    return updateMercadoPagoPreapprovalStatus(preapprovalId, 'cancelled');
+  }
 }
 
 async function updateMercadoPagoPreapprovalStatus(preapprovalId, status) {
