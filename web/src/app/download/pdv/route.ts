@@ -12,7 +12,7 @@ type GitHubRelease = {
 const latestReleaseApiUrl = "https://api.github.com/repos/Caf3z1n/caixaagil-monorepo/releases/latest";
 const fallbackDownloadUrl =
   "https://github.com/Caf3z1n/caixaagil-monorepo/releases/latest/download/caixa-agil-setup-v0.3.exe";
-const versionedInstallerPattern = /^caixa-agil-setup-v\d+\.\d+\.exe$/i;
+const versionedInstallerPattern = /^caixa-agil-setup-v\d+\.\d+(?:\.\d+)?\.exe$/i;
 
 export const dynamic = "force-dynamic";
 
