@@ -444,10 +444,7 @@ module.exports = {
       try {
         reservedResult = await sequelize.transaction(async transaction => {
           const codigoAssinatura = await findCodigoAssinaturaDisponivel(codigoAssinaturaInput, {
-            lock: {
-              level: transaction.LOCK.UPDATE,
-              of: CodigoAssinatura,
-            },
+            lock: transaction.LOCK.UPDATE,
             transaction,
           });
           const planoPersonalizado = buildPlanoFromCodigoAssinatura(codigoAssinatura);

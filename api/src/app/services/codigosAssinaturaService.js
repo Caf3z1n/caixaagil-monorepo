@@ -138,6 +138,50 @@ function getTrialDiasFromCodigo(data) {
   return Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
 }
 
+function getCodigoAssinaturaIncludes() {
+  return [
+    {
+      model: Plano,
+      as: 'plano',
+      required: true,
+      where: {
+        ativo: true,
+        publico: false,
+      },
+    },
+    {
+      model: PlanoVersao,
+      as: 'plano_versao',
+      required: true,
+      where: {
+        ativo: true,
+        vigente_de: { [Op.lte]: new Date() },
+        [Op.or]: [{ vigente_ate: null }, { vigente_ate: { [Op.gt]: new Date() } }],
+      },
+      include: [
+        {
+          model: PlanoRecurso,
+          as: 'recursos',
+          separate: true,
+          order: [
+            ['ordem', 'ASC'],
+            ['id', 'ASC'],
+          ],
+        },
+        {
+          model: PlanoLimite,
+          as: 'limites',
+          separate: true,
+          order: [
+            ['ordem', 'ASC'],
+            ['id', 'ASC'],
+          ],
+        },
+      ],
+    },
+  ];
+}
+
 function buildPlanoFromCodigoAssinatura(codigoAssinatura) {
   const data = toPlain(codigoAssinatura);
   const versao = data?.plano_versao;
@@ -179,56 +223,39 @@ async function findCodigoAssinaturaDisponivel(codigo, options = {}) {
   }
 
   const transaction = options.transaction || null;
-  const codigoAssinatura = await CodigoAssinatura.findOne({
-    where: {
-      codigo_hash: hashCodigoAssinatura(normalized),
-      ativo: true,
-      [Op.or]: [{ expira_em: null }, { expira_em: { [Op.gt]: new Date() } }],
-    },
-    include: [
-      {
-        model: Plano,
-        as: 'plano',
-        required: true,
-        where: {
-          ativo: true,
-          publico: false,
-        },
+  const where = {
+    codigo_hash: hashCodigoAssinatura(normalized),
+    ativo: true,
+    [Op.or]: [{ expira_em: null }, { expira_em: { [Op.gt]: new Date() } }],
+  };
+
+  let codigoAssinatura = null;
+
+  if (options.lock) {
+    const lockedCodigoAssinatura = await CodigoAssinatura.findOne({
+      where,
+      lock: options.lock?.level || options.lock,
+      transaction,
+    });
+
+    if (!lockedCodigoAssinatura || getCodigoAssinaturaStatus(lockedCodigoAssinatura) !== 'disponivel') {
+      return null;
+    }
+
+    codigoAssinatura = await CodigoAssinatura.findOne({
+      where: {
+        id: lockedCodigoAssinatura.id,
       },
-      {
-        model: PlanoVersao,
-        as: 'plano_versao',
-        required: true,
-        where: {
-          ativo: true,
-          vigente_de: { [Op.lte]: new Date() },
-          [Op.or]: [{ vigente_ate: null }, { vigente_ate: { [Op.gt]: new Date() } }],
-        },
-        include: [
-          {
-            model: PlanoRecurso,
-            as: 'recursos',
-            separate: true,
-            order: [
-              ['ordem', 'ASC'],
-              ['id', 'ASC'],
-            ],
-          },
-          {
-            model: PlanoLimite,
-            as: 'limites',
-            separate: true,
-            order: [
-              ['ordem', 'ASC'],
-              ['id', 'ASC'],
-            ],
-          },
-        ],
-      },
-    ],
-    lock: options.lock || undefined,
-    transaction,
-  });
+      include: getCodigoAssinaturaIncludes(),
+      transaction,
+    });
+  } else {
+    codigoAssinatura = await CodigoAssinatura.findOne({
+      where,
+      include: getCodigoAssinaturaIncludes(),
+      transaction,
+    });
+  }
 
   if (!codigoAssinatura || getCodigoAssinaturaStatus(codigoAssinatura) !== 'disponivel') {
     return null;
