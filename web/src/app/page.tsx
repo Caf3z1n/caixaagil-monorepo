@@ -2,9 +2,7 @@
 import type { CSSProperties } from "react";
 import {
   ArrowRight,
-  Check,
-  Download,
-  X
+  Download
 } from "lucide-react";
 
 import { AuthFlowModal } from "@/components/auth-flow-modal";
@@ -12,6 +10,7 @@ import { FaqAccordion } from "@/components/faq-accordion";
 import { HeroProductStories } from "@/components/hero-product-stories";
 import { LandingEffects } from "@/components/landing-effects";
 import { LandingNav } from "@/components/landing-nav";
+import { LandingPlans } from "@/components/landing-plans";
 import { LandingSessionRedirect } from "@/components/landing-session-redirect";
 import { SmoothScrollLink } from "@/components/smooth-scroll-link";
 import { TypewriterHeading } from "@/components/typewriter-heading";
@@ -20,8 +19,6 @@ const headerBackdropStyle: CSSProperties = {
   backdropFilter: "blur(var(--header-backdrop-blur))",
   WebkitBackdropFilter: "blur(var(--header-backdrop-blur))"
 };
-
-type PlanId = "inicial" | "completo";
 
 const productHighlights = [
   {
@@ -70,52 +67,6 @@ const productHighlights = [
     points: ["Fechamento do turno", "Convênios registrados", "NFC-e/NF-e"]
   }
 ] as const;
-
-const plans: Array<{
-  id: PlanId;
-  name: string;
-  price: string;
-  image: string;
-  alt: string;
-  text: string;
-  cta: string;
-  featured?: boolean;
-  features: Array<{ label: string; included: boolean }>;
-}> = [
-  {
-    id: "inicial",
-    name: "Inicial",
-    price: "299",
-    image: "/planos/plano-inicial-personagem.png",
-    alt: "Personagem 3D do plano inicial ao lado de um caixa com leitor, impressora e estoque.",
-    text: "Sem fidelidade. Cancele quando quiser.",
-    cta: "Contratar Inicial",
-    features: [
-      { label: "PDV desktop local", included: true },
-      { label: "Vendas e comanda digital", included: true },
-      { label: "Controle de estoque", included: true },
-      { label: "Fechamento do turno", included: true },
-      { label: "NF-e/NFC-e com contingência", included: false }
-    ]
-  },
-  {
-    id: "completo",
-    name: "Completo",
-    price: "499",
-    image: "/planos/plano-completo-personagem-v2.png",
-    alt: "Personagem 3D do plano completo ao lado de caixa, documentos fiscais e relatórios.",
-    text: "Sem fidelidade. Cancele quando quiser.",
-    cta: "Contratar Completo",
-    featured: true,
-    features: [
-      { label: "PDV desktop local", included: true },
-      { label: "Vendas e comanda digital", included: true },
-      { label: "Controle de estoque", included: true },
-      { label: "Fechamento do turno", included: true },
-      { label: "NF-e/NFC-e com contingência", included: true }
-    ]
-  }
-];
 
 const faqItems = [
   {
@@ -262,69 +213,7 @@ export default function HomePage() {
           <h2 id="plans-title">Planos</h2>
         </div>
 
-        <div className="plan-cards" aria-label="Planos do Caixa Ágil">
-          {plans.map((plan) => (
-            <article
-              className={plan.featured ? "plan-card plan-card-featured" : "plan-card"}
-              key={plan.name}
-              data-reveal
-              data-reveal-loop
-            >
-              <div className="plan-content">
-                <div className="plan-card-head">
-                  <div>
-                    <h3>{plan.name}</h3>
-
-                    <div className="plan-price" aria-label={`R$ ${plan.price} por mês`}>
-                      <span>R$</span>
-                      <strong>{plan.price}</strong>
-                      <em>/mês</em>
-                    </div>
-
-                    <p className="plan-text">
-                      Sem fidelidade.
-                      <br />
-                      Cancele quando quiser.
-                    </p>
-                  </div>
-
-                  <div className="plan-visual" aria-hidden="true">
-                    <Image
-                      src={plan.image}
-                      alt=""
-                      width={plan.featured ? 1149 : 1024}
-                      height={plan.featured ? 1369 : 1536}
-                      sizes="(max-width: 820px) 42vw, 220px"
-                    />
-                  </div>
-                </div>
-
-                <ul aria-label={`Recursos do plano ${plan.name}`}>
-                  {plan.features.map((feature) => (
-                    <li
-                      className={feature.included ? "plan-feature-included" : "plan-feature-missing"}
-                      key={feature.label}
-                    >
-                      {feature.included ? (
-                        <Check aria-hidden="true" size={17} />
-                      ) : (
-                        <X aria-hidden="true" size={17} />
-                      )}
-                      {feature.label}
-                    </li>
-                  ))}
-                </ul>
-
-                <AuthFlowModal
-                  buttonClassName={plan.featured ? "button button-primary" : "button button-outline"}
-                  buttonLabel={plan.cta}
-                  initialPlan={plan.id}
-                  triggerIcon="chevron"
-                />
-              </div>
-            </article>
-          ))}
-        </div>
+        <LandingPlans />
       </section>
 
       <section className="faq section-reveal" id="faq" aria-labelledby="faq-title" data-reveal>
