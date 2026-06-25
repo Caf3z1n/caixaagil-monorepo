@@ -15,7 +15,7 @@ const logoFont = Sora({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "https://caixaagil.eticasistemas.com.br"
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://caixaagil.tech"
   ),
   title: {
     default: "Caixa Ágil | PDV para vender, controlar estoque e emitir NF",
