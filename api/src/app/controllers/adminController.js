@@ -779,6 +779,9 @@ module.exports = {
     try {
       const [planos, assinaturasAtivas] = await Promise.all([
         Plano.findAll({
+          where: {
+            ativo: true,
+          },
           include: [
             {
               model: PlanoVersao,
@@ -1100,6 +1103,130 @@ module.exports = {
 
       return res.status(500).json({
         message: 'Erro ao atualizar plano administrativo.',
+        detail: error.message,
+      });
+    }
+  },
+
+  async deletePlan(req, res) {
+    const planoId = normalizeText(req.params.id, 80);
+    const plano = await Plano.findByPk(planoId);
+
+    if (!plano) {
+      return res.status(404).json({ message: 'Plano nao encontrado.' });
+    }
+
+    try {
+      const result = await sequelize.transaction(async transaction => {
+        const versoes = await PlanoVersao.findAll({
+          attributes: ['id'],
+          where: { plano_id: plano.id },
+          transaction,
+        });
+        const versaoIds = versoes.map(versao => versao.id);
+        const [assinaturasCount, codigosUsadosCount] = await Promise.all([
+          Assinatura.count({
+            where: {
+              [Op.or]: [
+                { plano: plano.id },
+                ...(versaoIds.length ? [{ plano_versao_id: { [Op.in]: versaoIds } }] : []),
+              ],
+            },
+            transaction,
+          }),
+          CodigoAssinatura.count({
+            where: {
+              plano_id: plano.id,
+              [Op.or]: [
+                { usado_em: { [Op.ne]: null } },
+                { usado_por_usuario_id: { [Op.ne]: null } },
+                { usos_realizados: { [Op.gt]: 0 } },
+              ],
+            },
+            transaction,
+          }),
+        ]);
+        const hasHistory = assinaturasCount > 0 || codigosUsadosCount > 0;
+
+        if (hasHistory) {
+          const now = new Date();
+
+          await Plano.update(
+            {
+              ativo: false,
+              publico: false,
+            },
+            {
+              where: { id: plano.id },
+              transaction,
+            }
+          );
+          await PlanoVersao.update(
+            {
+              ativo: false,
+              vigente_ate: now,
+            },
+            {
+              where: { plano_id: plano.id },
+              transaction,
+            }
+          );
+          await CodigoAssinatura.update(
+            {
+              ativo: false,
+            },
+            {
+              where: { plano_id: plano.id },
+              transaction,
+            }
+          );
+
+          return {
+            arquivado: true,
+            removido: false,
+          };
+        }
+
+        await CodigoAssinatura.destroy({
+          where: { plano_id: plano.id },
+          transaction,
+        });
+
+        if (versaoIds.length) {
+          await PlanoRecurso.destroy({
+            where: { plano_versao_id: { [Op.in]: versaoIds } },
+            transaction,
+          });
+          await PlanoLimite.destroy({
+            where: { plano_versao_id: { [Op.in]: versaoIds } },
+            transaction,
+          });
+          await PlanoVersao.destroy({
+            where: { id: { [Op.in]: versaoIds } },
+            transaction,
+          });
+        }
+
+        await Plano.destroy({
+          where: { id: plano.id },
+          transaction,
+        });
+
+        return {
+          arquivado: false,
+          removido: true,
+        };
+      });
+
+      return res.json({
+        ...result,
+        message: result.arquivado
+          ? 'Plano arquivado. O historico das assinaturas foi preservado.'
+          : 'Plano excluido.',
+      });
+    } catch (error) {
+      return res.status(500).json({
+        message: 'Erro ao excluir plano administrativo.',
         detail: error.message,
       });
     }

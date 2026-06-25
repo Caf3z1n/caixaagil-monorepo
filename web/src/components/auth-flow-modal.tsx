@@ -388,7 +388,8 @@ export function AuthFlowModal({
       setCustomCodeMessage("");
 
       const result = await apiPost<ValidateCodeResponse>("/assinaturas/codigo/validar", {
-        codigo_assinatura: code
+        codigo_assinatura: code,
+        email
       });
       const normalizedPlan = normalizePlan(result.plano, result.codigo);
 

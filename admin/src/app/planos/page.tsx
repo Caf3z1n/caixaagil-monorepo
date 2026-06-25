@@ -15,11 +15,12 @@ import {
   Plus,
   ReceiptText,
   Sparkles,
+  Trash2,
   X
 } from "lucide-react";
 
 import { AdminFrame } from "@/components/admin-frame";
-import { ApiError, apiGet, apiPost, apiPut } from "@/lib/api-client";
+import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
 import { clearAdminSession, getStoredAdminAuthToken } from "@/lib/admin-session";
 import { formatCurrency } from "@/lib/formatters";
 
@@ -102,6 +103,12 @@ type PlanosResponse = {
 type SavePlanResponse = {
   plano: PlanoAdmin;
   codigo?: CodigoAssinatura | null;
+};
+
+type DeletePlanResponse = {
+  arquivado?: boolean;
+  removido?: boolean;
+  message?: string;
 };
 
 type PlanFormState = {
@@ -302,8 +309,10 @@ export default function AdminPlanosPage() {
   const [planos, setPlanos] = useState<PlanoAdmin[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<PlanoAdmin | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [form, setForm] = useState<PlanFormState>(initialFormState);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [filter, setFilter] = useState<PlanFilter>("todos");
@@ -365,6 +374,7 @@ export default function AdminPlanosPage() {
 
   function openCreateModal() {
     setEditingPlan(null);
+    setConfirmingDelete(false);
     setForm(initialFormState);
     setIsModalOpen(true);
     setFeedback(null);
@@ -372,18 +382,20 @@ export default function AdminPlanosPage() {
 
   function openEditModal(plano: PlanoAdmin) {
     setEditingPlan(plano);
+    setConfirmingDelete(false);
     setForm(buildFormFromPlan(plano));
     setIsModalOpen(true);
     setFeedback(null);
   }
 
   function closeModal() {
-    if (isSubmitting) {
+    if (isSubmitting || isDeleting) {
       return;
     }
 
     setIsModalOpen(false);
     setEditingPlan(null);
+    setConfirmingDelete(false);
     setForm(initialFormState);
   }
 
@@ -436,12 +448,42 @@ export default function AdminPlanosPage() {
 
       setIsModalOpen(false);
       setEditingPlan(null);
+      setConfirmingDelete(false);
       setForm(initialFormState);
       await loadPlanos(token);
     } catch (error) {
       setFeedback(getErrorMessage(error, "Não foi possível salvar o plano."));
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function handleDeletePlan() {
+    if (!token || !editingPlan || isSubmitting || isDeleting) {
+      return;
+    }
+
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      setFeedback(null);
+      return;
+    }
+
+    try {
+      setIsDeleting(true);
+      setFeedback(null);
+
+      await apiDelete<DeletePlanResponse>(`/admin/planos/${encodeURIComponent(editingPlan.id)}`, { token });
+
+      setIsModalOpen(false);
+      setEditingPlan(null);
+      setConfirmingDelete(false);
+      setForm(initialFormState);
+      await loadPlanos(token);
+    } catch (error) {
+      setFeedback(getErrorMessage(error, "Não foi possível excluir o plano."));
+    } finally {
+      setIsDeleting(false);
     }
   }
 
@@ -859,14 +901,32 @@ export default function AdminPlanosPage() {
                     </>
                   )}
 
+                  {editingPlan && confirmingDelete ? (
+                    <div className="admin-plan-delete-warning" role="alert">
+                      <AlertTriangle aria-hidden="true" size={17} />
+                      <span>
+                        <strong>Confirmar exclusão de {editingPlan.nome}</strong>
+                        <small>Se houver assinaturas ou código usado, o plano será arquivado para preservar o histórico.</small>
+                      </span>
+                    </div>
+                  ) : null}
+
                   <footer className="admin-dialog-actions">
                     <button className="admin-secondary-button" type="button" onClick={closeModal}>
                       Cancelar
                     </button>
-                    <button className="admin-confirm-button" disabled={isSubmitting} type="submit">
-                      {isSubmitting ? <LoaderCircle aria-hidden="true" className="admin-spin" size={17} /> : <CheckCircle2 aria-hidden="true" size={17} />}
-                      {editingPlan ? "Salvar" : "Cadastrar"}
-                    </button>
+                    <div className="admin-dialog-action-cluster">
+                      {editingPlan ? (
+                        <button className="admin-danger-button" disabled={isSubmitting || isDeleting} type="button" onClick={handleDeletePlan}>
+                          {isDeleting ? <LoaderCircle aria-hidden="true" className="admin-spin" size={17} /> : <Trash2 aria-hidden="true" size={17} />}
+                          {confirmingDelete ? "Confirmar exclusão" : "Excluir"}
+                        </button>
+                      ) : null}
+                      <button className="admin-confirm-button" disabled={isSubmitting || isDeleting} type="submit">
+                        {isSubmitting ? <LoaderCircle aria-hidden="true" className="admin-spin" size={17} /> : <CheckCircle2 aria-hidden="true" size={17} />}
+                        {editingPlan ? "Salvar" : "Cadastrar"}
+                      </button>
+                    </div>
                   </footer>
                 </form>
               )}

@@ -345,12 +345,89 @@ async function testCustomPaidTrialCode(adminToken) {
     'next payment should be close to 30 trial days'
   );
 
+  const sameUserValidation = await request('POST', '/assinaturas/codigo/validar', {
+    body: { email, codigo_assinatura: code },
+  });
+  assert.equal(sameUserValidation.data.checkout_pendente, true);
+  assert.equal(sameUserValidation.data.plano.id, paidPlan.plano.id);
+
+  const reopenedCheckout = await request('POST', '/assinaturas/checkout', {
+    body: {
+      email,
+      codigo_assinatura: code,
+    },
+  });
+  assert.equal(reopenedCheckout.data.reused, true);
+  assert.equal(reopenedCheckout.data.checkoutToken, checkout.data.checkoutToken);
+  assert.equal(reopenedCheckout.data.checkoutUrl, checkout.data.checkoutUrl);
+
   await request('POST', '/assinaturas/codigo/validar', {
     expected: 404,
     body: { codigo_assinatura: code },
   });
 
   return paidPlan.plano.id;
+}
+
+async function testAdminPlanDeletion(adminToken) {
+  log('validando exclusao e arquivamento de planos administrativos');
+  const removablePlan = await createPlan(adminToken, {
+    nome: `${namePrefix} Excluir Sem Historico`,
+    personalizado: false,
+    valor_centavos: 1230,
+    emissao_fiscal: false,
+    limite_pdvs: 1,
+    limite_subcontas: 0,
+  });
+
+  const hardDelete = await request('DELETE', `/admin/planos/${encodeURIComponent(removablePlan.plano.id)}`, {
+    token: adminToken,
+  });
+  assert.equal(hardDelete.data.removido, true);
+
+  const afterHardDelete = await request('GET', '/admin/planos', { token: adminToken });
+  assert.equal(
+    afterHardDelete.data.planos.some(plano => plano.id === removablePlan.plano.id),
+    false,
+    'hard-deleted plan should disappear from admin list'
+  );
+
+  const archivedPlan = await createPlan(adminToken, {
+    nome: `${namePrefix} Arquivar Com Historico`,
+    personalizado: false,
+    valor_centavos: 1240,
+    emissao_fiscal: false,
+    limite_pdvs: 1,
+    limite_subcontas: 0,
+  });
+  const email = testEmail('plano-arquivado');
+  await createUser(email);
+  await request('POST', '/assinaturas/checkout', {
+    expected: 201,
+    body: {
+      email,
+      plano: archivedPlan.plano.id,
+    },
+  });
+
+  const softDelete = await request('DELETE', `/admin/planos/${encodeURIComponent(archivedPlan.plano.id)}`, {
+    token: adminToken,
+  });
+  assert.equal(softDelete.data.arquivado, true);
+
+  const afterSoftDelete = await request('GET', '/admin/planos', { token: adminToken });
+  assert.equal(
+    afterSoftDelete.data.planos.some(plano => plano.id === archivedPlan.plano.id),
+    false,
+    'archived plan should disappear from active admin list'
+  );
+
+  const publicCatalog = await request('GET', '/assinaturas/planos');
+  assert.equal(
+    publicCatalog.data.planos.some(plano => plano.id === archivedPlan.plano.id),
+    false,
+    'archived plan should disappear from public catalog'
+  );
 }
 
 async function testEntitlementsAndBillingServices(publicPlanId) {
@@ -601,6 +678,7 @@ async function main() {
   await testCustomPaidTrialCode(adminToken);
   await testEntitlementsAndBillingServices(publicPlanId);
   await testAdminSubscriptionActions(adminToken, freeContext.usuario, freeContext.assinatura);
+  await testAdminPlanDeletion(adminToken);
 
   const summary = {
     baseUrl,

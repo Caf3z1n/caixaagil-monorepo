@@ -3691,15 +3691,24 @@ a {
 
 .admin-plan-dialog .admin-dialog-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin-top: 4px;
   border-top: 0;
   padding-top: 4px;
 }
 
+.admin-dialog-action-cluster {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .admin-plan-dialog .admin-secondary-button,
-.admin-plan-dialog .admin-confirm-button {
+.admin-plan-dialog .admin-confirm-button,
+.admin-plan-dialog .admin-danger-button {
   min-width: 92px;
   min-height: 42px;
   border-radius: 7px;
@@ -3732,6 +3741,53 @@ a {
   transform: none;
 }
 
+.admin-plan-dialog .admin-danger-button {
+  border: 1px solid oklch(0.84 0.06 28);
+  background: oklch(0.98 0.014 28);
+  color: var(--danger);
+  box-shadow: none;
+}
+
+.admin-plan-dialog .admin-danger-button:hover {
+  background: oklch(0.94 0.03 28);
+  transform: none;
+}
+
+.admin-plan-delete-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid oklch(0.86 0.07 28);
+  border-radius: 8px;
+  background: oklch(0.985 0.012 32);
+  color: var(--danger);
+  padding: 10px 12px;
+}
+
+.admin-plan-delete-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.admin-plan-delete-warning span {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-plan-delete-warning strong {
+  color: var(--danger);
+  font-size: 0.83rem;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.admin-plan-delete-warning small {
+  color: oklch(0.42 0.08 28);
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
 @media (max-width: 680px) {
   .admin-plan-dialog {
     padding: 24px 20px 20px;
@@ -3745,8 +3801,14 @@ a {
     flex-direction: column-reverse;
   }
 
+  .admin-dialog-action-cluster {
+    flex-direction: column-reverse;
+    width: 100%;
+  }
+
   .admin-plan-dialog .admin-secondary-button,
-  .admin-plan-dialog .admin-confirm-button {
+  .admin-plan-dialog .admin-confirm-button,
+  .admin-plan-dialog .admin-danger-button {
     width: 100%;
   }
 }

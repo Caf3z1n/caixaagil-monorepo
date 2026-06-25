@@ -11,6 +11,7 @@ const {
 const {
   buildPlanoFromCodigoAssinatura,
   findCodigoAssinaturaDisponivel,
+  hashCodigoAssinatura,
   normalizeCodigoAssinatura,
 } = require('../services/codigosAssinaturaService');
 const { buildPlanoSnapshot, getPlano, listarPlanosPublicos } = require('../services/planosService');
@@ -56,6 +57,13 @@ function createCheckoutTokenPayload() {
     checkout_token: randomBytes(CHECKOUT_TOKEN_BYTES).toString('base64url'),
     checkout_token_expira_em: new Date(Date.now() + CHECKOUT_TOKEN_TTL_MS),
   };
+}
+
+function isCheckoutTokenCurrent(assinatura) {
+  const token = normalizeCheckoutToken(assinatura?.checkout_token);
+  const expiresAt = toDate(assinatura?.checkout_token_expira_em);
+
+  return isValidCheckoutToken(token) && expiresAt && expiresAt > new Date();
 }
 
 function getStatusFromPreapproval(preapprovalStatus) {
@@ -210,6 +218,104 @@ async function abandonPendingSubscriptions(usuarioId, exceptId = null, options =
     },
     { where, transaction: options.transaction || null }
   );
+}
+
+async function ensureCheckoutTokenForSubscription(assinatura) {
+  if (isCheckoutTokenCurrent(assinatura)) {
+    return assinatura;
+  }
+
+  Object.assign(assinatura, createCheckoutTokenPayload());
+  await assinatura.save();
+
+  return assinatura;
+}
+
+async function findUsedSubscriptionCodeForUser(codigo, usuarioId) {
+  const normalized = normalizeCodigoAssinatura(codigo);
+
+  if (!normalized || !usuarioId) {
+    return null;
+  }
+
+  return CodigoAssinatura.findOne({
+    where: {
+      codigo_hash: hashCodigoAssinatura(normalized),
+      usado_por_usuario_id: usuarioId,
+      usos_realizados: {
+        [Op.gt]: 0,
+      },
+    },
+    order: [['id', 'DESC']],
+  });
+}
+
+async function findReusableCustomCheckout(usuario, codigo) {
+  const codigoAssinatura = await findUsedSubscriptionCodeForUser(codigo, usuario?.id);
+
+  if (!codigoAssinatura) {
+    return null;
+  }
+
+  const assinatura = await Assinatura.findOne({
+    where: {
+      usuario_id: usuario.id,
+      plano: codigoAssinatura.plano_id,
+      tipo_movimento: {
+        [Op.in]: ['contratacao_personalizada', 'contratacao_personalizada_gratis'],
+      },
+      status: {
+        [Op.in]: ['pendente', 'ativa'],
+      },
+    },
+    order: [['id', 'DESC']],
+  });
+
+  if (!assinatura) {
+    return null;
+  }
+
+  return {
+    assinatura,
+    codigoAssinatura,
+  };
+}
+
+async function buildReusableCheckoutResponse(assinatura) {
+  let assinaturaAtual = assinatura;
+
+  try {
+    const syncResult = await syncAssinaturaFromMercadoPago(assinatura);
+    assinaturaAtual = syncResult.assinatura;
+  } catch {
+    // Se ja existe checkout local pendente, uma oscilacao pontual do Mercado Pago nao deve impedir reabertura.
+  }
+
+  if (assinaturaAtual.status === 'ativa') {
+    await finalizeActivatedSubscription(assinaturaAtual);
+
+    return {
+      assinaturaAtiva: true,
+      checkoutToken: assinaturaAtual.checkout_token,
+      checkoutUrl: null,
+      gratuito: assinaturaAtual.tipo_movimento === 'contratacao_personalizada_gratis',
+      plano: assinaturaAtual.plano_snapshot,
+      message: 'Assinatura já confirmada.',
+    };
+  }
+
+  if (assinaturaAtual.status !== 'pendente' || !assinaturaAtual.checkout_url) {
+    return null;
+  }
+
+  await ensureCheckoutTokenForSubscription(assinaturaAtual);
+
+  return {
+    checkoutUrl: assinaturaAtual.checkout_url,
+    checkoutToken: assinaturaAtual.checkout_token,
+    reused: true,
+    message: 'Checkout pendente reaberto.',
+  };
 }
 
 async function syncAssinaturaFromMercadoPago(assinatura) {
@@ -399,6 +505,18 @@ module.exports = {
       const plano = buildPlanoFromCodigoAssinatura(codigoAssinatura);
 
       if (!codigoAssinatura || !plano) {
+        const email = normalizeEmail(req.body?.email || req.query?.email);
+        const usuario = isValidEmail(email) ? await Usuario.findOne({ where: { email } }) : null;
+        const reusableCheckout = usuario ? await findReusableCustomCheckout(usuario, codigo) : null;
+
+        if (reusableCheckout?.assinatura?.plano_snapshot) {
+          return res.json({
+            codigo: reusableCheckout.codigoAssinatura.codigo,
+            checkout_pendente: reusableCheckout.assinatura.status === 'pendente',
+            plano: reusableCheckout.assinatura.plano_snapshot,
+          });
+        }
+
         return res.status(404).json({ message: 'Codigo de assinatura invalido ou ja utilizado.' });
       }
 
@@ -440,6 +558,15 @@ module.exports = {
 
     if (codigoAssinaturaInput) {
       let reservedResult = null;
+      const reusableCheckout = await findReusableCustomCheckout(usuario, codigoAssinaturaInput);
+
+      if (reusableCheckout?.assinatura) {
+        const response = await buildReusableCheckoutResponse(reusableCheckout.assinatura);
+
+        if (response) {
+          return res.json(response);
+        }
+      }
 
       try {
         reservedResult = await sequelize.transaction(async transaction => {

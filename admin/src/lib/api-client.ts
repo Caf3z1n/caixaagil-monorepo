@@ -91,3 +91,10 @@ export async function apiPut<TResponse>(path: string, body: unknown, options: Pi
     token: options.token
   });
 }
+
+export async function apiDelete<TResponse>(path: string, options: Pick<ApiRequestOptions, "token"> = {}) {
+  return apiRequest<TResponse>(path, {
+    method: "DELETE",
+    token: options.token
+  });
+}

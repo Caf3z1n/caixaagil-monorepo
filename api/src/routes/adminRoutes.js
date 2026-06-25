@@ -14,6 +14,7 @@ router.get('/resumo', adminController.summary);
 router.get('/planos', adminController.listPlans);
 router.post('/planos', adminController.createPlan);
 router.put('/planos/:id', adminController.updatePlan);
+router.delete('/planos/:id', adminController.deletePlan);
 router.get('/usuarios', adminController.listUsers);
 router.get('/usuarios/:id', adminController.showUser);
 router.post('/usuarios/:id/assinaturas/:assinaturaId/valor', adminController.updateUserSubscriptionValue);
