@@ -146,6 +146,40 @@ async function getMercadoPagoPreapproval(preapprovalId) {
   return mercadoPagoGet(`/preapproval/${encodeURIComponent(preapprovalId)}`);
 }
 
+function buildQueryString(params = {}) {
+  const searchParams = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== null && value !== undefined && value !== '') {
+      searchParams.set(key, String(value));
+    }
+  }
+
+  const query = searchParams.toString();
+
+  return query ? `?${query}` : '';
+}
+
+async function searchMercadoPagoAuthorizedPayments({ preapprovalId, limit = 50, offset = 0 } = {}) {
+  return mercadoPagoGet(
+    `/authorized_payments/search${buildQueryString({
+      preapproval_id: preapprovalId,
+      limit,
+      offset,
+    })}`
+  );
+}
+
+async function searchMercadoPagoPayments({ externalReference, limit = 50, offset = 0 } = {}) {
+  return mercadoPagoGet(
+    `/v1/payments/search${buildQueryString({
+      external_reference: externalReference,
+      limit,
+      offset,
+    })}`
+  );
+}
+
 async function cancelMercadoPagoPreapproval(preapprovalId) {
   if (!preapprovalId) {
     return null;
@@ -306,6 +340,8 @@ module.exports = {
   getMercadoPagoPreapproval,
   pauseMercadoPagoPreapproval,
   reactivateMercadoPagoPreapproval,
+  searchMercadoPagoAuthorizedPayments,
+  searchMercadoPagoPayments,
   updateMercadoPagoPreapprovalAmount,
   updateMercadoPagoPreapprovalStatus,
   validateMercadoPagoWebhookSignature,

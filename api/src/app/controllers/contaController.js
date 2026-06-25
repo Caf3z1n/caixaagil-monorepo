@@ -10,6 +10,9 @@ const {
   applyDueScheduledChanges,
   attachScheduledChanges,
 } = require('../services/alteracoesAssinaturaService');
+const {
+  syncAssinaturaPagamentosMercadoPago,
+} = require('../services/pagamentosAssinaturaService');
 const { getAppUrl, getPublicAssetUrl } = require('../services/urlService');
 
 const expiresInMinutes = 30;
@@ -119,6 +122,24 @@ async function findAssinaturas(usuarioId) {
       }
     } catch {
       // A tela de conta não deve falhar se o Mercado Pago estiver temporariamente indisponível.
+    }
+  }
+
+  for (const assinatura of assinaturas) {
+    if (!assinatura.mercado_pago_preapproval_id && !assinatura.referencia_externa) {
+      continue;
+    }
+
+    try {
+      await syncAssinaturaPagamentosMercadoPago(assinatura);
+      const pagamentos = await PagamentoAssinatura.findAll({
+        where: { assinatura_id: assinatura.id },
+        order: [['processado_em', 'DESC']],
+        limit: 12,
+      });
+      assinatura.setDataValue('pagamentos', pagamentos);
+    } catch {
+      // A tela de conta deve continuar exibindo o historico local existente.
     }
   }
 

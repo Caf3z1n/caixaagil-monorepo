@@ -31,6 +31,9 @@ const {
   updateMercadoPagoPreapprovalAmount,
 } = require('../services/mercadoPagoService');
 const { calcularReguaInadimplencia } = require('../services/assinaturaInadimplenciaService');
+const {
+  syncAssinaturaPagamentosMercadoPago,
+} = require('../services/pagamentosAssinaturaService');
 
 function normalizeEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -734,7 +737,7 @@ module.exports = {
 
   async summary(req, res) {
     try {
-      const paymentPaidStatuses = ['approved', 'accredited', 'paid', 'authorized'];
+      const paymentPaidStatuses = ['approved', 'accredited', 'paid', 'authorized', 'processed'];
       const [
         usuariosTotal,
         usuariosAtivos,
@@ -1511,7 +1514,7 @@ module.exports = {
       const trintaDiasAtras = new Date();
       trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
 
-      const [assinaturas, pagamentos, pdvs, subcontas, configuracao, vendas30Dias, vendasTotal, auditoria] = await Promise.all([
+      let [assinaturas, pagamentos, pdvs, subcontas, configuracao, vendas30Dias, vendasTotal, auditoria] = await Promise.all([
         Assinatura.findAll({
           where: { usuario_id: usuarioId },
           order: [['id', 'DESC']],
@@ -1576,6 +1579,30 @@ module.exports = {
           limit: 40,
         }),
       ]);
+      const assinaturaAtualModelo = getCurrentSubscription(assinaturas);
+
+      if (assinaturaAtualModelo?.mercado_pago_preapproval_id || assinaturaAtualModelo?.referencia_externa) {
+        try {
+          await syncAssinaturaPagamentosMercadoPago(assinaturaAtualModelo);
+          [assinaturas, pagamentos] = await Promise.all([
+            Assinatura.findAll({
+              where: { usuario_id: usuarioId },
+              order: [['id', 'DESC']],
+            }),
+            PagamentoAssinatura.findAll({
+              where: { usuario_id: usuarioId },
+              order: [
+                ['processado_em', 'DESC'],
+                ['id', 'DESC'],
+              ],
+              limit: 50,
+            }),
+          ]);
+        } catch {
+          // O detalhe administrativo deve continuar abrindo com os dados locais existentes.
+        }
+      }
+
       const assinaturaIds = assinaturas.map(assinatura => assinatura.id);
       const alteracoesAgendadas = assinaturaIds.length
         ? await AlteracaoAssinatura.findAll({

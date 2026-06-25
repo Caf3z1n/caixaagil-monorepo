@@ -24,6 +24,9 @@ const {
   cancelScheduledChangesForSubscription,
   scheduleDowngrade,
 } = require('../services/alteracoesAssinaturaService');
+const {
+  syncAssinaturaPagamentosMercadoPago,
+} = require('../services/pagamentosAssinaturaService');
 const { getPublicAppUrl } = require('../services/urlService');
 
 const MIN_MERCADO_PAGO_CHARGE_CENTAVOS = 100;
@@ -370,6 +373,12 @@ async function syncAssinaturaFromMercadoPago(assinatura) {
     }
   }
 
+  try {
+    await syncAssinaturaPagamentosMercadoPago(assinatura);
+  } catch {
+    // A consulta de status nao deve falhar se apenas a conciliacao de pagamentos oscilar.
+  }
+
   return {
     assinatura,
     mercadoPagoStatus: preapproval?.status || null,
@@ -391,7 +400,7 @@ async function normalizeRecurringAmountIfNeeded(assinatura) {
     where: {
       assinatura_id: assinatura.id,
       status: {
-        [Op.in]: ['approved', 'accredited', 'paid', 'authorized'],
+        [Op.in]: ['approved', 'accredited', 'paid', 'authorized', 'processed'],
       },
     },
   });
@@ -466,6 +475,33 @@ async function getPublicStatusPayload(assinatura) {
     plano: syncResult.assinatura.plano,
     synced: syncResult.synced,
   };
+}
+
+async function reloadPagamentosAssinatura(assinatura) {
+  if (!assinatura?.id || typeof assinatura.setDataValue !== 'function') {
+    return;
+  }
+
+  const pagamentos = await PagamentoAssinatura.findAll({
+    where: { assinatura_id: assinatura.id },
+    order: [['processado_em', 'DESC']],
+    limit: 12,
+  });
+
+  assinatura.setDataValue('pagamentos', pagamentos);
+}
+
+async function syncPagamentosAssinaturaSilenciosamente(assinatura) {
+  if (!assinatura?.mercado_pago_preapproval_id && !assinatura?.referencia_externa) {
+    return;
+  }
+
+  try {
+    await syncAssinaturaPagamentosMercadoPago(assinatura);
+    await reloadPagamentosAssinatura(assinatura);
+  } catch {
+    // A listagem deve continuar exibindo o historico local mesmo se o Mercado Pago oscilar.
+  }
 }
 
 async function findCheckoutSubscriptionByToken(token, extraWhere = {}) {
@@ -805,6 +841,7 @@ module.exports = {
         order: [['id', 'DESC']],
       });
 
+      await Promise.all(assinaturas.map(syncPagamentosAssinaturaSilenciosamente));
       await attachScheduledChanges(assinaturas);
 
       return res.json(assinaturas);
@@ -838,6 +875,8 @@ module.exports = {
       if (!assinatura) {
         return res.status(404).json({ message: 'Assinatura não encontrada.' });
       }
+
+      await syncPagamentosAssinaturaSilenciosamente(assinatura);
 
       const pagamentos = await PagamentoAssinatura.findAll({
         where: { assinatura_id: assinatura.id },

@@ -322,6 +322,7 @@ function getPaymentLabel(status?: string | null) {
     in_process: "Pendente",
     paid: "Pago",
     pending: "Pendente",
+    processed: "Pago",
     rejected: "Falhou",
     refunded: "Reembolsado"
   };
@@ -350,7 +351,7 @@ function getNextPaymentText(usuario: UsuarioAdmin) {
 function getPaymentStatusClass(status?: string | null) {
   const normalized = String(status || "").toLowerCase();
 
-  if (["approved", "accredited", "authorized", "paid"].includes(normalized)) {
+  if (["approved", "accredited", "authorized", "paid", "processed"].includes(normalized)) {
     return "admin-status-pill admin-status-pill-success";
   }
 

@@ -153,6 +153,7 @@ const paymentStatusLabel: Record<string, string> = {
   in_process: "Pendente",
   paid: "Pago",
   pending: "Pendente",
+  processed: "Pago",
   rejected: "Falhou",
   refunded: "Reembolsado"
 };
@@ -166,7 +167,7 @@ function normalizeStatus(status?: string | null) {
 function getStatusTone(status?: string | null) {
   const normalized = normalizeStatus(status);
 
-  if (["ativa", "approved", "paid", "authorized", "accredited"].includes(normalized)) {
+  if (["ativa", "approved", "paid", "authorized", "accredited", "processed"].includes(normalized)) {
     return "success";
   }
 

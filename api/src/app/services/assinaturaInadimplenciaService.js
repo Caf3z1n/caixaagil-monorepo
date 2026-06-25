@@ -26,6 +26,7 @@ const STATUS_PAGAMENTO_APROVADO = new Set([
   'approved',
   'authorized',
   'paid',
+  'processed',
 ]);
 
 const STATUS_PAGAMENTO_FALHA = new Set([

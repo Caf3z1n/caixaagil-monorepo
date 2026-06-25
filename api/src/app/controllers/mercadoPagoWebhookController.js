@@ -9,17 +9,15 @@ const {
   validateMercadoPagoWebhookSignature,
 } = require('../services/mercadoPagoService');
 const {
+  normalizeMercadoPagoAuthorizedPayment,
+  normalizeMercadoPagoPayment,
+  syncAssinaturaPagamentosMercadoPago,
+  upsertPagamentoAssinatura,
+} = require('../services/pagamentosAssinaturaService');
+const {
   applyDueScheduledChangeForSubscription,
   cancelScheduledChangesForSubscription,
 } = require('../services/alteracoesAssinaturaService');
-
-function toCentavos(value) {
-  if (value === null || value === undefined || value === '') {
-    return null;
-  }
-
-  return Math.round(Number(value) * 100);
-}
 
 function toDate(value) {
   if (!value) {
@@ -42,80 +40,10 @@ function getEventDataId(req) {
   return String(req.body?.data?.id || req.query?.['data.id'] || req.query?.id || req.body?.id || '').trim();
 }
 
-function extractPreapprovalId(payload) {
-  return (
-    payload?.preapproval_id ||
-    payload?.preapproval?.id ||
-    payload?.subscription_id ||
-    payload?.metadata?.preapproval_id ||
-    payload?.metadata?.mercado_pago_preapproval_id ||
-    payload?.payment?.preapproval_id ||
-    payload?.payment?.metadata?.preapproval_id ||
-    null
-  );
-}
-
-function extractPaymentId(payload) {
-  return payload?.payment_id || payload?.payment?.id || payload?.id || null;
-}
-
-function extractReference(payload) {
-  return (
-    payload?.external_reference ||
-    payload?.metadata?.referencia_externa ||
-    payload?.metadata?.external_reference ||
-    payload?.payment?.external_reference ||
-    null
-  );
-}
-
-function normalizePaymentFromPayment(payload) {
-  return {
-    mercado_pago_payment_id: payload?.id ? String(payload.id) : null,
-    mercado_pago_authorized_payment_id: null,
-    mercado_pago_preapproval_id: extractPreapprovalId(payload),
-    referencia_externa: extractReference(payload),
-    status: payload?.status || 'desconhecido',
-    status_detalhe: payload?.status_detail || null,
-    valor_centavos: toCentavos(payload?.transaction_amount),
-    valor_liquido_centavos: toCentavos(payload?.transaction_details?.net_received_amount),
-    moeda: payload?.currency_id || 'BRL',
-    forma_pagamento: payload?.payment_method_id || payload?.payment_type_id || null,
-    parcelas: payload?.installments ?? null,
-    pago_em: toDate(payload?.date_approved),
-    vencimento_em: toDate(payload?.date_of_expiration),
-    processado_em: toDate(payload?.date_last_updated || payload?.date_created) || new Date(),
-    payload_mercado_pago: payload,
-  };
-}
-
-function normalizePaymentFromAuthorizedPayment(payload) {
-  const paymentId = extractPaymentId(payload);
-  const nestedPayment = payload?.payment && typeof payload.payment === 'object' ? payload.payment : null;
-
-  return {
-    mercado_pago_payment_id: paymentId ? String(paymentId) : null,
-    mercado_pago_authorized_payment_id: payload?.id ? String(payload.id) : null,
-    mercado_pago_preapproval_id: extractPreapprovalId(payload),
-    referencia_externa: extractReference(payload),
-    status: payload?.status || nestedPayment?.status || 'desconhecido',
-    status_detalhe: payload?.status_detail || nestedPayment?.status_detail || null,
-    valor_centavos: toCentavos(payload?.transaction_amount ?? payload?.amount ?? nestedPayment?.transaction_amount),
-    valor_liquido_centavos: toCentavos(nestedPayment?.transaction_details?.net_received_amount),
-    moeda: payload?.currency_id || nestedPayment?.currency_id || 'BRL',
-    forma_pagamento: payload?.payment_method_id || nestedPayment?.payment_method_id || nestedPayment?.payment_type_id || null,
-    parcelas: payload?.installments ?? nestedPayment?.installments ?? null,
-    pago_em: toDate(payload?.payment_date || payload?.date_approved || nestedPayment?.date_approved),
-    vencimento_em: toDate(payload?.debit_date || payload?.date_of_expiration),
-    processado_em: toDate(payload?.last_modified || payload?.date_last_updated || payload?.date_created) || new Date(),
-    payload_mercado_pago: payload,
-  };
-}
-
 function getAssinaturaStatus(paymentStatus) {
   const normalized = String(paymentStatus || '').toLowerCase();
 
-  if (['approved', 'accredited'].includes(normalized)) {
+  if (['approved', 'accredited', 'paid', 'processed'].includes(normalized)) {
     return 'ativa';
   }
 
@@ -218,36 +146,6 @@ async function findAssinaturaByPreapproval(preapproval) {
   });
 }
 
-async function upsertPagamento(paymentData, assinatura) {
-  const lookupConditions = [];
-
-  if (paymentData.mercado_pago_payment_id) {
-    lookupConditions.push({ mercado_pago_payment_id: paymentData.mercado_pago_payment_id });
-  }
-
-  if (paymentData.mercado_pago_authorized_payment_id) {
-    lookupConditions.push({
-      mercado_pago_authorized_payment_id: paymentData.mercado_pago_authorized_payment_id,
-    });
-  }
-
-  const existing = lookupConditions.length
-    ? await PagamentoAssinatura.findOne({ where: { [Op.or]: lookupConditions } })
-    : null;
-  const payload = {
-    ...paymentData,
-    assinatura_id: assinatura?.id || null,
-    usuario_id: assinatura?.usuario_id || null,
-  };
-
-  if (existing) {
-    await existing.update(payload);
-    return existing;
-  }
-
-  return PagamentoAssinatura.create(payload);
-}
-
 async function normalizeRecurringAmountIfNeeded(assinatura) {
   if (
     !assinatura.normalizar_valor_apos_primeiro_pagamento ||
@@ -262,7 +160,7 @@ async function normalizeRecurringAmountIfNeeded(assinatura) {
     where: {
       assinatura_id: assinatura.id,
       status: {
-        [Op.in]: ['approved', 'accredited', 'paid', 'authorized'],
+        [Op.in]: ['approved', 'accredited', 'paid', 'authorized', 'processed'],
       },
     },
   });
@@ -407,12 +305,12 @@ async function fetchWebhookPaymentData(eventType, eventAction, eventId) {
 
   if (normalizedType === 'subscription_authorized_payment') {
     const authorizedPayment = await getMercadoPagoAuthorizedPayment(eventId);
-    return normalizePaymentFromAuthorizedPayment(authorizedPayment);
+    return normalizeMercadoPagoAuthorizedPayment(authorizedPayment);
   }
 
   if (normalizedType === 'payment' || normalizedAction.startsWith('payment.')) {
     const payment = await getMercadoPagoPayment(eventId);
-    return normalizePaymentFromPayment(payment);
+    return normalizeMercadoPagoPayment(payment);
   }
 
   return null;
@@ -448,10 +346,20 @@ module.exports = {
 
         await updateAssinaturaFromPreapproval(assinatura, preapproval);
 
+        let pagamentosSincronizados = 0;
+
+        try {
+          const syncResult = await syncAssinaturaPagamentosMercadoPago(assinatura);
+          pagamentosSincronizados = syncResult.total;
+        } catch {
+          // A assinatura ja foi atualizada; a conciliacao pode ser refeita por consulta ou outro webhook.
+        }
+
         return res.json({
           message: 'Webhook Mercado Pago processado.',
           assinaturaId: assinatura.id,
           pagamentoId: null,
+          pagamentosSincronizados,
         });
       }
 
@@ -465,14 +373,22 @@ module.exports = {
       }
 
       const assinatura = await findAssinatura(paymentData);
-      const pagamento = await upsertPagamento(paymentData, assinatura);
+      const pagamento = await upsertPagamentoAssinatura(paymentData, assinatura);
 
       await updateAssinaturaStatus(assinatura, paymentData.status);
+
+      if (assinatura) {
+        try {
+          await syncAssinaturaPagamentosMercadoPago(assinatura);
+        } catch {
+          // O pagamento atual ja foi salvo; a conciliacao global sera tentada depois.
+        }
+      }
 
       return res.json({
         message: 'Webhook Mercado Pago processado.',
         assinaturaId: assinatura?.id || null,
-        pagamentoId: pagamento.id,
+        pagamentoId: pagamento?.id || null,
       });
     } catch (error) {
       return res.status(error.statusCode || 500).json({
