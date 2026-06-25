@@ -15,6 +15,7 @@ const {
 } = require('../services/codigosAssinaturaService');
 const { buildPlanoSnapshot, getPlano, listarPlanosPublicos } = require('../services/planosService');
 const { getEntitlements } = require('../services/assinaturaEntitlementsService');
+const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 const {
   applyDueScheduledChangeForSubscription,
   applyDueScheduledChanges,
@@ -430,7 +431,7 @@ module.exports = {
       return res.status(403).json({ message: 'Usuario inativo' });
     }
 
-    if (!usuario.email_verificado_em) {
+    if (!isEmailVerified(usuario)) {
       return res.status(403).json({
         code: 'EMAIL_NOT_VERIFIED',
         message: 'Confirme seu e-mail antes de contratar um plano.',

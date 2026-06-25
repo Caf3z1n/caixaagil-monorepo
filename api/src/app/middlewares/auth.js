@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const authConfig = require('../../config/auth');
 const { Assinatura, Subconta, Usuario } = require('../models');
+const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 
 function getRequiredPermission(req) {
   const baseUrl = req.baseUrl || '';
@@ -63,7 +64,7 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ message: 'Usuário não encontrado.' });
     }
 
-    if (!usuario.email_verificado_em) {
+    if (!isEmailVerified(usuario)) {
       return res.status(403).json({
         code: 'EMAIL_NOT_VERIFIED',
         message: 'Confirme seu e-mail para continuar.',

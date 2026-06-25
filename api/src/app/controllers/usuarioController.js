@@ -8,6 +8,11 @@ const {
   createPasswordResetEmail,
 } = require('../services/emailTemplates');
 const { getAppUrl, getPublicAssetUrl } = require('../services/urlService');
+const {
+  getEmailVerifiedAtForNewAccount,
+  isEmailVerificationBypassEnabled,
+  isEmailVerified,
+} = require('../services/emailVerificationPolicyService');
 
 const expiresInMinutes = 30;
 const allowedFields = ['email', 'senha', 'password', 'ativo', 'active'];
@@ -211,7 +216,10 @@ module.exports = {
         return res.status(409).json({ message: 'E-mail já existe.' });
       }
 
-      const created = await Usuario.create(payload);
+      const created = await Usuario.create({
+        ...payload,
+        email_verificado_em: getEmailVerifiedAtForNewAccount(),
+      });
       res.status(201).json(sanitizeUsuario(created));
     } catch (error) {
       handlePersistenceError(res, error, 'Erro ao criar usuário.');
@@ -241,7 +249,7 @@ module.exports = {
         existe: Boolean(account),
         email,
         tipoConta: account?.tipo || null,
-        emailVerificado: account?.tipo === 'subconta' ? true : Boolean(account?.conta?.email_verificado_em),
+        emailVerificado: account?.tipo === 'subconta' ? true : isEmailVerified(account?.conta),
         assinaturaAtiva: Boolean(assinaturaAtiva),
         permissoes: account?.tipo === 'subconta' ? account.conta.permissoes || [] : ['*'],
       });
@@ -266,6 +274,19 @@ module.exports = {
 
       if (account.tipo !== 'usuario') {
         return res.status(400).json({ message: 'Subcontas não exigem verificação de e-mail.' });
+      }
+
+      if (isEmailVerificationBypassEnabled()) {
+        account.conta.email_verificado_em = account.conta.email_verificado_em || new Date();
+        account.conta.token_verificacao_email = null;
+        account.conta.token_verificacao_email_expira_em = null;
+        await account.conta.save();
+
+        return res.json({
+          id: null,
+          message: 'Verificação de e-mail dispensada temporariamente para testes.',
+          tipoConta: account.tipo,
+        });
       }
 
       const token = randomUUID();

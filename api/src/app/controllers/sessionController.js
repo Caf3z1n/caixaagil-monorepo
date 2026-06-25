@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { Assinatura, Subconta, Usuario } = require('../models');
 const authConfig = require('../../config/auth');
+const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 
 const buildToken = payload =>
   jwt.sign(payload, authConfig.secret, {
@@ -51,7 +52,7 @@ module.exports = {
         return res.status(403).json({ message: 'Usuário inativo.' });
       }
 
-      if (!usuario.email_verificado_em) {
+      if (!isEmailVerified(usuario)) {
         return res.status(403).json({
           code: 'EMAIL_NOT_VERIFIED',
           message: 'Confirme seu e-mail antes de acessar a plataforma.',
