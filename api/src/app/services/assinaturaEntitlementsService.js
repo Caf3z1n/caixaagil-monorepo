@@ -1,5 +1,6 @@
 const { Assinatura, Pdv, Subconta } = require('../models');
 const { getBillingStatus } = require('./assinaturaInadimplenciaService');
+const { buildPlanoSnapshot, getPlano } = require('./planosService');
 
 const FEATURE_MESSAGES = {
   emissao_fiscal: 'Seu plano atual não permite recursos fiscais.',
@@ -30,6 +31,10 @@ function findSnapshotItem(items, codigo) {
   }
 
   return items.find(item => item?.codigo === codigo) || null;
+}
+
+function isSamePlanVersion(left, right) {
+  return String(left || '') === String(right || '');
 }
 
 function getSnapshotFeature(snapshot, codigo) {
@@ -90,6 +95,28 @@ async function getUsage(usuarioId) {
   };
 }
 
+async function getEffectivePlanSnapshot(assinatura) {
+  const data = toPlain(assinatura);
+  const snapshot = data?.plano_snapshot || {};
+
+  try {
+    const planoAtual = await getPlano(data?.plano);
+
+    if (
+      planoAtual?.personalizado &&
+      planoAtual.plano_versao_id &&
+      (!isSamePlanVersion(planoAtual.plano_versao_id, data?.plano_versao_id) ||
+        !isSamePlanVersion(planoAtual.plano_versao_id, snapshot?.plano_versao_id))
+    ) {
+      return buildPlanoSnapshot(planoAtual) || snapshot;
+    }
+  } catch {
+    return snapshot;
+  }
+
+  return snapshot;
+}
+
 function getAvailable(limit, usage) {
   if (limit === null) {
     return null;
@@ -112,7 +139,7 @@ async function getEntitlements(usuarioId) {
 
   const data = toPlain(assinatura);
   const billingStatus = await getBillingStatus(usuarioId, { assinatura: data });
-  const snapshot = data?.plano_snapshot || {};
+  const snapshot = await getEffectivePlanSnapshot(assinatura);
   const uso = await getUsage(usuarioId);
   const limites = {
     pdvs_ativos: getSnapshotLimit(snapshot, 'pdvs_ativos'),

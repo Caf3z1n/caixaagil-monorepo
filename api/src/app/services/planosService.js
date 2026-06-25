@@ -89,6 +89,8 @@ function serializePlano(plano) {
 
   return {
     id: data.id,
+    publico: Boolean(data.publico),
+    personalizado: data.publico === false,
     nome: version.nome || data.nome,
     descricao: version.descricao || data.descricao || null,
     valor_centavos: version.valor_centavos,

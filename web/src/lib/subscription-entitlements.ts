@@ -38,10 +38,7 @@ export type SubscriptionEntitlements = {
 };
 
 export function loadSubscriptionEntitlements(token: string) {
-  return apiGet<SubscriptionEntitlements>("/assinaturas/entitlements", {
-    cacheTtlMs: 60_000,
-    token
-  });
+  return apiGet<SubscriptionEntitlements>("/assinaturas/entitlements", { token });
 }
 
 export function hasFiscalEntitlement(entitlements: SubscriptionEntitlements | null) {

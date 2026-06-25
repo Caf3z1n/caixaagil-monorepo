@@ -22,6 +22,7 @@ const {
   buildUniqueCodigoAssinatura,
   serializeCodigoAssinatura,
 } = require('../services/codigosAssinaturaService');
+const { buildPlanoSnapshot } = require('../services/planosService');
 const { sanitizeFiscalSettings } = require('../services/configuracaoSistemaService');
 const {
   cancelMercadoPagoPreapproval,
@@ -299,6 +300,46 @@ function buildPlanWritePayload(body, existingPlano = null) {
     trialDias,
     valorCentavos,
   };
+}
+
+function buildSnapshotFromPlanPayload(planoId, payload, versao) {
+  return buildPlanoSnapshot({
+    id: planoId,
+    nome: payload.nome,
+    descricao: payload.descricao,
+    valor_centavos: payload.valorCentavos,
+    moeda: 'BRL',
+    intervalo: payload.intervalo,
+    intervalo_quantidade: payload.intervaloQuantidade,
+    plano_versao_id: versao.id,
+    recursos: payload.recursos,
+    limites: payload.limites,
+  });
+}
+
+async function syncPersonalizedPlanSubscriptions({ planoId, payload, transaction, versao }) {
+  if (!payload.personalizado) {
+    return 0;
+  }
+
+  const snapshot = buildSnapshotFromPlanPayload(planoId, payload, versao);
+  const [updatedCount] = await Assinatura.update(
+    {
+      plano_versao_id: versao.id,
+      plano_snapshot: snapshot,
+    },
+    {
+      where: {
+        plano: planoId,
+        status: {
+          [Op.in]: ['ativa', 'pendente'],
+        },
+      },
+      transaction,
+    }
+  );
+
+  return updatedCount;
 }
 
 async function getPlanoWithDetails(planoId, transaction = null) {
@@ -1087,9 +1128,16 @@ module.exports = {
           }
         }
 
+        const assinaturasSincronizadas = await syncPersonalizedPlanSubscriptions({
+          planoId: plano.id,
+          payload,
+          transaction,
+          versao,
+        });
         const updatedPlan = await getPlanoWithDetails(plano.id, transaction);
 
         return {
+          assinaturas_sincronizadas: assinaturasSincronizadas,
           codigo: serializeCodigoAssinatura(codigoPersonalizado),
           plano: sanitizePlano(updatedPlan),
         };
