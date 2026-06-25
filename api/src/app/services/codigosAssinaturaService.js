@@ -208,12 +208,20 @@ async function findCodigoAssinaturaDisponivel(codigo, options = {}) {
           {
             model: PlanoRecurso,
             as: 'recursos',
-            required: false,
+            separate: true,
+            order: [
+              ['ordem', 'ASC'],
+              ['id', 'ASC'],
+            ],
           },
           {
             model: PlanoLimite,
             as: 'limites',
-            required: false,
+            separate: true,
+            order: [
+              ['ordem', 'ASC'],
+              ['id', 'ASC'],
+            ],
           },
         ],
       },
