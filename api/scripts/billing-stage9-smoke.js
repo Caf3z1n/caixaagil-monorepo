@@ -516,7 +516,12 @@ async function testAdminSubscriptionActions(adminToken, usuario, assinatura) {
   assert.equal(reactivateResponse.data.assinatura.status, 'ativa');
 
   const detail = await request('GET', `/admin/usuarios/${usuario.id}`, { token: adminToken });
-  assert.ok(detail.data.auditoria_assinatura.length >= 4, 'admin audit history should include performed actions');
+  const auditActions = (detail.data.auditoria || []).map(item => item.acao);
+
+  assert.ok(auditActions.includes('ajustar_valor'), 'admin audit should include value adjustment');
+  assert.ok(auditActions.includes('conceder_dias_gratis'), 'admin audit should include trial grant');
+  assert.ok(auditActions.includes('status_pausar'), 'admin audit should include pause action');
+  assert.ok(auditActions.includes('status_reativar'), 'admin audit should include reactivation action');
 }
 
 async function cleanup() {
