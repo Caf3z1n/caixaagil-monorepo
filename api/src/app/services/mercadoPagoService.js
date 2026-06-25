@@ -160,11 +160,13 @@ function buildQueryString(params = {}) {
   return query ? `?${query}` : '';
 }
 
-async function searchMercadoPagoAuthorizedPayments({ preapprovalId, limit = 50, offset = 0 } = {}) {
+async function searchMercadoPagoAuthorizedPayments({ preapprovalId, limit = 10, offset = 0 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 10);
+
   return mercadoPagoGet(
     `/authorized_payments/search${buildQueryString({
       preapproval_id: preapprovalId,
-      limit,
+      limit: safeLimit,
       offset,
     })}`
   );

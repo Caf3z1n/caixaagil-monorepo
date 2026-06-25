@@ -214,13 +214,14 @@ async function syncAssinaturaPagamentosMercadoPago(assinatura, options = {}) {
   const assinaturaData = toPlain(assinatura);
   const preapprovalId = String(assinaturaData?.mercado_pago_preapproval_id || '').trim();
   const referenciaExterna = String(assinaturaData?.referencia_externa || '').trim();
-  const limit = options.limit || 50;
+  const authorizedLimit = options.authorizedLimit || options.limit || 10;
+  const paymentLimit = options.paymentLimit || options.limit || 50;
   const paymentDataMap = new Map();
 
   if (preapprovalId) {
     const authorizedPayments = await searchMercadoPagoAuthorizedPayments({
       preapprovalId,
-      limit,
+      limit: authorizedLimit,
     });
 
     for (const authorizedPayment of getSearchResults(authorizedPayments)) {
@@ -231,7 +232,7 @@ async function syncAssinaturaPagamentosMercadoPago(assinatura, options = {}) {
   if (referenciaExterna) {
     const payments = await searchMercadoPagoPayments({
       externalReference: referenciaExterna,
-      limit,
+      limit: paymentLimit,
     });
 
     for (const payment of getSearchResults(payments)) {
