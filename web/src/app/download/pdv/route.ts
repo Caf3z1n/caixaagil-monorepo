@@ -19,10 +19,6 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const configuredDownloadUrl = process.env.PDV_DOWNLOAD_URL;
 
-  if (configuredDownloadUrl) {
-    return NextResponse.redirect(configuredDownloadUrl, 307);
-  }
-
   try {
     const response = await fetch(latestReleaseApiUrl, {
       headers: {
@@ -46,5 +42,5 @@ export async function GET() {
     // Fallback abaixo mantém o download funcional mesmo se a API do GitHub oscilar.
   }
 
-  return NextResponse.redirect(fallbackDownloadUrl, 307);
+  return NextResponse.redirect(configuredDownloadUrl || fallbackDownloadUrl, 307);
 }
