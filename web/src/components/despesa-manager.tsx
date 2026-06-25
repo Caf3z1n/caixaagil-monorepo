@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -15,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
+import { PlatformReturnLink } from "@/components/platform-return-link";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
@@ -229,7 +229,7 @@ export function DespesaManager() {
     setFeedback(null);
 
     try {
-      const result = await apiGet<DespesasResponse>("/despesas", { token });
+      const result = await apiGet<DespesasResponse>("/despesas", { cacheTtlMs: 60_000, token });
       setDespesas(sortDespesas(result.despesas));
     } catch (error) {
       setFeedback({
@@ -467,10 +467,10 @@ export function DespesaManager() {
           </div>
 
           <div className="platform-flow-actions convenio-flow-actions expense-flow-actions" aria-label="Ações de despesas">
-            <Link className="platform-secondary-button" href="/meu-sistema/configuracoes">
+            <PlatformReturnLink className="platform-secondary-button">
               <ArrowLeft aria-hidden="true" size={17} />
               Voltar
-            </Link>
+            </PlatformReturnLink>
             <button className="platform-primary-button" type="button" onClick={openCreateExpenseModal}>
               <Plus aria-hidden="true" size={17} />
               Nova despesa

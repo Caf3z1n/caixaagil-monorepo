@@ -13,6 +13,8 @@ import {
   Building2,
   Check,
   CreditCard,
+  Eye,
+  EyeOff,
   FileCog,
   HandCoins,
   LoaderCircle,
@@ -32,10 +34,16 @@ import {
 } from "@/components/fiscal-settings-manager";
 import { PlatformFrame } from "@/components/platform-frame";
 import { ApiError, apiGet, apiPut } from "@/lib/api-client";
+import { buildPlatformReturnHref } from "@/lib/platform-return";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
+import {
+  hasFiscalEntitlement,
+  loadSubscriptionEntitlements,
+  type SubscriptionEntitlements
+} from "@/lib/subscription-entitlements";
 
 type PaymentMethodKey = "dinheiro" | "pix" | "cartao" | "convenio";
 type StandardPaymentMethodKey = Exclude<PaymentMethodKey, "convenio">;
@@ -274,12 +282,14 @@ function IntegrationSettingsManager({
 }) {
   const [draft, setDraft] = useState<IntegrationSettings>(() => normalizeIntegrationSettings(settings));
   const [cnpjaToken, setCnpjaToken] = useState("");
+  const [showCnpjaToken, setShowCnpjaToken] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     setDraft(normalizeIntegrationSettings(settings));
     setCnpjaToken("");
+    setShowCnpjaToken(false);
   }, [settings]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -361,14 +371,24 @@ function IntegrationSettingsManager({
         <div className="fiscal-form-grid">
           <label>
             <span>Token de acesso</span>
-            <input
-              autoComplete="new-password"
-              disabled={isSaving}
-              placeholder={draft.cnpja.token_configurado ? "Token já configurado" : ""}
-              type="password"
-              value={cnpjaToken}
-              onChange={event => handleCnpjaTokenChange(event.currentTarget.value)}
-            />
+            <div className="fiscal-secret-input fiscal-secret-input-inline">
+              <input
+                autoComplete="new-password"
+                disabled={isSaving}
+                placeholder={draft.cnpja.token_configurado ? "Token já configurado" : ""}
+                type={showCnpjaToken ? "text" : "password"}
+                value={cnpjaToken}
+                onChange={event => handleCnpjaTokenChange(event.currentTarget.value)}
+              />
+              <button
+                aria-label={showCnpjaToken ? "Ocultar token" : "Mostrar token"}
+                disabled={isSaving}
+                type="button"
+                onClick={() => setShowCnpjaToken(current => !current)}
+              >
+                {showCnpjaToken ? <EyeOff aria-hidden="true" size={17} /> : <Eye aria-hidden="true" size={17} />}
+              </button>
+            </div>
           </label>
 
         </div>
@@ -396,6 +416,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const [employeeSettings, setEmployeeSettings] = useState<EmployeeSettings>(defaultEmployeeSettings);
   const [fiscalSettings, setFiscalSettings] = useState<FiscalSettings>(defaultFiscalSettings);
   const [integrationSettings, setIntegrationSettings] = useState<IntegrationSettings>(defaultIntegrationSettings);
+  const [entitlements, setEntitlements] = useState<SubscriptionEntitlements | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [savingMethod, setSavingMethod] = useState<PaymentMethodKey | null>(null);
   const [isSavingCommands, setIsSavingCommands] = useState(false);
@@ -411,6 +432,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const hasVisibleModal = fiscalDeactivationPresence.isPresent;
   const flowPanelClassName = `platform-flow-panel platform-flow-panel-${flowMotion}`;
   const isFiscalStep = isFiscalFlowStep(flowStep);
+  const isFiscalFeatureBlocked = entitlements !== null && !hasFiscalEntitlement(entitlements);
   const hasInlineFlowActions = isFiscalStep || flowStep === "cnpjaIntegration";
   const shellClassName =
     isFiscalStep
@@ -496,9 +518,14 @@ export default function MeuSistemaConfiguracoesPage() {
       return;
     }
 
+    const authToken = token;
+
     async function loadSettings() {
       try {
-        const configuracao = await apiGet<ConfiguracaoSistema>("/configuracoes", { token });
+        const [configuracao, subscriptionEntitlements] = await Promise.all([
+          apiGet<ConfiguracaoSistema>("/configuracoes", { cacheTtlMs: 60_000, token: authToken }),
+          loadSubscriptionEntitlements(authToken)
+        ]);
 
         if (cancelled) {
           return;
@@ -510,6 +537,7 @@ export default function MeuSistemaConfiguracoesPage() {
         setEmployeeSettings(normalizeEmployeeSettings(configuracao.controle_funcionarios));
         setFiscalSettings(normalizeFiscalSettings(configuracao.fiscal));
         setIntegrationSettings(normalizeIntegrationSettings(configuracao.integracoes));
+        setEntitlements(subscriptionEntitlements);
         setFeedback(null);
       } catch (error) {
         if (cancelled) {
@@ -534,7 +562,28 @@ export default function MeuSistemaConfiguracoesPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!isFiscalFeatureBlocked || !isFiscalStep) {
+      return;
+    }
+
+    setFlowMotion("backward");
+    setFlowStep("menu");
+    setFeedback({
+      tone: "warning",
+      message: "Seu plano atual não permite recursos fiscais."
+    });
+  }, [isFiscalFeatureBlocked, isFiscalStep]);
+
   function moveToFlowStep(nextStep: ConfigurationFlowStep) {
+    if (isFiscalFeatureBlocked && isFiscalFlowStep(nextStep)) {
+      setFeedback({
+        tone: "warning",
+        message: "Seu plano atual não permite recursos fiscais."
+      });
+      return;
+    }
+
     if (nextStep === flowStep) {
       return;
     }
@@ -641,6 +690,10 @@ export default function MeuSistemaConfiguracoesPage() {
   }
 
   async function updateFiscalSettings(nextSettings: FiscalSettings) {
+    if (isFiscalFeatureBlocked) {
+      throw new ApiError("Seu plano atual não permite recursos fiscais.", 403, "PLAN_FEATURE_REQUIRED");
+    }
+
     const token = getStoredPlatformAuthToken();
 
     if (!token) {
@@ -943,6 +996,28 @@ export default function MeuSistemaConfiguracoesPage() {
                           const isExpensesArea = area.feature === "expenses";
                           const isConveniosArea = area.feature === "convenios";
                           const isFiscalIssuanceArea = targetStep === "fiscalIssuance";
+                          const isFiscalArea = targetStep === "fiscalCompany" || targetStep === "fiscalIssuance";
+
+                          if (isFiscalArea && isFiscalFeatureBlocked) {
+                            return (
+                              <article
+                                aria-disabled="true"
+                                className="configuration-setting-row configuration-setting-row-disabled"
+                                key={area.title}
+                              >
+                                <span className="configuration-setting-icon" aria-hidden="true">
+                                  <Icon size={19} />
+                                </span>
+
+                                <span className="configuration-setting-copy">
+                                  <strong>{area.title}</strong>
+                                  <small>{area.description}</small>
+                                </span>
+
+                                <span className="configuration-setting-status">Plano</span>
+                              </article>
+                            );
+                          }
 
                           if (isEmployeesArea) {
                             const isEmployeesActive = employeeSettings.ativo;
@@ -975,7 +1050,10 @@ export default function MeuSistemaConfiguracoesPage() {
                                 onPointerLeave={stopConfigurationWave}
                               >
                                 {isEmployeesActive ? (
-                                  <Link className={employeeEntryClassName} href="/meu-sistema/funcionarios">
+                                  <Link
+                                    className={employeeEntryClassName}
+                                    href={buildPlatformReturnHref("/meu-sistema/funcionarios", "/meu-sistema/configuracoes")}
+                                  >
                                     {employeeEntryContent}
                                   </Link>
                                 ) : (
@@ -1091,7 +1169,10 @@ export default function MeuSistemaConfiguracoesPage() {
                                 onPointerLeave={stopConfigurationWave}
                               >
                                 {isExpensesActive ? (
-                                  <Link className={expenseEntryClassName} href="/meu-sistema/despesas">
+                                  <Link
+                                    className={expenseEntryClassName}
+                                    href={buildPlatformReturnHref("/meu-sistema/despesas", "/meu-sistema/configuracoes")}
+                                  >
                                     {expenseEntryContent}
                                   </Link>
                                 ) : (
@@ -1141,7 +1222,10 @@ export default function MeuSistemaConfiguracoesPage() {
                                 onPointerEnter={startConfigurationPointerWave}
                                 onPointerLeave={stopConfigurationWave}
                               >
-                                <Link className="configuration-setting-fiscal-entry" href="/meu-sistema/convenios">
+                                <Link
+                                  className="configuration-setting-fiscal-entry"
+                                  href={buildPlatformReturnHref("/meu-sistema/convenios", "/meu-sistema/configuracoes")}
+                                >
                                   <span className="configuration-setting-icon" aria-hidden="true">
                                     <Icon size={19} />
                                   </span>
@@ -1436,7 +1520,7 @@ export default function MeuSistemaConfiguracoesPage() {
               </div>
             ) : null}
 
-            {isFiscalStep ? (
+            {isFiscalStep && !isFiscalFeatureBlocked ? (
               <div className={`${flowPanelClassName} configuration-fiscal-panel`} key={flowStep}>
                 <header className="platform-flow-head configuration-flow-head">
                   <h1>{flowStep === "fiscalCompany" ? "Cadastro fiscal" : "Emissão fiscal"}</h1>

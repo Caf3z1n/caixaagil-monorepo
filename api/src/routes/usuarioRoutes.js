@@ -1,6 +1,6 @@
 const { Router } = require('express');
 const controller = require('../app/controllers/usuarioController');
-const auth = require('../app/middlewares/auth');
+const adminAuth = require('../app/middlewares/adminAuth');
 
 const router = Router();
 
@@ -12,7 +12,7 @@ router.post('/validar-redefinicao-senha', controller.validatePasswordReset);
 router.post('/redefinir-senha', controller.resetPassword);
 router.post('/', controller.create);
 
-router.use(auth);
+router.use(adminAuth);
 router.get('/', controller.list);
 router.get('/:id', controller.show);
 router.put('/:id', controller.update);

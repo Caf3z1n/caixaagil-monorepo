@@ -34,6 +34,8 @@ import {
   CreditCard,
   CupSoda,
   Dumbbell,
+  Eye,
+  EyeOff,
   Gift,
   HandCoins,
   History,
@@ -74,7 +76,16 @@ import {
   type LocalPdvStorePendingEvent,
   type LocalPdvStoreSummary
 } from "@/lib/local-pdv-store";
+import {
+  applyPdvAppScale,
+  normalizePdvAppScale,
+  pdvAppScaleOptions,
+  readStoredPdvAppScale,
+  saveStoredPdvAppScale,
+  type PdvAppScaleValue
+} from "@/lib/pdv-app-scale";
 import { CashierModal } from "./cashier-modal";
+import { PdvScaleSurface } from "./pdv-scale-surface";
 
 type ConnectivityState = "online" | "offline";
 type CashierView = "menu" | "sale" | "commands" | "command-editor" | "agreement" | "expenses" | "history";
@@ -143,6 +154,18 @@ type ApiCatalogResponse = {
   clientes_convenio?: ApiAgreementClient[];
   recebimentos_convenio?: ApiAgreementReceipt[];
   funcionarios?: ApiEmployee[];
+  billing_status?: BillingStatus | null;
+};
+
+type BillingStatus = {
+  fase: "regular" | "aviso" | "atrasada" | "bloqueada" | string;
+  bloqueado: boolean;
+  permite_operacao: boolean;
+  mensagem?: string | null;
+  proximo_pagamento_em?: string | null;
+  dias_em_atraso?: number;
+  dias_para_bloqueio?: number | null;
+  bloqueia_em?: string | null;
 };
 
 type ApiPdvSettings = {
@@ -200,6 +223,7 @@ type SyncPushResponse = {
   sincronizado_em: string;
   processados: number;
   erros: number;
+  billing_status?: BillingStatus | null;
   eventos: Array<{
     id: string;
     status: "processado" | "duplicado" | "erro" | string;
@@ -224,6 +248,7 @@ type ShiftPreviewResponse = {
   data_operacao_rotulo: string;
   ultimo_turno: number;
   proximo_turno: number;
+  billing_status?: BillingStatus | null;
 };
 
 type CartItem = Product & {
@@ -416,8 +441,10 @@ type DesktopCashierFlowProps = {
   shiftSequenceScope: string;
   initialSettings?: ApiPdvSettings | null;
   initialEmployees?: ApiEmployee[];
+  initialBillingStatus?: BillingStatus | null;
   lastAccessLabel: string;
   systemMessage?: string;
+  onBillingStatusChange?: (status: BillingStatus | null) => void;
   onConnectivityChange: (state: ConnectivityState) => void;
   onSystemMessage: (message: string) => void;
 };
@@ -770,7 +797,10 @@ async function fetchRemoteShiftNumber({
   });
   const shiftNumber = Number(response.proximo_turno);
 
-  return Number.isFinite(shiftNumber) ? Math.max(1, Math.floor(shiftNumber)) : null;
+  return {
+    billingStatus: response.billing_status ?? null,
+    shiftNumber: Number.isFinite(shiftNumber) ? Math.max(1, Math.floor(shiftNumber)) : null
+  };
 }
 
 function formatOpenCashDate(date: Date, shiftNumber: number) {
@@ -797,6 +827,60 @@ function formatSyncDateTime(value?: string | null) {
   }
 
   return dateTimeFormatter.format(date);
+}
+
+function formatBillingDate(value?: string | null) {
+  if (!value) {
+    return "sem data";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "sem data";
+  }
+
+  return shortDateFormatter.format(date);
+}
+
+function isBillingBlocked(status?: BillingStatus | null) {
+  return Boolean(status?.bloqueado || status?.fase === "bloqueada");
+}
+
+function isBillingAttention(status?: BillingStatus | null) {
+  return Boolean(status && status.fase !== "regular");
+}
+
+function getBillingOperationMessage(status?: BillingStatus | null) {
+  if (!status) {
+    return "Conta bloqueada por pendência de assinatura.";
+  }
+
+  return status.mensagem || "Conta bloqueada por pendência de assinatura.";
+}
+
+function getBillingNoticeTitle(status: BillingStatus) {
+  if (isBillingBlocked(status)) {
+    return "Operação bloqueada";
+  }
+
+  if (status.fase === "atrasada") {
+    return "Pagamento em atraso";
+  }
+
+  return "Pagamento precisa de atenção";
+}
+
+function getBillingNoticeDetail(status: BillingStatus) {
+  if (status.mensagem) {
+    return status.mensagem;
+  }
+
+  if (status.dias_em_atraso && status.dias_em_atraso > 0) {
+    return `${status.dias_em_atraso} dia${status.dias_em_atraso === 1 ? "" : "s"} em atraso.`;
+  }
+
+  return `Próximo pagamento: ${formatBillingDate(status.proximo_pagamento_em)}.`;
 }
 
 function parseCurrencyCents(value: string) {
@@ -1763,6 +1847,7 @@ function EmployeeAuthModal({
   onClose: () => void;
   onConfirm: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const [showCode, setShowCode] = useState(false);
   const title = mode === "open" ? "Abrir caixa" : "Fechar caixa";
   const description = mode === "open"
     ? "Informe a senha do funcionário responsável pelo turno."
@@ -1793,16 +1878,25 @@ function EmployeeAuthModal({
             <KeyRound aria-hidden="true" size={17} />
             Senha
           </span>
-          <input
-            autoFocus
-            autoComplete="one-time-code"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            type="password"
-            value={code}
-            placeholder="Apenas números"
-            onChange={(event) => onChangeCode(normalizeEmployeeCode(event.currentTarget.value))}
-          />
+          <span className="pdv-employee-password-input">
+            <input
+              autoFocus
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              type={showCode ? "text" : "password"}
+              value={code}
+              placeholder="Apenas números"
+              onChange={(event) => onChangeCode(normalizeEmployeeCode(event.currentTarget.value))}
+            />
+            <button
+              aria-label={showCode ? "Ocultar senha" : "Mostrar senha"}
+              type="button"
+              onClick={() => setShowCode(current => !current)}
+            >
+              {showCode ? <EyeOff aria-hidden="true" size={18} /> : <Eye aria-hidden="true" size={18} />}
+            </button>
+          </span>
         </label>
         {error ? (
           <p className="pdv-employee-auth-error" role="alert">
@@ -1822,7 +1916,9 @@ export function DesktopCashierFlow({
   shiftSequenceScope,
   initialSettings,
   initialEmployees,
+  initialBillingStatus,
   lastAccessLabel,
+  onBillingStatusChange,
   onConnectivityChange,
   systemMessage,
   onSystemMessage
@@ -1858,6 +1954,8 @@ export function DesktopCashierFlow({
     normalizeEmployeeControlSettings(initialSettings?.controle_funcionarios)
   );
   const [employees, setEmployees] = useState<EmployeeRecord[]>(() => mergeEmployees((initialEmployees ?? []).map(mapEmployee)));
+  const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(initialBillingStatus ?? null);
+  const billingStatusRef = useRef<BillingStatus | null>(initialBillingStatus ?? null);
   const [employeeAuthRequest, setEmployeeAuthRequest] = useState<EmployeeAuthRequest | null>(null);
   const [employeeAuthCode, setEmployeeAuthCode] = useState("");
   const [employeeAuthError, setEmployeeAuthError] = useState("");
@@ -1888,6 +1986,7 @@ export function DesktopCashierFlow({
   const [expenseEditRequest, setExpenseEditRequest] = useState<CashExpenseRecord | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [appScale, setAppScale] = useState<PdvAppScaleValue>(() => readStoredPdvAppScale());
   const [isProductPickerOpen, setIsProductPickerOpen] = useState(false);
   const [isLocalStateReady, setIsLocalStateReady] = useState(false);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
@@ -1912,6 +2011,14 @@ export function DesktopCashierFlow({
   const isFiscalSyncingRef = useRef(false);
   const isContingencyTransmittingRef = useRef(false);
   const hasLoadedRemoteDataRef = useRef(false);
+
+  const updateBillingStatus = useCallback((nextStatus?: BillingStatus | null) => {
+    const normalizedStatus = nextStatus ?? null;
+
+    billingStatusRef.current = normalizedStatus;
+    setBillingStatus(normalizedStatus);
+    onBillingStatusChange?.(normalizedStatus);
+  }, [onBillingStatusChange]);
 
   const localStoreScope = useMemo(
     () => `${shiftSequenceScope || "local"}:${deviceId || "device"}`,
@@ -2126,6 +2233,11 @@ export function DesktopCashierFlow({
   const expectedCashCents = session ? Math.max(sessionCashSales - sessionExpenses, 0) : 0;
 
   useEffect(() => {
+    applyPdvAppScale(appScale);
+    saveStoredPdvAppScale(appScale);
+  }, [appScale]);
+
+  useEffect(() => {
     if (!initialSettings) {
       return;
     }
@@ -2136,6 +2248,10 @@ export function DesktopCashierFlow({
     setPaymentSettings(normalizePaymentSettings(initialSettings.formas_pagamento));
     setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(initialSettings.fiscal ?? null));
   }, [initialSettings]);
+
+  useEffect(() => {
+    updateBillingStatus(initialBillingStatus ?? null);
+  }, [initialBillingStatus, updateBillingStatus]);
 
   useEffect(() => {
     if (!initialSettings || !initialEmployees) {
@@ -2263,6 +2379,7 @@ export function DesktopCashierFlow({
         }))
       });
       onConnectivityChange("online");
+      updateBillingStatus(response.billing_status ?? null);
       const pendingEventIds = new Set(pendingEvents.map((event) => event.id));
       const pendingEventsByLegacyApiId = new Map(
         pendingEvents.map((event) => [event.id.length > 64 ? event.id.slice(0, 64) : event.id, event.id])
@@ -2317,7 +2434,7 @@ export function DesktopCashierFlow({
     } finally {
       isSyncingRef.current = false;
     }
-  }, [connectivity, deviceCredential, deviceId, localStoreScope, onConnectivityChange, onSystemMessage, refreshSyncSummary]);
+  }, [connectivity, deviceCredential, deviceId, localStoreScope, onConnectivityChange, onSystemMessage, refreshSyncSummary, updateBillingStatus]);
 
   const getUnsyncedSaleEventIds = useCallback(async () => {
     const store = getLocalPdvStore();
@@ -2982,6 +3099,7 @@ export function DesktopCashierFlow({
       setExpenseSettings(nextExpenseSettings);
       setEmployeeControlSettings(nextEmployeeControlSettings);
       setPaymentSettings(nextPaymentSettings);
+      updateBillingStatus(response.billing_status ?? null);
       setCartItems((currentItems) => mergeCartItemsWithCatalog(currentItems, nextProducts));
       setCommandEditor((currentEditor) =>
         currentEditor
@@ -3026,7 +3144,7 @@ export function DesktopCashierFlow({
         setIsCatalogLoading(false);
       }
     }
-  }, [connectivity, deviceCredential, deviceId, onConnectivityChange, onSystemMessage, synchronizeRemoteFiscalConfig]);
+  }, [connectivity, deviceCredential, deviceId, onConnectivityChange, onSystemMessage, synchronizeRemoteFiscalConfig, updateBillingStatus]);
 
   const openProductPicker = useCallback((nextSearchQuery = "") => {
     setSearchQuery(nextSearchQuery);
@@ -3044,15 +3162,17 @@ export function DesktopCashierFlow({
     }
 
     try {
-      return await fetchRemoteShiftNumber({
+      const response = await fetchRemoteShiftNumber({
         date,
         deviceCredential,
         deviceId
       });
+      updateBillingStatus(response.billingStatus);
+      return response.shiftNumber;
     } catch {
       return null;
     }
-  }, [connectivity, deviceCredential, deviceId]);
+  }, [connectivity, deviceCredential, deviceId, updateBillingStatus]);
 
   const resolvePreviewShiftNumber = useCallback(async () => {
     const now = new Date();
@@ -4277,6 +4397,14 @@ export function DesktopCashierFlow({
       return;
     }
 
+    if (isBillingBlocked(billingStatusRef.current)) {
+      setIsPaymentOpen(false);
+      setIsCashPaymentOpen(false);
+      setIsAgreementPaymentOpen(false);
+      onSystemMessage(getBillingOperationMessage(billingStatusRef.current));
+      return;
+    }
+
     if (sourceCommand && !isCommandsEnabled) {
       setCommandPaymentRequest(null);
       setIsPaymentOpen(false);
@@ -4595,11 +4723,22 @@ export function DesktopCashierFlow({
       return;
     }
 
+    if (isBillingBlocked(billingStatusRef.current)) {
+      onSystemMessage(getBillingOperationMessage(billingStatusRef.current));
+      return;
+    }
+
     setIsOpeningSession(true);
     const openedAt = new Date();
 
     try {
       const remoteShiftNumber = await getRemoteShiftNumber(openedAt);
+
+      if (isBillingBlocked(billingStatusRef.current)) {
+        onSystemMessage(getBillingOperationMessage(billingStatusRef.current));
+        return;
+      }
+
       const shiftNumber = await reserveShiftNumber(openedAt, shiftSequenceScope, remoteShiftNumber);
       const nextSession = {
         id: createId("turno"),
@@ -4630,6 +4769,11 @@ export function DesktopCashierFlow({
 
   async function openSession() {
     if (isOpeningSession) {
+      return;
+    }
+
+    if (isBillingBlocked(billingStatusRef.current)) {
+      onSystemMessage(getBillingOperationMessage(billingStatusRef.current));
       return;
     }
 
@@ -5246,6 +5390,8 @@ export function DesktopCashierFlow({
     const nextShiftNumber = previewShiftNumber;
 
     if (!session) {
+      const isOpenTurnBlocked = isBillingBlocked(billingStatus);
+
       return (
         <section className="pdv-cashier-card pdv-open-turn-card" aria-label={`Abrir caixa, turno ${nextShiftNumber}`}>
           <p className="pdv-open-turn-date">{formatOpenCashDate(now, nextShiftNumber)}</p>
@@ -5262,13 +5408,13 @@ export function DesktopCashierFlow({
               event.currentTarget.classList.remove("pdv-open-turn-action--hovering");
             }}
             onClick={openSession}
-            disabled={isOpeningSession}
+            disabled={isOpeningSession || isOpenTurnBlocked}
           >
             <span className="pdv-open-turn-action-icon" aria-hidden="true">
-              {isOpeningSession ? <LoaderCircle className="pdv-spin" size={22} /> : <Store size={22} />}
+              {isOpeningSession ? <LoaderCircle className="pdv-spin" size={22} /> : isOpenTurnBlocked ? <Ban size={22} /> : <Store size={22} />}
             </span>
-            <strong>{isOpeningSession ? "Abrindo turno" : `Abrir Turno ${nextShiftNumber}`}</strong>
-            <span className="pdv-open-turn-shortcut">[ENTER]</span>
+            <strong>{isOpeningSession ? "Abrindo turno" : isOpenTurnBlocked ? "Operação bloqueada" : `Abrir Turno ${nextShiftNumber}`}</strong>
+            <span className="pdv-open-turn-shortcut">{isOpenTurnBlocked ? "ASSINATURA" : "[ENTER]"}</span>
             <ArrowRight aria-hidden="true" size={19} />
           </button>
         </section>
@@ -5393,9 +5539,9 @@ export function DesktopCashierFlow({
               Criar comanda
             </button>
           ) : null}
-          <button className="pdv-primary-action" type="button" onClick={() => setIsPaymentOpen(true)} disabled={cartItems.length === 0}>
-            <CreditCard aria-hidden="true" size={17} />
-            Finalizar venda
+          <button className="pdv-primary-action" type="button" onClick={() => setIsPaymentOpen(true)} disabled={cartItems.length === 0 || isBillingBlocked(billingStatus)}>
+            {isBillingBlocked(billingStatus) ? <Ban aria-hidden="true" size={17} /> : <CreditCard aria-hidden="true" size={17} />}
+            {isBillingBlocked(billingStatus) ? "Venda bloqueada" : "Finalizar venda"}
           </button>
         </div>
       </section>
@@ -6036,100 +6182,125 @@ export function DesktopCashierFlow({
   ]
     .filter(Boolean)
     .join(" ");
+  const billingNotice = billingStatus && isBillingAttention(billingStatus) ? billingStatus : null;
 
   return (
     <>
-      <header className="pdv-system-header">
-        <div className="pdv-system-brand">
-          <img className="pdv-system-brand-mark" src="./app-icon.png" alt="" />
-          <span>
-            <strong>CAIXA ÁGIL PDV</strong>
-          </span>
-        </div>
+      <PdvScaleSurface>
+        <header className="pdv-system-header">
+          <div className="pdv-system-brand">
+            <img className="pdv-system-brand-mark" src="./app-icon.png" alt="" />
+            <span>
+              <strong>CAIXA ÁGIL PDV</strong>
+            </span>
+          </div>
 
-        <nav className="pdv-primary-nav" aria-label="Funções do caixa">
-          {session ? (
-            navItems.map((item) => {
-              const isActive = activeView === item.view || (item.view === "commands" && activeView === "command-editor");
-              const showCommandCount = item.view === "commands" && openCommandsCount > 0;
+          <nav className="pdv-primary-nav" aria-label="Funções do caixa">
+            <div className="pdv-primary-nav-track">
+              {session ? (
+                navItems.map((item) => {
+                  const isActive = activeView === item.view || (item.view === "commands" && activeView === "command-editor");
+                  const showCommandCount = item.view === "commands" && openCommandsCount > 0;
 
-              return (
-                <button
-                  className={isActive ? "pdv-primary-nav-link pdv-primary-nav-link-active" : "pdv-primary-nav-link"}
-                  key={item.view}
-                  type="button"
-                  onClick={() => {
-                    setCommandEditor(null);
-                    setCommandNameRequest(null);
-                    setCommandDeleteRequest(null);
-                    setCommandPaymentRequest(null);
-                    setView(item.view);
-                    onSystemMessage("");
-                  }}
-                  aria-current={isActive ? "page" : undefined}
-                  aria-label={showCommandCount ? `${item.label}, ${openCommandsLabel}, atalho ${item.shortcut}` : undefined}
-                >
-                  <span>{item.label}</span>
-                  {showCommandCount ? (
-                    <span className="pdv-primary-nav-count" title={openCommandsLabel} aria-hidden="true">
-                      <span className="pdv-primary-nav-count-dot" />
-                      {openCommandsCount}
-                    </span>
-                  ) : null}
-                  <kbd>{item.shortcut}</kbd>
-                </button>
-              );
-            })
-          ) : (
-            <span className="pdv-primary-nav-placeholder">Turno fechado</span>
-          )}
-        </nav>
+                  return (
+                    <button
+                      className={isActive ? "pdv-primary-nav-link pdv-primary-nav-link-active" : "pdv-primary-nav-link"}
+                      key={item.view}
+                      type="button"
+                      onClick={() => {
+                        setCommandEditor(null);
+                        setCommandNameRequest(null);
+                        setCommandDeleteRequest(null);
+                        setCommandPaymentRequest(null);
+                        setView(item.view);
+                        onSystemMessage("");
+                      }}
+                      aria-current={isActive ? "page" : undefined}
+                      aria-label={showCommandCount ? `${item.label}, ${openCommandsLabel}, atalho ${item.shortcut}` : undefined}
+                    >
+                      <span>{item.label}</span>
+                      {showCommandCount ? (
+                        <span className="pdv-primary-nav-count" title={openCommandsLabel} aria-hidden="true">
+                          <span className="pdv-primary-nav-count-dot" />
+                          {openCommandsCount}
+                        </span>
+                      ) : null}
+                      <kbd>{item.shortcut}</kbd>
+                    </button>
+                  );
+                })
+              ) : (
+                <span className="pdv-primary-nav-placeholder">Turno fechado</span>
+              )}
+            </div>
+          </nav>
 
-        <div className="pdv-system-header-actions">
-          {session ? (
+          <div className="pdv-system-header-actions">
+            {session ? (
+              <button
+                className="pdv-header-close-button"
+                type="button"
+                onPointerEnter={(event) => startWaveHover(event, "pdv-header-close-button--hovering")}
+                onPointerLeave={(event) => {
+                  event.currentTarget.classList.remove("pdv-header-close-button--hovering");
+                }}
+                onFocus={(event) => startWaveFocus(event, "pdv-header-close-button--hovering")}
+                onBlur={(event) => {
+                  event.currentTarget.classList.remove("pdv-header-close-button--hovering");
+                }}
+                onClick={() => setIsClosingSession(true)}
+              >
+                <span>Fechar caixa</span>
+                <ArrowRight aria-hidden="true" size={17} />
+              </button>
+            ) : null}
             <button
-              className="pdv-header-close-button"
+              className="pdv-header-settings-button"
               type="button"
-              onPointerEnter={(event) => startWaveHover(event, "pdv-header-close-button--hovering")}
-              onPointerLeave={(event) => {
-                event.currentTarget.classList.remove("pdv-header-close-button--hovering");
-              }}
-              onFocus={(event) => startWaveFocus(event, "pdv-header-close-button--hovering")}
-              onBlur={(event) => {
-                event.currentTarget.classList.remove("pdv-header-close-button--hovering");
-              }}
-              onClick={() => setIsClosingSession(true)}
+              onClick={() => setIsSettingsOpen(true)}
+              aria-label="Configurações do PDV"
             >
-              <span>Fechar caixa</span>
-              <ArrowRight aria-hidden="true" size={17} />
+              <Settings aria-hidden="true" size={21} />
             </button>
+          </div>
+        </header>
+
+        <section className={shellClassName} aria-label="Sistema do caixa">
+          <div className="pdv-cashier-section-title" aria-label={sectionTitle}>
+            <span className="pdv-cashier-section-main">
+              <SectionIcon aria-hidden="true" />
+              <strong>{sectionTitle}</strong>
+            </span>
+          </div>
+
+          {billingNotice ? (
+            <div
+              className={isBillingBlocked(billingNotice)
+                ? "pdv-billing-notice pdv-billing-notice-blocked"
+                : "pdv-billing-notice"
+              }
+              role={isBillingBlocked(billingNotice) ? "alert" : "status"}
+            >
+              {isBillingBlocked(billingNotice) ? <Ban aria-hidden="true" size={18} /> : <AlertTriangle aria-hidden="true" size={18} />}
+              <span>
+                <strong>{getBillingNoticeTitle(billingNotice)}</strong>
+                <small>{getBillingNoticeDetail(billingNotice)}</small>
+              </span>
+              {billingNotice.bloqueia_em && !isBillingBlocked(billingNotice) ? (
+                <em>Bloqueio em {formatBillingDate(billingNotice.bloqueia_em)}</em>
+              ) : null}
+            </div>
           ) : null}
-          <button
-            className="pdv-header-settings-button"
-            type="button"
-            onClick={() => setIsSettingsOpen(true)}
-            aria-label="Configurações do PDV"
-          >
-            <Settings aria-hidden="true" size={21} />
-          </button>
-        </div>
-      </header>
 
-      <section className={shellClassName} aria-label="Sistema do caixa">
-        <div className="pdv-cashier-section-title" aria-label={sectionTitle}>
-          <span className="pdv-cashier-section-main">
-            <SectionIcon aria-hidden="true" />
-            <strong>{sectionTitle}</strong>
-          </span>
-        </div>
+          {systemMessage ? <p className="pdv-system-message">{systemMessage}</p> : null}
 
-        {activeView === "menu" ? renderMenu() : null}
-        {activeView === "sale" ? renderSale() : null}
-        {isCommandsEnabled && activeView === "commands" ? renderCommands() : null}
-        {isCommandsEnabled && activeView === "command-editor" ? renderCommandEditor() : null}
-        {activeView === "agreement" ? renderAgreement() : null}
-        {isExpensesEnabled && activeView === "expenses" ? renderExpenses() : null}
-        {activeView === "history" ? renderHistory() : null}
+          {activeView === "menu" ? renderMenu() : null}
+          {activeView === "sale" ? renderSale() : null}
+          {isCommandsEnabled && activeView === "commands" ? renderCommands() : null}
+          {isCommandsEnabled && activeView === "command-editor" ? renderCommandEditor() : null}
+          {activeView === "agreement" ? renderAgreement() : null}
+          {isExpensesEnabled && activeView === "expenses" ? renderExpenses() : null}
+          {activeView === "history" ? renderHistory() : null}
 
         {isProductPickerOpen && (isCommandsEnabled || view !== "command-editor") ? (
           <ProductPickerModal
@@ -6252,6 +6423,7 @@ export function DesktopCashierFlow({
         ) : null}
         {isSettingsOpen ? (
           <PdvSettingsModal
+            appScale={appScale}
             catalogSyncedAt={catalogSyncedAt}
             catalogSyncError={catalogSyncError}
             connectivity={connectivity}
@@ -6261,6 +6433,7 @@ export function DesktopCashierFlow({
             lastAccessLabel={lastAccessLabel}
             localStoreScope={localStoreScope}
             onClose={() => setIsSettingsOpen(false)}
+            onAppScaleChange={setAppScale}
             onShowSyncDetails={() => setIsSyncDetailsOpen(true)}
             onSyncNow={syncNow}
             pdvIdentity={pdvIdentity}
@@ -6336,12 +6509,14 @@ export function DesktopCashierFlow({
             {pendingSyncCount > 0 ? <em>{pendingSyncCount} pendentes</em> : null}
           </div>
         ) : null}
-      </section>
+        </section>
+      </PdvScaleSurface>
     </>
   );
 }
 
 function PdvSettingsModal({
+  appScale,
   catalogSyncedAt,
   catalogSyncError,
   connectivity,
@@ -6349,12 +6524,14 @@ function PdvSettingsModal({
   isCatalogSyncing,
   isManualSyncing,
   localStoreScope,
+  onAppScaleChange,
   onClose,
   onShowSyncDetails,
   onSyncNow,
   pdvIdentity,
   syncSummary
 }: {
+  appScale: PdvAppScaleValue;
   catalogSyncedAt: string | null;
   catalogSyncError: string;
   connectivity: ConnectivityState;
@@ -6363,6 +6540,7 @@ function PdvSettingsModal({
   isManualSyncing: boolean;
   lastAccessLabel: string;
   localStoreScope: string;
+  onAppScaleChange: (scale: PdvAppScaleValue) => void;
   onClose: () => void;
   onShowSyncDetails: () => void;
   onSyncNow: () => void | Promise<void>;
@@ -6514,6 +6692,10 @@ function PdvSettingsModal({
     void savePrintSettings(nextSettings);
   }
 
+  function handleAppScaleChange(nextScale: string) {
+    onAppScaleChange(normalizePdvAppScale(nextScale));
+  }
+
   return (
     <CashierModal
       title="Configurações do PDV"
@@ -6556,6 +6738,27 @@ function PdvSettingsModal({
           </button>
         </section>
 
+        <section className="pdv-settings-section" aria-label="Aparência do PDV">
+          <div className="pdv-settings-section-head">
+            <Wrench aria-hidden="true" size={20} />
+            <div>
+              <strong>Aparência</strong>
+              <span>Escala atual: {appScale}%</span>
+            </div>
+          </div>
+
+          <div className="pdv-settings-field">
+            <span>Escala do app</span>
+            <PdvPlatformSelect
+              ariaLabel="Selecionar escala do app"
+              options={pdvAppScaleOptions}
+              placeholder="Selecione uma escala"
+              value={String(appScale)}
+              onChange={handleAppScaleChange}
+            />
+          </div>
+        </section>
+
         <section className="pdv-settings-section pdv-settings-printing" aria-label="Impressão fiscal do PDV">
           <div className="pdv-settings-section-head">
             <Printer aria-hidden="true" size={20} />
@@ -6571,7 +6774,7 @@ function PdvSettingsModal({
 
           <div className="pdv-printing-field">
             <span>Impressora</span>
-            <PdvPrinterSelect
+            <PdvPlatformSelect
               ariaLabel="Selecionar impressora fiscal"
               disabled={isPrintConfigLoading || isPrintConfigSaving || printerChoices.length === 0}
               options={printerSelectOptions}
@@ -6586,12 +6789,12 @@ function PdvSettingsModal({
   );
 }
 
-type PdvPrinterSelectOption = {
+type PdvPlatformSelectOption = {
   value: string;
   label: string;
 };
 
-function PdvPrinterSelect({
+function PdvPlatformSelect({
   ariaLabel,
   disabled = false,
   onChange,
@@ -6602,7 +6805,7 @@ function PdvPrinterSelect({
   ariaLabel: string;
   disabled?: boolean;
   onChange: (value: string) => void;
-  options: PdvPrinterSelectOption[];
+  options: PdvPlatformSelectOption[];
   placeholder: string;
   value: string;
 }) {

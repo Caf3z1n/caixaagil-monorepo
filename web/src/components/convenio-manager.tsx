@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { flushSync } from "react-dom";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -28,6 +27,7 @@ import {
 } from "lucide-react";
 
 import { PlatformSelect, type PlatformSelectOption } from "@/components/platform-select";
+import { PlatformReturnLink } from "@/components/platform-return-link";
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
@@ -801,7 +801,7 @@ export function ConvenioManager() {
     setFeedback(null);
 
     try {
-      const result = await apiGet<ClientesResponse>("/convenios/clientes", { token });
+      const result = await apiGet<ClientesResponse>("/convenios/clientes", { cacheTtlMs: 60_000, token });
       setClientes(sortClientes(result.clientes));
     } catch (error) {
       setFeedback({
@@ -825,7 +825,7 @@ export function ConvenioManager() {
     setFeedback(null);
 
     try {
-      const result = await apiGet<RecebimentosResponse>("/convenios/recebimentos", { token });
+      const result = await apiGet<RecebimentosResponse>("/convenios/recebimentos", { cacheTtlMs: 60_000, token });
       setRecebimentos(result.recebimentos);
     } catch (error) {
       setFeedback({
@@ -1643,10 +1643,10 @@ export function ConvenioManager() {
 
           <div className="platform-flow-actions convenio-flow-actions" aria-label="Ações do fluxo">
             {flowStep === "menu" ? (
-              <Link className="platform-secondary-button" href="/meu-sistema">
+              <PlatformReturnLink className="platform-secondary-button">
                 <ArrowLeft aria-hidden="true" size={17} />
                 Voltar
-              </Link>
+              </PlatformReturnLink>
             ) : (
               <button
                 className="platform-secondary-button"

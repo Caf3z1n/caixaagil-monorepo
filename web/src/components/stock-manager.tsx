@@ -726,7 +726,7 @@ export function StockManager() {
     }
 
     try {
-      const result = await apiGet<EstoqueSnapshot>("/estoques", { token });
+      const result = await apiGet<EstoqueSnapshot>("/estoques", { cacheTtlMs: 60_000, token });
 
       setSnapshot(result);
       setLoadError(null);

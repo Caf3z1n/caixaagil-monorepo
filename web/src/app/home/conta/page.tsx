@@ -68,6 +68,22 @@ type PagamentoAssinatura = {
   created_at?: string | null;
 };
 
+type AlteracaoAssinatura = {
+  id: number;
+  tipo: string;
+  status: string;
+  plano_atual: string;
+  plano_novo: string;
+  plano_snapshot?: {
+    nome?: string | null;
+    valor_centavos?: number | null;
+    moeda?: string | null;
+  } | null;
+  valor_novo_centavos: number;
+  moeda?: string | null;
+  aplicar_em: string;
+};
+
 type Assinatura = {
   id: number;
   plano: string;
@@ -81,6 +97,7 @@ type Assinatura = {
   createdAt?: string | null;
   created_at?: string | null;
   pagamentos?: PagamentoAssinatura[];
+  alteracao_agendada?: AlteracaoAssinatura | null;
 };
 
 type ContaResponse = {
@@ -92,6 +109,10 @@ type ContaResponse = {
 };
 
 type CheckoutResponse = {
+  alteracaoAgendada?: boolean;
+  alteracao?: AlteracaoAssinatura | null;
+  aplicarEm?: string | null;
+  assinaturaAtualizada?: boolean;
   checkoutUrl?: string;
   creditoRateioCentavos?: number;
   message?: string;
@@ -246,8 +267,17 @@ function getEstimatedNextPaymentDate(assinatura?: Assinatura | null) {
 }
 
 function getLocalProrationPreview(assinatura: Assinatura | null, plano: Plano | null) {
-  if (!assinatura || !plano || normalizeStatus(assinatura.status) !== "ativa") {
+  if (!assinatura || !plano || plano.id === assinatura.plano || normalizeStatus(assinatura.status) !== "ativa") {
     return null;
+  }
+
+  if (plano.valor_centavos <= assinatura.valor_centavos) {
+    return {
+      credit: 0,
+      firstPayment: plano.valor_centavos,
+      kind: "downgrade" as const,
+      nextPaymentDate: assinatura.proximo_pagamento_em || getEstimatedNextPaymentDate(assinatura),
+    };
   }
 
   const nextPaymentValue = assinatura.proximo_pagamento_em || getEstimatedNextPaymentDate(assinatura);
@@ -278,6 +308,7 @@ function getLocalProrationPreview(assinatura: Assinatura | null, plano: Plano | 
   return {
     credit,
     firstPayment: Math.max(plano.valor_centavos - credit, MIN_MERCADO_PAGO_CHARGE_CENTS),
+    kind: "upgrade" as const,
     nextPaymentDate: nextPaymentDate.toISOString(),
   };
 }
@@ -382,7 +413,7 @@ export default function PlatformAccountPage() {
 
     try {
       setLoading(true);
-      const result = await apiGet<ContaResponse>("/conta", { token: storedToken });
+      const result = await apiGet<ContaResponse>("/conta", { cacheTtlMs: 60_000, token: storedToken });
       setAccountData(result);
       setPageError(null);
 
@@ -407,6 +438,17 @@ export default function PlatformAccountPage() {
   const assinatura = accountData?.assinatura ?? null;
   const planos = accountData?.planos ?? [];
   const planoAtual = planos.find((plano) => plano.id === assinatura?.plano);
+  const alteracaoAgendada = assinatura?.alteracao_agendada ?? null;
+  const planoAgendadoCatalogo = planos.find((plano) => plano.id === alteracaoAgendada?.plano_novo);
+  const planoAgendadoNome =
+    alteracaoAgendada?.plano_snapshot?.nome || planoAgendadoCatalogo?.nome || alteracaoAgendada?.plano_novo || "";
+  const planoAgendadoTitulo = planoAgendadoNome ? `Plano ${planoAgendadoNome}` : "Plano agendado";
+  const planoAgendadoValor =
+    typeof alteracaoAgendada?.plano_snapshot?.valor_centavos === "number"
+      ? alteracaoAgendada.plano_snapshot.valor_centavos
+      : alteracaoAgendada?.valor_novo_centavos;
+  const planoAgendadoMoeda =
+    alteracaoAgendada?.plano_snapshot?.moeda || alteracaoAgendada?.moeda || assinatura?.moeda || "BRL";
   const selectedPlanData = planos.find((plano) => plano.id === selectedPlan) || null;
   const prorationPreview = getLocalProrationPreview(assinatura, selectedPlanData);
   const pagamentos = useMemo(() => sortPayments(assinatura?.pagamentos ?? []), [assinatura]);
@@ -578,6 +620,13 @@ export default function PlatformAccountPage() {
         { token }
       );
 
+      if (result.alteracaoAgendada || result.assinaturaAtualizada) {
+        setFeedback({ message: result.message || "Assinatura atualizada.", tone: "success" });
+        await loadAccount();
+        setSubscriptionStep("menu");
+        return;
+      }
+
       if (!result.checkoutUrl) {
         setFeedback({ message: "O Mercado Pago não retornou o link de checkout.", tone: "danger" });
         return;
@@ -714,6 +763,20 @@ export default function PlatformAccountPage() {
                     {getSubscriptionStatusLabel(assinatura?.status)}
                   </span>
                 </div>
+
+                {alteracaoAgendada ? (
+                  <div className="platform-subscription-scheduled-change" aria-label="Alteração de plano agendada">
+                    <span>
+                      <small>Troca agendada</small>
+                      <strong>{planoAgendadoTitulo}</strong>
+                      <em>Aplica em {formatDate(alteracaoAgendada.aplicar_em)}.</em>
+                    </span>
+                    <span>
+                      <small>Nova mensalidade</small>
+                      <strong>{formatCurrency(planoAgendadoValor, planoAgendadoMoeda)}</strong>
+                    </span>
+                  </div>
+                ) : null}
 
                 <div className="platform-payment-history-list platform-payment-history-list-compact" aria-label="Histórico de pagamentos">
                   <div className="platform-account-history-title">
@@ -1038,7 +1101,7 @@ export default function PlatformAccountPage() {
                 }}
               >
                 <h2 id="platform-subscription-modal-title">Mudar plano</h2>
-                <p>O plano atual continua ativo até o Mercado Pago aprovar a troca.</p>
+                <p>Upgrades abrem checkout. Downgrades entram na próxima cobrança e mantêm o ciclo atual.</p>
                 {modalFeedback}
 
                 <div className="auth-plan-options" role="radiogroup" aria-label="Planos">
@@ -1075,14 +1138,18 @@ export default function PlatformAccountPage() {
                 {prorationPreview && selectedPlanData?.id !== assinatura?.plano ? (
                   <div className="platform-subscription-proration" aria-label="Resumo do primeiro pagamento">
                     <span>
-                      <small>Crédito estimado</small>
+                      <small>{prorationPreview.kind === "downgrade" ? "Crédito no período atual" : "Crédito estimado"}</small>
                       <strong>{formatCurrency(prorationPreview.credit)}</strong>
                     </span>
                     <span>
-                      <small>Primeiro pagamento</small>
+                      <small>{prorationPreview.kind === "downgrade" ? "Próxima cobrança" : "Primeiro pagamento"}</small>
                       <strong>{formatCurrency(prorationPreview.firstPayment)}</strong>
                     </span>
-                    <em>Depois disso, a recorrência volta para {formatCurrency(selectedPlanData?.valor_centavos)} por mês.</em>
+                    <em>
+                      {prorationPreview.kind === "downgrade"
+                        ? "O valor menor entra na próxima cobrança; o período atual não recebe desconto."
+                        : `Depois disso, a recorrência volta para ${formatCurrency(selectedPlanData?.valor_centavos)} por mês.`}
+                    </em>
                   </div>
                 ) : null}
 

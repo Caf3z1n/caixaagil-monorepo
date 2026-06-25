@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const sessionRoutes = require('./sessionRoutes');
+const adminRoutes = require('./adminRoutes');
 const usuarioRoutes = require('./usuarioRoutes');
 const assinaturaRoutes = require('./assinaturaRoutes');
 const contaRoutes = require('./contaRoutes');
@@ -23,6 +24,7 @@ const router = Router();
 
 // ROTAS ABERTAS
 router.use('/sessions', sessionRoutes);
+router.use('/admin', adminRoutes);
 router.use('/usuarios', usuarioRoutes);
 router.use('/assinaturas', assinaturaRoutes);
 router.use('/conta', contaRoutes);

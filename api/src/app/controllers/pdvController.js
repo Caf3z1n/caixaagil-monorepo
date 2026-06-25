@@ -22,6 +22,8 @@ const {
 } = require('../models');
 const produtoController = require('./produtoController');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
+const { ensureLimitAvailable } = require('../services/assinaturaEntitlementsService');
+const { getBillingStatus } = require('../services/assinaturaInadimplenciaService');
 const {
   buildStorageDirectory,
   buildStoredFileName,
@@ -148,6 +150,18 @@ function sanitizePdv(pdv, extra = {}) {
     status_operacional: resolveStatusOperacional(data),
     ...extra,
   };
+}
+
+function isOperationalBillingBlocked(billingStatus) {
+  return Boolean(billingStatus?.bloqueado);
+}
+
+function getBillingBlockedMessage(billingStatus) {
+  return billingStatus?.mensagem || 'Conta bloqueada por pendência de assinatura.';
+}
+
+function isPdvOperationalEventType(eventType) {
+  return eventType === 'turno_aberto' || eventType === 'venda_concluida';
 }
 
 async function getPdvRegistrosVinculados(usuarioId, pdvId) {
@@ -1128,7 +1142,7 @@ async function processExpenseDeleted(pdv, payload, transaction) {
   return existingExpense;
 }
 
-async function processDesktopSyncEvent(pdv, rawEvent) {
+async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
   const event = normalizeSyncEvent(rawEvent);
 
   if (!event.eventType || !event.aggregateType || !event.aggregateId || !event.idempotencyKey) {
@@ -1149,6 +1163,15 @@ async function processDesktopSyncEvent(pdv, rawEvent) {
     return {
       id: event.clientId,
       status: existing.status === 'processado' ? 'duplicado' : existing.status,
+    };
+  }
+
+  if (isPdvOperationalEventType(event.eventType) && isOperationalBillingBlocked(billingStatus)) {
+    return {
+      id: event.clientId,
+      status: 'erro',
+      code: 'SUBSCRIPTION_BLOCKED',
+      message: getBillingBlockedMessage(billingStatus),
     };
   }
 
@@ -1828,6 +1851,14 @@ async function findUserPdv(usuarioId, pdvId) {
 }
 
 function handlePdvError(res, error, defaultMessage) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      code: error.code,
+      message: error.message || defaultMessage,
+      entitlements: error.entitlements,
+    });
+  }
+
   if (error.name === 'SequelizeUniqueConstraintError') {
     return res.status(409).json({
       message: 'Já existe um PDV com esses dados nesta conta.',
@@ -1877,6 +1908,8 @@ module.exports = {
       }
 
       const pairing = createPairingCode();
+
+      await ensureLimitAvailable(req.user.id, 'pdvs_ativos');
 
       const pdv = await Pdv.create({
         usuario_id: req.user.id,
@@ -1971,6 +2004,8 @@ module.exports = {
       }
 
       if (!pdv.ativo) {
+        await ensureLimitAvailable(req.user.id, 'pdvs_ativos');
+
         await pdv.update({
           ativo: true,
           status: 'pendente',
@@ -2099,15 +2134,17 @@ module.exports = {
         }
       );
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
-      const [configuracoes, funcionarioSnapshot] = await Promise.all([
+      const [configuracoes, funcionarioSnapshot, billingStatus] = await Promise.all([
         configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+        getBillingStatus(pdv.usuario_id),
       ]);
 
       return res.json({
         pdv: sanitizePdv(pdv, { identificacao }),
         credencial_dispositivo: credencial,
         configuracoes,
+        billing_status: billingStatus,
         ...funcionarioSnapshot,
       });
     } catch (error) {
@@ -2129,15 +2166,17 @@ module.exports = {
       await pdv.save();
 
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
-      const [configuracoes, funcionarioSnapshot] = await Promise.all([
+      const [configuracoes, funcionarioSnapshot, billingStatus] = await Promise.all([
         configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+        getBillingStatus(pdv.usuario_id),
       ]);
 
       return res.json({
         autenticado: true,
         pdv: sanitizePdv(pdv, { identificacao }),
         configuracoes,
+        billing_status: billingStatus,
         ...funcionarioSnapshot,
       });
     } catch (error) {
@@ -2170,6 +2209,7 @@ module.exports = {
         data_operacao_rotulo: operationDate.rotulo,
         ultimo_turno: nextShiftNumber - 1,
         proximo_turno: nextShiftNumber,
+        billing_status: await getBillingStatus(pdv.usuario_id),
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao buscar próximo turno do PDV.', detail: error.message });
@@ -2190,16 +2230,18 @@ module.exports = {
       pdv.ultima_sincronizacao_em = now;
       await pdv.save();
 
-      const [snapshot, configuracoes, convenioSnapshot, funcionarioSnapshot] = await Promise.all([
+      const [snapshot, configuracoes, convenioSnapshot, funcionarioSnapshot, billingStatus] = await Promise.all([
         produtoController.loadSnapshot(pdv.usuario_id, { onlyActive: true }),
         configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopConvenioSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+        getBillingStatus(pdv.usuario_id),
       ]);
 
       return res.json({
         ...snapshot,
         configuracoes,
+        billing_status: billingStatus,
         ...convenioSnapshot,
         ...funcionarioSnapshot,
       });
@@ -2270,11 +2312,12 @@ module.exports = {
         return res.status(400).json({ message: 'Nenhum evento offline informado.' });
       }
 
+      const billingStatus = await getBillingStatus(pdv.usuario_id);
       const results = [];
 
       for (const event of events) {
         // Processamento sequencial preserva a ordem local: abrir caixa, vender, lançar despesa e fechar.
-        results.push(await processDesktopSyncEvent(pdv, event));
+        results.push(await processDesktopSyncEvent(pdv, event, billingStatus));
       }
 
       const now = new Date();
@@ -2289,6 +2332,7 @@ module.exports = {
         sincronizado_em: now.toISOString(),
         processados: results.filter(result => result.status === 'processado' || result.status === 'duplicado').length,
         erros: results.filter(result => result.status === 'erro').length,
+        billing_status: billingStatus,
         eventos: results,
       });
     } catch (error) {

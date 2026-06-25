@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 export function CashierModal({
@@ -22,6 +23,12 @@ export function CashierModal({
   dismissible?: boolean;
   size?: "sm" | "md" | "lg";
 }) {
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   useEffect(() => {
     const previousHtmlOverflow = document.documentElement.style.overflow;
     const previousBodyOverflow = document.body.style.overflow;
@@ -44,7 +51,11 @@ export function CashierModal({
     };
   }, [dismissible, onClose]);
 
-  return (
+  if (!isMounted) {
+    return null;
+  }
+
+  return createPortal(
     <div className="pdv-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && dismissible && onClose()}>
       <section className={`pdv-modal-card pdv-modal-card-${size}`} aria-modal="true" role="dialog">
         {dismissible ? (
@@ -62,6 +73,7 @@ export function CashierModal({
         <div className="pdv-modal-body">{children}</div>
         {footer ? <footer className="pdv-modal-footer">{footer}</footer> : null}
       </section>
-    </div>
+    </div>,
+    document.body
   );
 }

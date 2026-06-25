@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -20,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
+import { PlatformReturnLink } from "@/components/platform-return-link";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
@@ -147,7 +147,7 @@ export function FuncionarioManager() {
     setFeedback(null);
 
     try {
-      const result = await apiGet<FuncionariosResponse>("/funcionarios", { token });
+      const result = await apiGet<FuncionariosResponse>("/funcionarios", { cacheTtlMs: 60_000, token });
       setFuncionarios(sortEmployees(result.funcionarios));
     } catch (error) {
       setFeedback({
@@ -402,10 +402,10 @@ export function FuncionarioManager() {
           </div>
 
           <div className="platform-flow-actions convenio-flow-actions employee-flow-actions" aria-label="Ações de funcionários">
-            <Link className="platform-secondary-button" href="/meu-sistema/configuracoes">
+            <PlatformReturnLink className="platform-secondary-button">
               <ArrowLeft aria-hidden="true" size={17} />
               Voltar
-            </Link>
+            </PlatformReturnLink>
             <button className="platform-primary-button" type="button" onClick={openCreateEmployeeModal}>
               <Plus aria-hidden="true" size={17} />
               Novo funcionário

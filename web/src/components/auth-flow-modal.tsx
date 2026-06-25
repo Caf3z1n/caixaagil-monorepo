@@ -29,13 +29,53 @@ import {
 } from "@/lib/platform-session";
 
 type AuthStep = "email" | "password" | "entering" | "create-password" | "verify-email" | "reset-password" | "plan" | "payment";
-type PlanId = "inicial" | "completo";
+type PlanId = string;
 type AccountMode = "existing" | "new" | null;
 type ResetRequestStatus = "idle" | "sending" | "sent" | "error";
 type VerificationStatus = "idle" | "sending" | "waiting" | "verified" | "error";
 type CheckoutStatus = "idle" | "creating" | "waiting" | "confirmed" | "error";
 type EmailLookupStatus = "idle" | "checking" | "error";
+type PlansStatus = "idle" | "loading" | "ready" | "error";
+type CustomCodeStatus = "idle" | "checking" | "applied" | "error";
 type AuthFlowInitialStep = "email" | "password" | "plan";
+type AuthPlanResource = {
+  habilitado?: boolean;
+  included?: boolean;
+  label?: string;
+  nome?: string;
+};
+type AuthPlanFromApi = {
+  id: string;
+  name?: string;
+  nome?: string;
+  price?: string;
+  recursos?: AuthPlanResource[];
+  resources?: AuthPlanResource[];
+  valor_centavos?: number;
+  intervalo?: "mensal" | "dias";
+  intervalo_quantidade?: number;
+  gratuito?: boolean;
+  codigo_assinatura?: string;
+  cobranca_inicio_em?: string | null;
+};
+type DisplayPlan = {
+  id: PlanId;
+  name: string;
+  price: string;
+  resources: Array<{ label: string; included: boolean }>;
+  billingLabel: string;
+  customCode?: string;
+  billingStartsAt?: string | null;
+  isFree?: boolean;
+  isCustom?: boolean;
+};
+type PlansResponse = {
+  planos?: AuthPlanFromApi[];
+};
+type ValidateCodeResponse = {
+  codigo: string;
+  plano: AuthPlanFromApi;
+};
 type AuthStepMotion = "forward" | "backward";
 type AuthFlowModalProps = {
   buttonClassName?: string;
@@ -72,16 +112,12 @@ function getAuthMotionIndex(step: AuthStep) {
   return index >= 0 ? index : 0;
 }
 
-const plans: Array<{
-  id: PlanId;
-  name: string;
-  price: string;
-  resources: Array<{ label: string; included: boolean }>;
-}> = [
+const fallbackPlans: DisplayPlan[] = [
   {
     id: "inicial",
     name: "Inicial",
     price: "299",
+    billingLabel: "/mês",
     resources: [
       { label: "PDV desktop local", included: true },
       { label: "Vendas e comanda digital", included: true },
@@ -94,6 +130,7 @@ const plans: Array<{
     id: "completo",
     name: "Completo",
     price: "499",
+    billingLabel: "/mês",
     resources: [
       { label: "PDV desktop local", included: true },
       { label: "Vendas e comanda digital", included: true },
@@ -103,6 +140,54 @@ const plans: Array<{
     ]
   }
 ];
+
+function formatPlanPriceFromCents(cents?: number) {
+  if (!Number.isInteger(cents)) {
+    return "";
+  }
+
+  return new Intl.NumberFormat("pt-BR", {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2
+  }).format((cents || 0) / 100);
+}
+
+function getBillingLabel(plan: AuthPlanFromApi) {
+  if (plan.gratuito) {
+    return "grátis";
+  }
+
+  if (plan.intervalo === "dias") {
+    const quantidade = Number(plan.intervalo_quantidade || 1);
+
+    return quantidade === 1 ? "/dia" : `/ ${quantidade} dias`;
+  }
+
+  return "/mês";
+}
+
+function normalizePlan(plan: AuthPlanFromApi, customCode?: string): DisplayPlan | null {
+  if (!plan?.id) {
+    return null;
+  }
+
+  const resources = (plan.recursos || plan.resources || []).map((resource) => ({
+    included: Boolean(resource.habilitado ?? resource.included),
+    label: resource.nome || resource.label || "Recurso"
+  }));
+
+  return {
+    id: plan.id,
+    name: plan.nome || plan.name || plan.id,
+    price: plan.gratuito ? "0,00" : plan.price || formatPlanPriceFromCents(plan.valor_centavos),
+    resources,
+    billingLabel: getBillingLabel(plan),
+    customCode: customCode || plan.codigo_assinatura,
+    billingStartsAt: plan.cobranca_inicio_em || null,
+    isFree: Boolean(plan.gratuito),
+    isCustom: Boolean(customCode || plan.codigo_assinatura)
+  };
+}
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
@@ -133,7 +218,13 @@ export function AuthFlowModal({
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [plans, setPlans] = useState<DisplayPlan[]>(fallbackPlans);
+  const [plansStatus, setPlansStatus] = useState<PlansStatus>("idle");
   const [selectedPlan, setSelectedPlan] = useState<PlanId | null>(null);
+  const [customPlan, setCustomPlan] = useState<DisplayPlan | null>(null);
+  const [subscriptionCode, setSubscriptionCode] = useState("");
+  const [customCodeStatus, setCustomCodeStatus] = useState<CustomCodeStatus>("idle");
+  const [customCodeMessage, setCustomCodeMessage] = useState("");
   const [accountMode, setAccountMode] = useState<AccountMode>(null);
   const [requiresActivationFlow, setRequiresActivationFlow] = useState(false);
   const [emailLookupStatus, setEmailLookupStatus] = useState<EmailLookupStatus>("idle");
@@ -145,7 +236,7 @@ export function AuthFlowModal({
   const [verificationMessage, setVerificationMessage] = useState("");
   const [checkoutStatus, setCheckoutStatus] = useState<CheckoutStatus>("idle");
   const [checkoutMessage, setCheckoutMessage] = useState("");
-  const [checkoutAssinaturaId, setCheckoutAssinaturaId] = useState<number | null>(null);
+  const [checkoutToken, setCheckoutToken] = useState<string | null>(null);
   const [submittedEmail, setSubmittedEmail] = useState(false);
   const [submittedPassword, setSubmittedPassword] = useState(false);
   const [submittedNewPassword, setSubmittedNewPassword] = useState(false);
@@ -171,6 +262,18 @@ export function AuthFlowModal({
     router.prefetch("/meu-sistema");
   }, [router]);
 
+  useEffect(() => {
+    if (isOpen && plansStatus === "idle") {
+      void loadPlans();
+    }
+  }, [isOpen, plansStatus]);
+
+  useEffect(() => {
+    if (!selectedPlan && (step === "plan" || step === "payment") && plans.length > 0) {
+      setSelectedPlan(initialPlan ?? plans[0].id);
+    }
+  }, [initialPlan, plans, selectedPlan, step]);
+
   const activeStepIndex = useMemo(() => {
     if (step === "email") {
       return 0;
@@ -187,7 +290,14 @@ export function AuthFlowModal({
     return visibleSteps.findIndex((item) => item.id === step);
   }, [step, visibleSteps]);
 
-  const selectedPlanData = selectedPlan ? plans.find((plan) => plan.id === selectedPlan) ?? null : null;
+  const displayPlans = useMemo(() => {
+    if (!customPlan) {
+      return plans;
+    }
+
+    return [customPlan, ...plans.filter((plan) => plan.id !== customPlan.id)];
+  }, [customPlan, plans]);
+  const selectedPlanData = selectedPlan ? displayPlans.find((plan) => plan.id === selectedPlan) ?? null : null;
   const emailError = submittedEmail && !isValidEmail(email);
   const passwordError = submittedPassword && password.trim().length === 0;
   const passwordRequirements = [
@@ -211,6 +321,10 @@ export function AuthFlowModal({
     setShowNewPassword(false);
     setShowConfirmPassword(false);
     setSelectedPlan(initialPlan ?? null);
+    setCustomPlan(null);
+    setSubscriptionCode("");
+    setCustomCodeStatus("idle");
+    setCustomCodeMessage("");
     setAccountMode(isPresetLoginFlow || isVerifiedPlanFlow ? "existing" : null);
     setRequiresActivationFlow(Boolean(initialPlan) || isVerifiedPlanFlow);
     setEmailLookupStatus("idle");
@@ -222,12 +336,76 @@ export function AuthFlowModal({
     setVerificationMessage("");
     setCheckoutStatus("idle");
     setCheckoutMessage("");
-    setCheckoutAssinaturaId(null);
+    setCheckoutToken(null);
     setSubmittedEmail(false);
     setSubmittedPassword(false);
     setSubmittedNewPassword(false);
     setIsEnteringPlatform(false);
     resetAutoSentEmailRef.current = null;
+  }
+
+  async function loadPlans() {
+    if (plansStatus === "loading") {
+      return;
+    }
+
+    try {
+      setPlansStatus("loading");
+      const result = await apiGet<PlansResponse | AuthPlanFromApi[]>("/assinaturas/planos", {
+        cacheTtlMs: 300_000
+      });
+      const rawPlans = Array.isArray(result) ? result : result?.planos ?? [];
+      const normalizedPlans = rawPlans
+        .map((plan) => normalizePlan(plan))
+        .filter((plan): plan is DisplayPlan => Boolean(plan));
+      const nextPlans = normalizedPlans.length > 0 ? normalizedPlans : fallbackPlans;
+
+      setPlans(nextPlans);
+      setPlansStatus("ready");
+
+      if (!selectedPlan) {
+        setSelectedPlan(initialPlan ?? nextPlans[0]?.id ?? null);
+      }
+    } catch {
+      setPlans(fallbackPlans);
+      setPlansStatus("error");
+
+      if (!selectedPlan) {
+        setSelectedPlan(initialPlan ?? fallbackPlans[0]?.id ?? null);
+      }
+    }
+  }
+
+  async function applySubscriptionCode() {
+    const code = subscriptionCode.trim();
+
+    if (!code || customCodeStatus === "checking") {
+      return;
+    }
+
+    try {
+      setCustomCodeStatus("checking");
+      setCustomCodeMessage("");
+
+      const result = await apiPost<ValidateCodeResponse>("/assinaturas/codigo/validar", {
+        codigo_assinatura: code
+      });
+      const normalizedPlan = normalizePlan(result.plano, result.codigo);
+
+      if (!normalizedPlan) {
+        throw new Error("Código de assinatura inválido.");
+      }
+
+      setCustomPlan(normalizedPlan);
+      setSelectedPlan(normalizedPlan.id);
+      setSubscriptionCode(result.codigo);
+      setCustomCodeStatus("applied");
+      setCustomCodeMessage("Código aplicado.");
+    } catch (error) {
+      setCustomPlan(null);
+      setCustomCodeStatus("error");
+      setCustomCodeMessage(error instanceof Error ? error.message : "Não foi possível validar o código.");
+    }
   }
 
   function closeModal() {
@@ -448,17 +626,32 @@ export function AuthFlowModal({
     setCheckoutMessage("");
 
     try {
-      const result = await apiPost<{ assinaturaId?: number; checkoutUrl?: string; message?: string }>("/assinaturas/checkout", {
+      const result = await apiPost<{
+        assinaturaAtiva?: boolean;
+        checkoutToken?: string;
+        checkoutUrl?: string | null;
+        gratuito?: boolean;
+        message?: string;
+      }>("/assinaturas/checkout", {
         email,
-        plano: selectedPlan
+        ...(selectedPlanData.customCode
+          ? { codigo_assinatura: selectedPlanData.customCode }
+          : { plano: selectedPlan })
       });
 
-      if (!result?.checkoutUrl) {
+      if (result?.assinaturaAtiva && result.checkoutToken) {
+        setCheckoutToken(result.checkoutToken);
+        setCheckoutStatus("confirmed");
+        setCheckoutMessage(result.message || "");
+        return;
+      }
+
+      if (!result?.checkoutUrl || !result.checkoutToken) {
         throw new Error(result?.message ?? "Não foi possível iniciar o checkout.");
       }
 
       const checkoutWindow = window.open(result.checkoutUrl, "_blank");
-      setCheckoutAssinaturaId(result.assinaturaId ?? null);
+      setCheckoutToken(result.checkoutToken);
 
       if (!checkoutWindow) {
         setCheckoutStatus("waiting");
@@ -553,22 +746,21 @@ export function AuthFlowModal({
       !isOpen ||
       step !== "payment" ||
       checkoutStatus !== "waiting" ||
-      !checkoutAssinaturaId ||
-      !isValidEmail(email)
+      !checkoutToken
     ) {
       return;
     }
 
+    const activeCheckoutToken = checkoutToken;
     let isCancelled = false;
 
     async function checkSubscriptionStatus() {
       try {
-        const query = new URLSearchParams({ email });
         const result = await apiGet<{
           ativa: boolean;
           mercadoPagoStatus?: string | null;
           status: string;
-        }>(`/assinaturas/${checkoutAssinaturaId}/status?${query.toString()}`);
+        }>(`/assinaturas/checkout/${encodeURIComponent(activeCheckoutToken)}/status`);
 
         if (isCancelled) {
           return;
@@ -603,7 +795,7 @@ export function AuthFlowModal({
       isCancelled = true;
       window.clearInterval(statusTimer);
     };
-  }, [checkoutAssinaturaId, checkoutStatus, email, isOpen, step]);
+  }, [checkoutStatus, checkoutToken, isOpen, step]);
 
   useEffect(() => {
     if (!authModalPresence.isPresent) {
@@ -1083,8 +1275,41 @@ export function AuthFlowModal({
                   Selecione como sua conta vai começar. Você poderá alterar isso depois.
                 </p>
 
+                <div className="auth-subscription-code">
+                  <label className="auth-field" htmlFor={`${titleId}-subscription-code`}>
+                    <span>Código personalizado</span>
+                    <input
+                      id={`${titleId}-subscription-code`}
+                      value={subscriptionCode}
+                      onChange={(event) => {
+                        setSubscriptionCode(event.currentTarget.value.toUpperCase());
+                        setCustomPlan(null);
+                        setSelectedPlan((current) => (current === customPlan?.id ? plans[0]?.id ?? null : current));
+                        setCustomCodeStatus("idle");
+                        setCustomCodeMessage("");
+                      }}
+                      placeholder="ABC-123"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <button
+                    className="auth-secondary-action auth-action-light"
+                    type="button"
+                    onClick={applySubscriptionCode}
+                    disabled={customCodeStatus === "checking" || !subscriptionCode.trim()}
+                  >
+                    {customCodeStatus === "checking" ? "Validando..." : "Aplicar"}
+                  </button>
+                </div>
+
+                {customCodeMessage ? (
+                  <AuthFeedback tone={customCodeStatus === "error" ? "error" : "success"}>
+                    {customCodeMessage}
+                  </AuthFeedback>
+                ) : null}
+
                 <div className="auth-plan-options" role="radiogroup" aria-label="Planos">
-                  {plans.map((plan) => (
+                  {displayPlans.map((plan) => (
                     <button
                       className={
                         selectedPlan === plan.id
@@ -1100,13 +1325,21 @@ export function AuthFlowModal({
                       <span className="auth-plan-option-head">
                         <strong className="auth-plan-option-name">{plan.name}</strong>
                         <span className="auth-plan-price" aria-label={`R$ ${plan.price} por mês`}>
-                          <span>R$</span>
-                          <strong>{plan.price}</strong>
-                          <em>/mês</em>
+                          {plan.isFree ? (
+                            <strong>Grátis</strong>
+                          ) : (
+                            <>
+                              <span>R$</span>
+                              <strong>{plan.price}</strong>
+                              <em>{plan.billingLabel}</em>
+                            </>
+                          )}
                         </span>
                       </span>
                       <span className="auth-plan-note">
-                        Sem fidelidade. Cancele quando quiser.
+                        {plan.isCustom
+                          ? "Oferta personalizada vinculada ao código informado."
+                          : "Sem fidelidade. Cancele quando quiser."}
                       </span>
                       <span className="auth-plan-info" onClick={(event) => event.stopPropagation()}>
                         <span className="auth-plan-info-trigger" aria-hidden="true">
@@ -1191,9 +1424,15 @@ export function AuthFlowModal({
                       <div className="auth-payment-total">
                         <span>
                           <em>{email}</em>
-                          <small>Total mensal</small>
+                          <small>Total da assinatura</small>
                         </span>
-                        <strong>{selectedPlanData ? `R$ ${selectedPlanData.price}/mês` : "Mensal recorrente"}</strong>
+                        <strong>
+                          {selectedPlanData?.isFree
+                            ? "Grátis"
+                            : selectedPlanData
+                              ? `R$ ${selectedPlanData.price}${selectedPlanData.billingLabel}`
+                              : "Mensal recorrente"}
+                        </strong>
                       </div>
                     </div>
 
@@ -1256,9 +1495,15 @@ export function AuthFlowModal({
                       <div className="auth-payment-total">
                         <span>
                           <em>{email}</em>
-                          <small>Total mensal</small>
+                          <small>Total da assinatura</small>
                         </span>
-                        <strong>{selectedPlanData ? `R$ ${selectedPlanData.price}/mês` : "A definir"}</strong>
+                        <strong>
+                          {selectedPlanData?.isFree
+                            ? "Grátis"
+                            : selectedPlanData
+                              ? `R$ ${selectedPlanData.price}${selectedPlanData.billingLabel}`
+                              : "A definir"}
+                        </strong>
                       </div>
                     </div>
 
@@ -1303,18 +1548,28 @@ export function AuthFlowModal({
                       </div>
                       <div className="auth-payment-total">
                         <span>
-                          <small>Total mensal</small>
+                          <small>Total da assinatura</small>
                           <em>Sem fidelidade, cancele quando quiser.</em>
                         </span>
-                        <strong>{selectedPlanData ? `R$ ${selectedPlanData.price}/mês` : "A definir"}</strong>
+                        <strong>
+                          {selectedPlanData?.isFree
+                            ? "Grátis"
+                            : selectedPlanData
+                              ? `R$ ${selectedPlanData.price}${selectedPlanData.billingLabel}`
+                              : "A definir"}
+                        </strong>
                       </div>
                     </div>
 
                     <div className="auth-payment-method">
                       <CreditCard aria-hidden="true" size={18} />
                       <span>
-                        <strong>Checkout Mercado Pago</strong>
-                        <small>Cartão, Pix ou boleto com confirmação pelo Mercado Pago.</small>
+                        <strong>{selectedPlanData?.isFree ? "Ativação direta" : "Checkout Mercado Pago"}</strong>
+                        <small>
+                          {selectedPlanData?.isFree
+                            ? "Este código libera a assinatura sem cobrança."
+                            : "Cartão, Pix ou boleto com confirmação pelo Mercado Pago."}
+                        </small>
                       </span>
                     </div>
 
@@ -1335,7 +1590,13 @@ export function AuthFlowModal({
                         disabled={checkoutStatus === "creating"}
                         onClick={startMercadoPagoCheckout}
                       >
-                        {checkoutStatus === "creating" ? "Criando checkout..." : "Abrir checkout"}
+                        {checkoutStatus === "creating"
+                          ? selectedPlanData?.isFree
+                            ? "Ativando..."
+                            : "Criando checkout..."
+                          : selectedPlanData?.isFree
+                            ? "Ativar assinatura"
+                            : "Abrir checkout"}
                         <ArrowRight aria-hidden="true" size={18} />
                       </button>
                     </div>

@@ -1,16 +1,32 @@
-const { randomUUID } = require('crypto');
+const { randomBytes, randomUUID } = require('crypto');
 const { Op } = require('sequelize');
-const { Assinatura, PagamentoAssinatura, Usuario } = require('../models');
+const sequelize = require('../../database');
+const { Assinatura, CodigoAssinatura, PagamentoAssinatura, Usuario } = require('../models');
 const {
   cancelMercadoPagoPreapproval,
   createMercadoPagoPreapproval,
   getMercadoPagoPreapproval,
   updateMercadoPagoPreapprovalAmount,
 } = require('../services/mercadoPagoService');
-const { getPlano } = require('../services/planosService');
+const {
+  buildPlanoFromCodigoAssinatura,
+  findCodigoAssinaturaDisponivel,
+  normalizeCodigoAssinatura,
+} = require('../services/codigosAssinaturaService');
+const { buildPlanoSnapshot, getPlano, listarPlanosPublicos } = require('../services/planosService');
+const { getEntitlements } = require('../services/assinaturaEntitlementsService');
+const {
+  applyDueScheduledChangeForSubscription,
+  applyDueScheduledChanges,
+  attachScheduledChanges,
+  cancelScheduledChangesForSubscription,
+  scheduleDowngrade,
+} = require('../services/alteracoesAssinaturaService');
 const { getPublicAppUrl } = require('../services/urlService');
 
 const MIN_MERCADO_PAGO_CHARGE_CENTAVOS = 100;
+const CHECKOUT_TOKEN_BYTES = 32;
+const CHECKOUT_TOKEN_TTL_MS = 48 * 60 * 60 * 1000;
 
 function normalizeEmail(email) {
   return typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -18,6 +34,27 @@ function normalizeEmail(email) {
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+function normalizeCheckoutToken(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getCodigoAssinaturaFromBody(body) {
+  return normalizeCodigoAssinatura(
+    body?.codigo_assinatura || body?.codigoAssinatura || body?.subscriptionCode || body?.codigo
+  );
+}
+
+function isValidCheckoutToken(token) {
+  return /^[A-Za-z0-9_-]{32,128}$/.test(token);
+}
+
+function createCheckoutTokenPayload() {
+  return {
+    checkout_token: randomBytes(CHECKOUT_TOKEN_BYTES).toString('base64url'),
+    checkout_token_expira_em: new Date(Date.now() + CHECKOUT_TOKEN_TTL_MS),
+  };
 }
 
 function getStatusFromPreapproval(preapprovalStatus) {
@@ -64,6 +101,12 @@ function addMonths(date, months) {
   return next;
 }
 
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
 function getEstimatedNextPaymentDate(assinatura) {
   const baseValue = assinatura?.ativada_em || assinatura?.iniciada_em || assinatura?.createdAt || assinatura?.created_at;
   const baseDate = toDate(baseValue);
@@ -90,6 +133,26 @@ function getFutureNextPaymentDate(assinatura) {
   }
 
   return getEstimatedNextPaymentDate(assinatura);
+}
+
+function getFutureStartDate(value) {
+  const date = toDate(value);
+
+  if (!date || date <= new Date()) {
+    return null;
+  }
+
+  return date;
+}
+
+function getFirstChargeStartDate(plano) {
+  const trialDias = Number(plano?.trial_dias || 0);
+
+  if (Number.isInteger(trialDias) && trialDias > 0) {
+    return addDays(new Date(), trialDias);
+  }
+
+  return getFutureStartDate(plano?.cobranca_inicio_em);
 }
 
 function getCycleStartDate(assinatura, nextPaymentDate) {
@@ -129,7 +192,7 @@ function calculateProrationCredit(assinaturaAtual, novoPlano) {
   };
 }
 
-async function abandonPendingSubscriptions(usuarioId, exceptId = null) {
+async function abandonPendingSubscriptions(usuarioId, exceptId = null, options = {}) {
   const where = {
     usuario_id: usuarioId,
     status: 'pendente',
@@ -144,12 +207,20 @@ async function abandonPendingSubscriptions(usuarioId, exceptId = null) {
       status: 'abandonada',
       cancelada_em: new Date(),
     },
-    { where }
+    { where, transaction: options.transaction || null }
   );
 }
 
 async function syncAssinaturaFromMercadoPago(assinatura) {
   if (!assinatura?.mercado_pago_preapproval_id) {
+    if (assinatura?.status === 'ativa') {
+      const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+
+      if (appliedChanges.length > 0) {
+        await assinatura.reload();
+      }
+    }
+
     return {
       assinatura,
       mercadoPagoStatus: null,
@@ -182,6 +253,14 @@ async function syncAssinaturaFromMercadoPago(assinatura) {
 
   if (shouldSave) {
     await assinatura.save();
+  }
+
+  if (assinatura.status === 'ativa') {
+    const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+
+    if (appliedChanges.length > 0) {
+      await assinatura.reload();
+    }
   }
 
   return {
@@ -259,23 +338,86 @@ async function finalizeActivatedSubscription(assinatura) {
     }
   }
 
+  await cancelScheduledChangesForSubscription(assinaturaAnterior.id, 'assinatura_substituida');
   assinaturaAnterior.status = 'substituida';
   assinaturaAnterior.cancelada_em = assinaturaAnterior.cancelada_em || new Date();
   await assinaturaAnterior.save();
 }
 
+async function getPublicStatusPayload(assinatura) {
+  const syncResult = await syncAssinaturaFromMercadoPago(assinatura);
+
+  if (syncResult.assinatura.status === 'ativa') {
+    await finalizeActivatedSubscription(syncResult.assinatura);
+    await abandonPendingSubscriptions(syncResult.assinatura.usuario_id, syncResult.assinatura.id);
+  }
+
+  return {
+    ativa: syncResult.assinatura.status === 'ativa',
+    status: syncResult.assinatura.status,
+    mercadoPagoStatus: syncResult.mercadoPagoStatus,
+    plano: syncResult.assinatura.plano,
+    synced: syncResult.synced,
+  };
+}
+
+async function findCheckoutSubscriptionByToken(token, extraWhere = {}) {
+  if (!isValidCheckoutToken(token)) {
+    return null;
+  }
+
+  return Assinatura.findOne({
+    where: {
+      ...extraWhere,
+      checkout_token: token,
+      checkout_token_expira_em: {
+        [Op.gt]: new Date(),
+      },
+    },
+    include: [{ model: Usuario, as: 'usuario', attributes: ['id', 'email'] }],
+  });
+}
+
 module.exports = {
+  async listPlans(req, res) {
+    try {
+      const planos = await listarPlanosPublicos();
+
+      return res.json({ planos });
+    } catch (error) {
+      return res.status(500).json({
+        message: error.message || 'Não foi possível carregar os planos.',
+      });
+    }
+  },
+
+  async validateSubscriptionCode(req, res) {
+    try {
+      const codigo = getCodigoAssinaturaFromBody(req.body || req.query || {});
+      const codigoAssinatura = await findCodigoAssinaturaDisponivel(codigo);
+      const plano = buildPlanoFromCodigoAssinatura(codigoAssinatura);
+
+      if (!codigoAssinatura || !plano) {
+        return res.status(404).json({ message: 'Codigo de assinatura invalido ou ja utilizado.' });
+      }
+
+      return res.json({
+        codigo: codigoAssinatura.codigo,
+        plano,
+      });
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        message: error.message || 'Nao foi possivel validar o codigo de assinatura.',
+      });
+    }
+  },
+
   async createCheckout(req, res) {
     const email = normalizeEmail(req.body?.email);
-    const planoId = req.body?.plano || req.body?.planoId || req.body?.planId;
-    const plano = getPlano(planoId);
+    const codigoAssinaturaInput = getCodigoAssinaturaFromBody(req.body);
 
     if (!isValidEmail(email)) {
       return res.status(400).json({ message: 'Informe um e-mail válido para iniciar o checkout.' });
-    }
-
-    if (!plano) {
-      return res.status(400).json({ message: 'Escolha um plano valido para continuar.' });
     }
 
     const usuario = await Usuario.findOne({ where: { email } });
@@ -295,18 +437,153 @@ module.exports = {
       });
     }
 
+    if (codigoAssinaturaInput) {
+      let reservedResult = null;
+
+      try {
+        reservedResult = await sequelize.transaction(async transaction => {
+          const codigoAssinatura = await findCodigoAssinaturaDisponivel(codigoAssinaturaInput, {
+            lock: transaction.LOCK.UPDATE,
+            transaction,
+          });
+          const planoPersonalizado = buildPlanoFromCodigoAssinatura(codigoAssinatura);
+
+          if (!codigoAssinatura || !planoPersonalizado) {
+            const error = new Error('Codigo de assinatura invalido ou ja utilizado.');
+            error.statusCode = 400;
+            throw error;
+          }
+
+          await abandonPendingSubscriptions(usuario.id, null, { transaction });
+
+          const referenciaExterna = `caixa-agil-assinatura-codigo-${planoPersonalizado.id}-${randomUUID()}`;
+          const now = new Date();
+          const primeiraCobrancaEm = getFirstChargeStartDate(planoPersonalizado);
+          const assinatura = await Assinatura.create(
+            {
+              usuario_id: usuario.id,
+              plano: planoPersonalizado.id,
+              plano_versao_id: planoPersonalizado.plano_versao_id || null,
+              plano_snapshot: buildPlanoSnapshot(planoPersonalizado),
+              status: planoPersonalizado.gratuito ? 'ativa' : 'pendente',
+              valor_centavos: planoPersonalizado.valor_centavos,
+              valor_recorrente_centavos: planoPersonalizado.valor_centavos,
+              valor_primeiro_pagamento_centavos: planoPersonalizado.valor_centavos,
+              moeda: planoPersonalizado.moeda || 'BRL',
+              referencia_externa: referenciaExterna,
+              ...createCheckoutTokenPayload(),
+              tipo_movimento: planoPersonalizado.gratuito
+                ? 'contratacao_personalizada_gratis'
+                : 'contratacao_personalizada',
+              iniciada_em: now,
+              ativada_em: planoPersonalizado.gratuito ? now : null,
+              proximo_pagamento_em: planoPersonalizado.gratuito
+                ? null
+                : primeiraCobrancaEm,
+            },
+            { transaction }
+          );
+
+          await codigoAssinatura.update(
+            {
+              ativo: false,
+              usos_realizados: 1,
+              usado_por_usuario_id: usuario.id,
+              usado_em: now,
+            },
+            { transaction }
+          );
+
+          return {
+            assinatura,
+            codigoAssinaturaId: codigoAssinatura.id,
+            planoPersonalizado,
+            primeiraCobrancaEm,
+            referenciaExterna,
+          };
+        });
+
+        if (reservedResult.planoPersonalizado.gratuito) {
+          return res.status(201).json({
+            assinaturaAtiva: true,
+            checkoutToken: reservedResult.assinatura.checkout_token,
+            checkoutUrl: null,
+            gratuito: true,
+            plano: reservedResult.assinatura.plano_snapshot,
+            message: 'Plano personalizado gratuito ativado.',
+          });
+        }
+
+        try {
+          const checkout = await createMercadoPagoPreapproval({
+            appUrl: getPublicAppUrl(req),
+            acao: 'contratar',
+            email,
+            plano: reservedResult.planoPersonalizado,
+            referenciaExterna: reservedResult.referenciaExterna,
+            startDate: reservedResult.primeiraCobrancaEm,
+          });
+
+          reservedResult.assinatura.mercado_pago_preapproval_id = checkout.id;
+          reservedResult.assinatura.checkout_url = checkout.initPoint;
+          reservedResult.assinatura.email_pagador = checkout.emailPagador;
+          await reservedResult.assinatura.save();
+
+          return res.status(201).json({
+            checkoutUrl: checkout.initPoint,
+            checkoutToken: reservedResult.assinatura.checkout_token,
+          });
+        } catch (error) {
+          reservedResult.assinatura.status = 'falha';
+          await reservedResult.assinatura.save();
+          await CodigoAssinatura.update(
+            {
+              ativo: true,
+              usos_realizados: 0,
+              usado_por_usuario_id: null,
+              usado_em: null,
+            },
+            {
+              where: {
+                id: reservedResult.codigoAssinaturaId,
+                usado_por_usuario_id: usuario.id,
+              },
+            }
+          );
+
+          return res.status(error.statusCode || 500).json({
+            message: error.message || 'Nao foi possivel iniciar o checkout.',
+          });
+        }
+      } catch (error) {
+        return res.status(error.statusCode || 500).json({
+          message: error.message || 'Nao foi possivel iniciar o checkout.',
+        });
+      }
+    }
+
+    const planoId = req.body?.plano || req.body?.planoId || req.body?.planId;
+    const plano = await getPlano(planoId);
+
+    if (!plano) {
+      return res.status(400).json({ message: 'Escolha um plano valido para continuar.' });
+    }
+
     await abandonPendingSubscriptions(usuario.id);
 
     const referenciaExterna = `caixa-agil-assinatura-${plano.id}-${randomUUID()}`;
     const assinatura = await Assinatura.create({
       usuario_id: usuario.id,
       plano: plano.id,
+      plano_versao_id: plano.plano_versao_id || null,
+      plano_snapshot: buildPlanoSnapshot(plano),
       status: 'pendente',
       valor_centavos: plano.valor_centavos,
       valor_recorrente_centavos: plano.valor_centavos,
       valor_primeiro_pagamento_centavos: plano.valor_centavos,
       moeda: 'BRL',
       referencia_externa: referenciaExterna,
+      ...createCheckoutTokenPayload(),
       tipo_movimento: 'contratacao',
       iniciada_em: new Date(),
     });
@@ -327,8 +604,7 @@ module.exports = {
 
       return res.status(201).json({
         checkoutUrl: checkout.initPoint,
-        assinaturaId: assinatura.id,
-        mercadoPagoPreapprovalId: checkout.id,
+        checkoutToken: assinatura.checkout_token,
       });
     } catch (error) {
       assinatura.status = 'falha';
@@ -340,42 +616,41 @@ module.exports = {
     }
   },
 
+  async showCheckoutStatus(req, res) {
+    try {
+      const token = normalizeCheckoutToken(req.params.token || req.query?.checkout_token || req.query?.checkoutToken);
+      const assinatura = await findCheckoutSubscriptionByToken(token);
+
+      if (!assinatura) {
+        return res.status(404).json({ message: 'Assinatura não encontrada.' });
+      }
+
+      return res.json(await getPublicStatusPayload(assinatura));
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        message: error.message || 'Não foi possível consultar a assinatura.',
+      });
+    }
+  },
+
   async showStatus(req, res) {
     try {
       const assinaturaId = Number(req.params.id);
-      const email = normalizeEmail(req.query?.email || req.body?.email);
+      const token = normalizeCheckoutToken(req.query?.checkout_token || req.query?.checkoutToken || req.body?.checkout_token || req.body?.checkoutToken);
 
       if (!Number.isInteger(assinaturaId) || assinaturaId <= 0) {
         return res.status(400).json({ message: 'Assinatura inválida.' });
       }
 
-      if (!isValidEmail(email)) {
-        return res.status(400).json({ message: 'Informe um e-mail válido.' });
-      }
-
-      const assinatura = await Assinatura.findByPk(assinaturaId, {
-        include: [{ model: Usuario, as: 'usuario', attributes: ['id', 'email'] }],
+      const assinatura = await findCheckoutSubscriptionByToken(token, {
+        id: assinaturaId,
       });
 
-      if (!assinatura || assinatura.usuario?.email !== email) {
+      if (!assinatura) {
         return res.status(404).json({ message: 'Assinatura não encontrada.' });
       }
 
-      const syncResult = await syncAssinaturaFromMercadoPago(assinatura);
-
-      if (syncResult.assinatura.status === 'ativa') {
-        await finalizeActivatedSubscription(syncResult.assinatura);
-        await abandonPendingSubscriptions(syncResult.assinatura.usuario_id, syncResult.assinatura.id);
-      }
-
-      return res.json({
-        ativa: syncResult.assinatura.status === 'ativa',
-        assinaturaId: syncResult.assinatura.id,
-        status: syncResult.assinatura.status,
-        mercadoPagoStatus: syncResult.mercadoPagoStatus,
-        plano: syncResult.assinatura.plano,
-        synced: syncResult.synced,
-      });
+      return res.json(await getPublicStatusPayload(assinatura));
     } catch (error) {
       return res.status(error.statusCode || 500).json({
         message: error.message || 'Não foi possível consultar a assinatura.',
@@ -385,6 +660,8 @@ module.exports = {
 
   async list(req, res) {
     try {
+      await applyDueScheduledChanges({ usuarioId: req.user.id });
+
       const assinaturas = await Assinatura.findAll({
         where: { usuario_id: req.user.id },
         include: [
@@ -400,9 +677,24 @@ module.exports = {
         order: [['id', 'DESC']],
       });
 
+      await attachScheduledChanges(assinaturas);
+
       return res.json(assinaturas);
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao listar assinaturas', detail: error.message });
+    }
+  },
+
+  async entitlements(req, res) {
+    try {
+      const entitlements = await getEntitlements(req.user.id);
+
+      return res.json(entitlements);
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        code: error.code,
+        message: error.message || 'Erro ao carregar permissões da assinatura.',
+      });
     }
   },
 
@@ -436,6 +728,7 @@ module.exports = {
   async createManagementCheckout(req, res) {
     try {
       const acao = String(req.body?.acao || '').trim();
+      await applyDueScheduledChanges({ usuarioId: req.user.id });
       const usuario = await Usuario.findByPk(req.user.id);
 
       if (!usuario) {
@@ -458,7 +751,7 @@ module.exports = {
         acao === 'trocar_pagamento'
           ? assinaturaAtual.plano
           : req.body?.plano || req.body?.planoId || req.body?.planId;
-      const plano = getPlano(planoId);
+      const plano = await getPlano(planoId);
 
       if (!['mudar_plano', 'trocar_pagamento'].includes(acao)) {
         return res.status(400).json({ message: 'Escolha uma ação de assinatura válida.' });
@@ -472,7 +765,53 @@ module.exports = {
         return res.status(400).json({ message: 'Escolha um plano diferente do atual.' });
       }
 
+      const valorAtualCentavos = Number(
+        assinaturaAtual.valor_recorrente_centavos || assinaturaAtual.valor_centavos || 0
+      );
+      const isDowngrade = acao === 'mudar_plano' && plano.valor_centavos < valorAtualCentavos;
+
       await abandonPendingSubscriptions(req.user.id);
+
+      if (isDowngrade) {
+        if (assinaturaAtual.mercado_pago_preapproval_id) {
+          await updateMercadoPagoPreapprovalAmount(assinaturaAtual.mercado_pago_preapproval_id, {
+            valorCentavos: plano.valor_centavos,
+            moeda: plano.moeda || 'BRL',
+          });
+        }
+
+        const aplicarEm = assinaturaAtual.proximo_pagamento_em || getFutureNextPaymentDate(assinaturaAtual);
+        const alteracaoAgendada = await scheduleDowngrade({
+          usuarioId: req.user.id,
+          assinaturaAtual,
+          plano,
+          aplicarEm,
+          metadata: {
+            origem: 'painel_cliente',
+            mercado_pago_preapproval_id: assinaturaAtual.mercado_pago_preapproval_id || null,
+          },
+        });
+        assinaturaAtual.normalizar_valor_apos_primeiro_pagamento = false;
+        assinaturaAtual.valor_normalizado_em = assinaturaAtual.valor_normalizado_em || new Date();
+        assinaturaAtual.tipo_movimento = 'mudar_plano_downgrade_agendado';
+        await assinaturaAtual.save();
+
+        return res.json({
+          acao,
+          alteracaoAgendada: true,
+          assinaturaAtualizada: false,
+          checkoutUrl: null,
+          creditoRateioCentavos: 0,
+          proximoPagamentoAtual: aplicarEm,
+          aplicarEm,
+          planoAtual: assinaturaAtual.plano,
+          planoNovo: plano.id,
+          alteracao: alteracaoAgendada,
+          valorPrimeiroPagamentoCentavos: plano.valor_centavos,
+          valorRecorrenteCentavos: plano.valor_centavos,
+          message: 'Troca de plano agendada. O plano atual continua ativo até o fim do período já pago.',
+        });
+      }
 
       const rateio =
         acao === 'mudar_plano'
@@ -487,6 +826,8 @@ module.exports = {
       const assinatura = await Assinatura.create({
         usuario_id: req.user.id,
         plano: plano.id,
+        plano_versao_id: plano.plano_versao_id || null,
+        plano_snapshot: buildPlanoSnapshot(plano),
         status: 'pendente',
         valor_centavos: plano.valor_centavos,
         valor_recorrente_centavos: plano.valor_centavos,
@@ -496,6 +837,7 @@ module.exports = {
           acao === 'mudar_plano' && rateio.valorPrimeiroPagamentoCentavos !== plano.valor_centavos,
         moeda: 'BRL',
         referencia_externa: referenciaExterna,
+        ...createCheckoutTokenPayload(),
         tipo_movimento: acao,
         assinatura_anterior_id: assinaturaAtual.id,
         iniciada_em: new Date(),
@@ -522,6 +864,7 @@ module.exports = {
         return res.status(201).json({
           acao,
           assinaturaId: assinatura.id,
+          checkoutToken: assinatura.checkout_token,
           checkoutUrl: checkout.initPoint,
           creditoRateioCentavos: rateio.creditoRateioCentavos,
           mercadoPagoPreapprovalId: checkout.id,

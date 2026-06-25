@@ -5,7 +5,11 @@ const { Assinatura, PagamentoAssinatura, Subconta, Usuario } = require('../model
 const { sendEmail } = require('../services/emailService');
 const { createEmailChangeVerificationEmail } = require('../services/emailTemplates');
 const { getMercadoPagoPreapproval } = require('../services/mercadoPagoService');
-const { planos } = require('../services/planosService');
+const { listarPlanosPublicos } = require('../services/planosService');
+const {
+  applyDueScheduledChanges,
+  attachScheduledChanges,
+} = require('../services/alteracoesAssinaturaService');
 const { getAppUrl, getPublicAssetUrl } = require('../services/urlService');
 
 const expiresInMinutes = 30;
@@ -86,6 +90,8 @@ async function isEmailInUse(email, { usuarioId = null, subcontaId = null } = {})
 }
 
 async function findAssinaturas(usuarioId) {
+  await applyDueScheduledChanges({ usuarioId });
+
   const assinaturas = await Assinatura.findAll({
     where: { usuario_id: usuarioId },
     include: [
@@ -115,6 +121,8 @@ async function findAssinaturas(usuarioId) {
       // A tela de conta não deve falhar se o Mercado Pago estiver temporariamente indisponível.
     }
   }
+
+  await attachScheduledChanges(assinaturas);
 
   return assinaturas;
 }
@@ -174,13 +182,14 @@ module.exports = {
         return res.status(404).json({ message: 'Conta não encontrada.' });
       }
 
+      const planos = await listarPlanosPublicos();
       const payload = {
         tipo_conta: access.tipo_conta,
         conta:
           access.tipo_conta === 'subconta'
             ? sanitizeSubconta(access.conta)
             : sanitizeUsuario(access.conta),
-        planos: Object.values(planos),
+        planos,
       };
 
       if (access.tipo_conta === 'usuario') {

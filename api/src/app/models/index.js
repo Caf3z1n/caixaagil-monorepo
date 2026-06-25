@@ -1,6 +1,14 @@
 ﻿const Usuario = require('./Usuario');
+const AcaoAdminAssinatura = require('./AcaoAdminAssinatura');
+const Administrador = require('./Administrador');
+const AlteracaoAssinatura = require('./AlteracaoAssinatura');
 const Assinatura = require('./Assinatura');
 const PagamentoAssinatura = require('./PagamentoAssinatura');
+const Plano = require('./Plano');
+const PlanoVersao = require('./PlanoVersao');
+const PlanoRecurso = require('./PlanoRecurso');
+const PlanoLimite = require('./PlanoLimite');
+const CodigoAssinatura = require('./CodigoAssinatura');
 const Pdv = require('./Pdv');
 const Subconta = require('./Subconta');
 const GrupoFiscal = require('./GrupoFiscal');
@@ -49,6 +57,121 @@ Usuario.hasMany(PagamentoAssinatura, {
 PagamentoAssinatura.belongsTo(Usuario, {
   foreignKey: 'usuario_id',
   as: 'usuario',
+});
+
+Usuario.hasMany(AlteracaoAssinatura, {
+  foreignKey: 'usuario_id',
+  as: 'alteracoes_assinaturas',
+});
+
+AlteracaoAssinatura.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
+Assinatura.hasMany(AlteracaoAssinatura, {
+  foreignKey: 'assinatura_id',
+  as: 'alteracoes',
+});
+
+AlteracaoAssinatura.belongsTo(Assinatura, {
+  foreignKey: 'assinatura_id',
+  as: 'assinatura',
+});
+
+Administrador.hasMany(AcaoAdminAssinatura, {
+  foreignKey: 'administrador_id',
+  as: 'acoes_assinaturas',
+});
+
+AcaoAdminAssinatura.belongsTo(Administrador, {
+  foreignKey: 'administrador_id',
+  as: 'administrador',
+});
+
+Usuario.hasMany(AcaoAdminAssinatura, {
+  foreignKey: 'usuario_id',
+  as: 'acoes_admin_assinaturas',
+});
+
+AcaoAdminAssinatura.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
+Assinatura.hasMany(AcaoAdminAssinatura, {
+  foreignKey: 'assinatura_id',
+  as: 'acoes_admin',
+});
+
+AcaoAdminAssinatura.belongsTo(Assinatura, {
+  foreignKey: 'assinatura_id',
+  as: 'assinatura',
+});
+
+Plano.hasMany(PlanoVersao, {
+  foreignKey: 'plano_id',
+  as: 'versoes',
+});
+
+PlanoVersao.belongsTo(Plano, {
+  foreignKey: 'plano_id',
+  as: 'plano',
+});
+
+PlanoVersao.hasMany(PlanoRecurso, {
+  foreignKey: 'plano_versao_id',
+  as: 'recursos',
+});
+
+PlanoRecurso.belongsTo(PlanoVersao, {
+  foreignKey: 'plano_versao_id',
+  as: 'versao',
+});
+
+PlanoVersao.hasMany(PlanoLimite, {
+  foreignKey: 'plano_versao_id',
+  as: 'limites',
+});
+
+PlanoLimite.belongsTo(PlanoVersao, {
+  foreignKey: 'plano_versao_id',
+  as: 'versao',
+});
+
+Assinatura.belongsTo(PlanoVersao, {
+  foreignKey: 'plano_versao_id',
+  as: 'plano_versao',
+});
+
+Plano.hasMany(CodigoAssinatura, {
+  foreignKey: 'plano_id',
+  as: 'codigos_assinatura',
+});
+
+CodigoAssinatura.belongsTo(Plano, {
+  foreignKey: 'plano_id',
+  as: 'plano',
+});
+
+PlanoVersao.hasMany(CodigoAssinatura, {
+  foreignKey: 'plano_versao_id',
+  as: 'codigos_assinatura',
+});
+
+CodigoAssinatura.belongsTo(PlanoVersao, {
+  foreignKey: 'plano_versao_id',
+  as: 'plano_versao',
+});
+
+Usuario.hasMany(CodigoAssinatura, {
+  foreignKey: 'usado_por_usuario_id',
+  as: 'codigos_assinatura_usados',
+});
+
+CodigoAssinatura.belongsTo(Usuario, {
+  foreignKey: 'usado_por_usuario_id',
+  as: 'usuario_usado',
 });
 
 Usuario.hasMany(Pdv, {
@@ -492,11 +615,15 @@ ConfiguracaoSistema.belongsTo(Usuario, {
 });
 
 module.exports = {
+  AcaoAdminAssinatura,
+  Administrador,
+  AlteracaoAssinatura,
   Arquivo,
   Assinatura,
   Caixa,
   CategoriaProduto,
   ClienteConvenio,
+  CodigoAssinatura,
   ConfiguracaoSistema,
   ConferenciaCaixa,
   DespesaCaixa,
@@ -508,6 +635,10 @@ module.exports = {
   Nf,
   NfEvento,
   PagamentoAssinatura,
+  Plano,
+  PlanoLimite,
+  PlanoRecurso,
+  PlanoVersao,
   Pdv,
   Produto,
   SaldoEstoqueProduto,

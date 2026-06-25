@@ -1,5 +1,6 @@
 const { GrupoFiscal, Produto } = require('../models');
 const sequelize = require('../../database');
+const { ensureFeature } = require('../services/assinaturaEntitlementsService');
 
 const regimesPermitidos = new Set(['simples_nacional', 'regime_normal']);
 const iconesPermitidos = new Set([
@@ -164,6 +165,14 @@ function getProdutosVinculados(grupoFiscal) {
 }
 
 function handleGrupoFiscalError(res, error, defaultMessage) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      code: error.code,
+      message: error.message || defaultMessage,
+      entitlements: error.entitlements,
+    });
+  }
+
   if (error.name === 'SequelizeUniqueConstraintError') {
     return res.status(409).json({
       message: 'Já existe um grupo fiscal com este nome.',
@@ -182,6 +191,8 @@ function handleGrupoFiscalError(res, error, defaultMessage) {
 module.exports = {
   async list(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const [grupos, produtosPorGrupo] = await Promise.all([
         GrupoFiscal.findAll({
           where: {
@@ -217,12 +228,14 @@ module.exports = {
         }))
       );
     } catch (error) {
-      return res.status(500).json({ message: 'Erro ao listar grupos fiscais.', detail: error.message });
+      return handleGrupoFiscalError(res, error, 'Erro ao listar grupos fiscais.');
     }
   },
 
   async create(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const payload = buildGrupoFiscalPayload(req.body);
       const validationError = validatePayload(payload);
 
@@ -243,6 +256,8 @@ module.exports = {
 
   async update(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 
       if (!grupoFiscal) {
@@ -279,6 +294,8 @@ module.exports = {
 
   async remove(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 
       if (!grupoFiscal) {
@@ -314,12 +331,14 @@ module.exports = {
         message: 'Grupo fiscal excluído.',
       });
     } catch (error) {
-      return res.status(500).json({ message: 'Erro ao excluir grupo fiscal.', detail: error.message });
+      return handleGrupoFiscalError(res, error, 'Erro ao excluir grupo fiscal.');
     }
   },
 
   async activate(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 
       if (!grupoFiscal) {

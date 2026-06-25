@@ -30,6 +30,12 @@ import { AuthFeedback } from "@/components/auth-feedback";
 import { PlatformAccountEmail } from "@/components/platform-account-email";
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
 import { PLATFORM_ACCOUNT_TYPE_STORAGE_KEY, PLATFORM_AUTH_TOKEN_STORAGE_KEY } from "@/lib/platform-session";
+import {
+  formatPlanLimitUsage,
+  isPlanLimitReached,
+  loadSubscriptionEntitlements,
+  type SubscriptionEntitlements
+} from "@/lib/subscription-entitlements";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
@@ -195,6 +201,7 @@ function isSecurePassword(senha: string) {
 export function PdvAccessManager() {
   const [token, setToken] = useState<string | null>(null);
   const [accountType, setAccountType] = useState<string | null>(null);
+  const [entitlements, setEntitlements] = useState<SubscriptionEntitlements | null>(null);
   const [pdvs, setPdvs] = useState<Pdv[]>([]);
   const [subcontas, setSubcontas] = useState<Subconta[]>([]);
   const [selectedPdvId, setSelectedPdvId] = useState<number | null>(null);
@@ -272,16 +279,25 @@ export function PdvAccessManager() {
   const doSubcontaPasswordsMatch =
     subcontaForm.senha.length > 0 && subcontaForm.senha === subcontaForm.confirmarSenha;
   const canManageSubcontas = accountType !== "subconta";
+  const isPdvLimitReached = isPlanLimitReached(entitlements, "pdvs_ativos");
+  const isSubcontaLimitReached = isPlanLimitReached(entitlements, "subcontas_ativas");
+  const pdvLimitLabel = formatPlanLimitUsage(entitlements, "pdvs_ativos");
+  const subcontaLimitLabel = formatPlanLimitUsage(entitlements, "subcontas_ativas");
 
   async function loadPdvs(authToken: string) {
-    const result = await apiGet<Pdv[]>("/pdvs", { token: authToken });
+    const result = await apiGet<Pdv[]>("/pdvs", { cacheTtlMs: 60_000, token: authToken });
     setPdvs(result);
     setSelectedPdvId((current) => current ?? result[0]?.id ?? null);
   }
 
   async function loadSubcontas(authToken: string) {
-    const result = await apiGet<Subconta[]>("/subcontas", { token: authToken });
+    const result = await apiGet<Subconta[]>("/subcontas", { cacheTtlMs: 60_000, token: authToken });
     setSubcontas(result);
+  }
+
+  async function loadEntitlements(authToken: string) {
+    const result = await loadSubscriptionEntitlements(authToken);
+    setEntitlements(result);
   }
 
   useEffect(() => {
@@ -298,7 +314,7 @@ export function PdvAccessManager() {
 
     setToken(storedToken);
     setAccountType(window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY));
-    Promise.all([loadPdvs(storedToken), loadSubcontas(storedToken)])
+    Promise.all([loadPdvs(storedToken), loadSubcontas(storedToken), loadEntitlements(storedToken)])
       .catch((error: unknown) => {
         setFeedback({
           tone: "error",
@@ -326,6 +342,11 @@ export function PdvAccessManager() {
   }
 
   function openCreatePdvModal() {
+    if (isPdvLimitReached) {
+      setFeedback({ tone: "warning", text: "Limite de PDVs ativos atingido para o plano atual." });
+      return;
+    }
+
     setEditingId(null);
     setForm(emptyForm);
     setFeedback(null);
@@ -383,6 +404,11 @@ export function PdvAccessManager() {
   }
 
   function openCreateSubcontaModal() {
+    if (isSubcontaLimitReached) {
+      setFeedback({ tone: "warning", text: "Limite de subcontas ativas atingido para o plano atual." });
+      return;
+    }
+
     setEditingSubcontaId(null);
     setSubcontaStep("email");
     setSubcontaForm(emptySubcontaForm);
@@ -429,6 +455,7 @@ export function PdvAccessManager() {
         const created = await apiPost<Pdv>("/pdvs", buildPdvPayload(form), { token });
         setPdvs((current) => [...current, created]);
         setSelectedPdvId(created.id);
+        void loadEntitlements(token).catch(() => null);
 
         if (created.codigo_pareamento) {
           setActivePairing({
@@ -490,6 +517,11 @@ export function PdvAccessManager() {
       return;
     }
 
+    if (isPdvLimitReached) {
+      setFeedback({ tone: "warning", text: "Limite de PDVs ativos atingido para o plano atual." });
+      return;
+    }
+
     setIsSaving(true);
     setFeedback(null);
 
@@ -498,6 +530,7 @@ export function PdvAccessManager() {
 
       setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
       setSelectedPdvId(result.pdv.id);
+      void loadEntitlements(token).catch(() => null);
       setFeedback({ tone: "success", text: result.message || "PDV ativado." });
     } catch (error) {
       setFeedback({
@@ -772,6 +805,7 @@ export function PdvAccessManager() {
       );
 
       setSubcontas((current) => [...current, result.subconta]);
+      void loadEntitlements(token).catch(() => null);
       closeSubcontaModal();
       setFeedback({ tone: "success", text: result.message || "Subconta criada." });
     } catch (error) {
@@ -805,6 +839,7 @@ export function PdvAccessManager() {
       }
 
       setSubcontaToDelete(null);
+      void loadEntitlements(token).catch(() => null);
     } catch (error) {
       setFeedback({
         tone: "error",
@@ -817,6 +852,11 @@ export function PdvAccessManager() {
 
   async function handleActivateSubconta(subconta: Subconta) {
     if (!token || subconta.ativo) {
+      return;
+    }
+
+    if (isSubcontaLimitReached) {
+      setFeedback({ tone: "warning", text: "Limite de subcontas ativas atingido para o plano atual." });
       return;
     }
 
@@ -834,6 +874,7 @@ export function PdvAccessManager() {
       if (editingSubcontaId === result.subconta.id) {
         setEditingSubcontaId(result.subconta.id);
       }
+      void loadEntitlements(token).catch(() => null);
       setFeedback({ tone: "success", text: result.message || "Subconta ativada." });
     } catch (error) {
       setFeedback({
@@ -867,8 +908,14 @@ export function PdvAccessManager() {
             <div>
               <h2>PDVs</h2>
               <p>Computadores autorizados a abrir o caixa.</p>
+              {pdvLimitLabel ? <span className="platform-access-limit">{pdvLimitLabel}</span> : null}
             </div>
-            <button className="platform-primary-button" type="button" onClick={openCreatePdvModal}>
+            <button
+              className="platform-primary-button"
+              disabled={isPdvLimitReached}
+              type="button"
+              onClick={openCreatePdvModal}
+            >
               <Plus aria-hidden="true" size={16} />
               Novo PDV
             </button>
@@ -945,6 +992,7 @@ export function PdvAccessManager() {
                       <button
                         type="button"
                         aria-label={`Ativar ${pdv.nome}`}
+                        disabled={isPdvLimitReached}
                         onClick={(event) => {
                           event.stopPropagation();
                           void handleActivatePdv(pdv);
@@ -971,7 +1019,12 @@ export function PdvAccessManager() {
               <div className="platform-access-empty">
                 <Monitor aria-hidden="true" size={20} />
                 <span>Nenhum PDV cadastrado.</span>
-                <button className="platform-primary-button" type="button" onClick={openCreatePdvModal}>
+                <button
+                  className="platform-primary-button"
+                  disabled={isPdvLimitReached}
+                  type="button"
+                  onClick={openCreatePdvModal}
+                >
                   Criar primeiro PDV
                   <Plus aria-hidden="true" size={17} />
                 </button>
@@ -985,9 +1038,15 @@ export function PdvAccessManager() {
             <div>
               <h2>Subcontas</h2>
               <p>Acessos separados para equipe e suporte.</p>
+              {subcontaLimitLabel ? <span className="platform-access-limit">{subcontaLimitLabel}</span> : null}
             </div>
             {canManageSubcontas ? (
-              <button className="platform-secondary-button" type="button" onClick={openCreateSubcontaModal}>
+              <button
+                className="platform-secondary-button"
+                disabled={isSubcontaLimitReached}
+                type="button"
+                onClick={openCreateSubcontaModal}
+              >
                 <Plus aria-hidden="true" size={16} />
                 Nova subconta
               </button>
@@ -1036,6 +1095,7 @@ export function PdvAccessManager() {
                     <button
                       type="button"
                       aria-label={`Ativar ${subconta.email}`}
+                      disabled={isSubcontaLimitReached}
                       onClick={() => void handleActivateSubconta(subconta)}
                     >
                       <RotateCcw aria-hidden="true" size={15} />

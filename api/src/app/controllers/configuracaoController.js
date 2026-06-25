@@ -1,11 +1,13 @@
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 const cnpjaIntegrationService = require('../services/cnpjaIntegrationService');
+const { ensureFeature } = require('../services/assinaturaEntitlementsService');
 
 function handleConfiguracaoError(res, error, defaultMessage) {
   if (error.status) {
     return res.status(error.status).json({
       code: error.code,
       message: error.message,
+      entitlements: error.entitlements,
     });
   }
 
@@ -36,6 +38,8 @@ module.exports = {
 
   async updateFiscal(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const fiscal = req.body?.fiscal ?? req.body;
       const configuracao = await configuracaoSistemaService.updateFiscalSettings(req.user.id, fiscal);
 

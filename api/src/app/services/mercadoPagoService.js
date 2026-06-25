@@ -33,6 +33,16 @@ function getValorEmReaisDeCentavos(centavos) {
   return Number((Number(centavos || 0) / 100).toFixed(2));
 }
 
+function getMercadoPagoFrequency(plano) {
+  const intervalo = plano?.intervalo === 'dias' ? 'dias' : 'mensal';
+  const quantidade = Number(plano?.intervalo_quantidade || 1);
+
+  return {
+    frequency: Number.isInteger(quantidade) && quantidade > 0 ? quantidade : 1,
+    frequency_type: intervalo === 'dias' ? 'days' : 'months',
+  };
+}
+
 async function mercadoPagoGet(path) {
   const response = await fetch(`https://api.mercadopago.com${path}`, {
     method: 'GET',
@@ -146,6 +156,24 @@ async function cancelMercadoPagoPreapproval(preapprovalId) {
   });
 }
 
+async function updateMercadoPagoPreapprovalStatus(preapprovalId, status) {
+  if (!preapprovalId) {
+    return null;
+  }
+
+  return mercadoPagoPut(`/preapproval/${encodeURIComponent(preapprovalId)}`, {
+    status,
+  });
+}
+
+async function pauseMercadoPagoPreapproval(preapprovalId) {
+  return updateMercadoPagoPreapprovalStatus(preapprovalId, 'paused');
+}
+
+async function reactivateMercadoPagoPreapproval(preapprovalId) {
+  return updateMercadoPagoPreapprovalStatus(preapprovalId, 'authorized');
+}
+
 async function updateMercadoPagoPreapprovalAmount(preapprovalId, { valorCentavos, moeda = 'BRL' }) {
   if (!preapprovalId) {
     const error = new Error('Assinatura Mercado Pago nao encontrada.');
@@ -216,8 +244,7 @@ async function createMercadoPagoPreapproval({
     external_reference: referenciaExterna,
     payer_email: payerEmail,
     auto_recurring: {
-      frequency: 1,
-      frequency_type: 'months',
+      ...getMercadoPagoFrequency(plano),
       transaction_amount: getValorEmReaisDeCentavos(valorCobrancaCentavos),
       currency_id: 'BRL',
     },
@@ -269,6 +296,9 @@ module.exports = {
   getMercadoPagoAuthorizedPayment,
   getMercadoPagoPayment,
   getMercadoPagoPreapproval,
+  pauseMercadoPagoPreapproval,
+  reactivateMercadoPagoPreapproval,
   updateMercadoPagoPreapprovalAmount,
+  updateMercadoPagoPreapprovalStatus,
   validateMercadoPagoWebhookSignature,
 };

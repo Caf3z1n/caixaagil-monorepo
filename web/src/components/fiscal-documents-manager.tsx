@@ -1138,7 +1138,7 @@ export function FiscalDocumentsManager() {
           params.set("data_fim", endDate);
         }
 
-        const result = await apiGet<FiscalDocumentListResponse>(`/nf?${params.toString()}`, { token });
+        const result = await apiGet<FiscalDocumentListResponse>(`/nf?${params.toString()}`, { cacheTtlMs: 30_000, token });
 
         if (!cancelled) {
           setDocuments(Array.isArray(result.items) ? result.items : []);

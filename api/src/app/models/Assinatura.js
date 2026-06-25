@@ -18,6 +18,12 @@ Assinatura.init(
       type: DataTypes.STRING,
       allowNull: false,
     },
+    plano_versao_id: {
+      type: DataTypes.INTEGER,
+    },
+    plano_snapshot: {
+      type: DataTypes.JSONB,
+    },
     status: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -38,6 +44,12 @@ Assinatura.init(
     referencia_externa: {
       type: DataTypes.STRING,
       allowNull: false,
+    },
+    checkout_token: {
+      type: DataTypes.STRING,
+    },
+    checkout_token_expira_em: {
+      type: DataTypes.DATE,
     },
     checkout_url: {
       type: DataTypes.TEXT,

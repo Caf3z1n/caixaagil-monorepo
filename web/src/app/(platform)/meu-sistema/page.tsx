@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { FocusEvent, PointerEvent } from "react";
 import {
@@ -18,17 +19,26 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+import { AuthFeedback } from "@/components/auth-feedback";
 import { PlatformFrame } from "@/components/platform-frame";
 import { apiGet } from "@/lib/api-client";
+import { buildPlatformReturnHref } from "@/lib/platform-return";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
+import {
+  hasFiscalEntitlement,
+  loadSubscriptionEntitlements,
+  type SubscriptionEntitlements
+} from "@/lib/subscription-entitlements";
 
 type SystemMenuItem = {
   title: string;
   href?: string;
   icon: LucideIcon;
+  requiredPlanFeature?: PlanFeature;
   requiredFeature?: OptionalSystemFeature;
 };
 
+type PlanFeature = "emissao_fiscal";
 type OptionalSystemFeature = "convenio" | "expenses" | "employees";
 
 type ConfiguracaoSistema = {
@@ -55,7 +65,8 @@ const menuItems: SystemMenuItem[] = [
   {
     title: "Grupos fiscais",
     href: "/meu-sistema/grupos-fiscais",
-    icon: FileCheck2
+    icon: FileCheck2,
+    requiredPlanFeature: "emissao_fiscal"
   },
   {
     title: "Produtos",
@@ -98,7 +109,8 @@ const menuItems: SystemMenuItem[] = [
   {
     title: "Documentos fiscais",
     href: "/meu-sistema/documentos-fiscais",
-    icon: ReceiptText
+    icon: ReceiptText,
+    requiredPlanFeature: "emissao_fiscal"
   }
 ];
 
@@ -134,10 +146,10 @@ function stopMenuWave(event: FocusEvent<HTMLElement> | PointerEvent<HTMLElement>
   event.currentTarget.classList.remove("system-home-menu-item--hovering");
 }
 
-function renderMenuItem(item: SystemMenuItem, featured = false) {
+function renderMenuItem(item: SystemMenuItem, featured = false, lockedByPlan = false) {
   const Icon = item.icon;
 
-  if (!item.href) {
+  if (!item.href || lockedByPlan) {
     return (
       <span
         className="system-home-menu-item system-home-menu-item-disabled"
@@ -150,7 +162,7 @@ function renderMenuItem(item: SystemMenuItem, featured = false) {
         <span className="system-home-menu-copy">
           <strong>{item.title}</strong>
         </span>
-        <span className="system-home-menu-status">Em breve</span>
+        <span className="system-home-menu-status">{lockedByPlan ? "Plano" : "Em breve"}</span>
       </span>
     );
   }
@@ -162,7 +174,7 @@ function renderMenuItem(item: SystemMenuItem, featured = false) {
   return (
     <Link
       className={itemClassName}
-      href={item.href}
+      href={buildPlatformReturnHref(item.href, "/meu-sistema")}
       key={item.title}
       onBlur={stopMenuWave}
       onFocus={startMenuFocusWave}
@@ -181,7 +193,9 @@ function renderMenuItem(item: SystemMenuItem, featured = false) {
 }
 
 export default function MeuSistemaPage() {
+  const searchParams = useSearchParams();
   const [enabledFeatures, setEnabledFeatures] = useState<EnabledSystemFeatures>(defaultEnabledSystemFeatures);
+  const [entitlements, setEntitlements] = useState<SubscriptionEntitlements | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -191,9 +205,14 @@ export default function MeuSistemaPage() {
       return;
     }
 
+    const authToken = token;
+
     async function loadConfiguration() {
       try {
-        const configuracao = await apiGet<ConfiguracaoSistema>("/configuracoes", { token });
+        const [configuracao, subscriptionEntitlements] = await Promise.all([
+          apiGet<ConfiguracaoSistema>("/configuracoes", { cacheTtlMs: 60_000, token: authToken }),
+          loadSubscriptionEntitlements(authToken)
+        ]);
 
         if (!cancelled) {
           setEnabledFeatures({
@@ -201,10 +220,12 @@ export default function MeuSistemaPage() {
             expenses: configuracao.lancar_despesas?.ativo !== false,
             employees: configuracao.controle_funcionarios?.ativo === true
           });
+          setEntitlements(subscriptionEntitlements);
         }
       } catch {
         if (!cancelled) {
           setEnabledFeatures(defaultEnabledSystemFeatures);
+          setEntitlements(null);
         }
       }
     }
@@ -220,6 +241,8 @@ export default function MeuSistemaPage() {
     () => baseRoutineItems.filter((item) => !item.requiredFeature || enabledFeatures[item.requiredFeature]),
     [enabledFeatures]
   );
+  const isFiscalLocked = entitlements !== null && !hasFiscalEntitlement(entitlements);
+  const blockedByFiscalPlan = searchParams.get("bloqueio") === "emissao_fiscal";
 
   return (
     <PlatformFrame>
@@ -232,6 +255,10 @@ export default function MeuSistemaPage() {
             </span>
           </section>
 
+          {blockedByFiscalPlan ? (
+            <AuthFeedback tone="warning">Seu plano atual não permite recursos fiscais.</AuthFeedback>
+          ) : null}
+
           <section className="system-home-card" aria-label="Menu do meu sistema">
             <nav className="system-home-menu" aria-label="Rotinas do sistema">
               {configurationItem ? (
@@ -241,7 +268,13 @@ export default function MeuSistemaPage() {
               ) : null}
 
               <div className="system-home-menu-grid">
-                {routineItems.map((item) => renderMenuItem(item))}
+                {routineItems.map((item) =>
+                  renderMenuItem(
+                    item,
+                    false,
+                    item.requiredPlanFeature === "emissao_fiscal" && isFiscalLocked
+                  )
+                )}
               </div>
             </nav>
 

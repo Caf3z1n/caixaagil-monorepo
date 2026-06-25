@@ -55,6 +55,11 @@ import type { LucideIcon } from "lucide-react";
 import { ApiError, apiDelete, apiGet, apiPost, apiPostForm, apiPut, getApiUrl } from "@/lib/api-client";
 import { PlatformSelect } from "@/components/platform-select";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
+import {
+  hasFiscalEntitlement,
+  loadSubscriptionEntitlements,
+  type SubscriptionEntitlements
+} from "@/lib/subscription-entitlements";
 import { capitalizeFirstTextLetter, uppercaseTextInput } from "@/lib/text-format";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
@@ -335,7 +340,11 @@ function formatStock(value: number | null) {
   return `${String(value).replace(".", ",")} un.`;
 }
 
-function getProductFiscalIssueBadges(product: Produto) {
+function getProductFiscalIssueBadges(product: Produto, canUseFiscalResources: boolean) {
+  if (!canUseFiscalResources) {
+    return [];
+  }
+
   const badges: string[] = [];
 
   if (!product.grupo_fiscal_id) {
@@ -526,6 +535,7 @@ export function ProductCatalogManager() {
     produtos: [],
     grupos_fiscais: []
   });
+  const [entitlements, setEntitlements] = useState<SubscriptionEntitlements | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [searchValue, setSearchValue] = useState("");
@@ -603,6 +613,7 @@ export function ProductCatalogManager() {
       ),
     [categories, productDraft.categoria_id]
   );
+  const canUseFiscalResources = entitlements === null || hasFiscalEntitlement(entitlements);
 
   const groupedProducts = useMemo(() => {
     return categories
@@ -631,9 +642,13 @@ export function ProductCatalogManager() {
     }
 
     try {
-      const result = await apiGet<ProductCatalogSnapshot>("/produtos", { token });
+      const [result, subscriptionEntitlements] = await Promise.all([
+        apiGet<ProductCatalogSnapshot>("/produtos", { cacheTtlMs: 60_000, token }),
+        loadSubscriptionEntitlements(token)
+      ]);
 
       setSnapshot(result);
+      setEntitlements(subscriptionEntitlements);
       setLoadError(null);
     } catch (error) {
       setLoadError(getErrorMessage(error, "Não foi possível carregar os produtos."));
@@ -1293,7 +1308,7 @@ export function ProductCatalogManager() {
 
                 {group.products.length > 0 ? (
                   group.products.map(product => {
-                    const fiscalIssueBadges = getProductFiscalIssueBadges(product);
+                    const fiscalIssueBadges = getProductFiscalIssueBadges(product, canUseFiscalResources);
 
                     return (
                       <button
@@ -1740,41 +1755,45 @@ export function ProductCatalogManager() {
                   </span>
                 </label>
 
-                <label>
-                  <span>NCM</span>
-                  <input
-                    value={productDraft.ncm}
-                    onChange={event =>
-                      setProductDraft(current => ({
-                        ...current,
-                        ncm: digitsOnly(event.target.value, 8)
-                      }))
-                    }
-                    onInput={() => setHasProductNcmTouched(true)}
-                    inputMode="numeric"
-                    placeholder="Obrigatório para emitir notas fiscais"
-                  />
-                </label>
+                {canUseFiscalResources ? (
+                  <label>
+                    <span>NCM</span>
+                    <input
+                      value={productDraft.ncm}
+                      onChange={event =>
+                        setProductDraft(current => ({
+                          ...current,
+                          ncm: digitsOnly(event.target.value, 8)
+                        }))
+                      }
+                      onInput={() => setHasProductNcmTouched(true)}
+                      inputMode="numeric"
+                      placeholder="Obrigatório para emitir notas fiscais"
+                    />
+                  </label>
+                ) : null}
               </div>
 
-              <div className="product-form-field">
-                <span>Grupo fiscal</span>
-                <PlatformSelect
-                  ariaLabel="Selecionar grupo fiscal do produto"
-                  value={productDraft.grupo_fiscal_id || "none"}
-                  options={[
-                    { value: "none", label: "Sem grupo fiscal", description: "Pode operar sem emissão fiscal" },
-                    ...snapshot.grupos_fiscais
-                      .filter(group => group.ativo || String(group.id) === productDraft.grupo_fiscal_id)
-                      .map(group => ({
-                        value: String(group.id),
-                        label: group.ativo ? group.nome : `${group.nome} (desativado)`,
-                        description: `CFOP ${group.cfop ?? "--"}`
-                      }))
-                  ]}
-                  onChange={handleProductFiscalGroupChange}
-                />
-              </div>
+              {canUseFiscalResources ? (
+                <div className="product-form-field">
+                  <span>Grupo fiscal</span>
+                  <PlatformSelect
+                    ariaLabel="Selecionar grupo fiscal do produto"
+                    value={productDraft.grupo_fiscal_id || "none"}
+                    options={[
+                      { value: "none", label: "Sem grupo fiscal", description: "Pode operar sem emissão fiscal" },
+                      ...snapshot.grupos_fiscais
+                        .filter(group => group.ativo || String(group.id) === productDraft.grupo_fiscal_id)
+                        .map(group => ({
+                          value: String(group.id),
+                          label: group.ativo ? group.nome : `${group.nome} (desativado)`,
+                          description: `CFOP ${group.cfop ?? "--"}`
+                        }))
+                    ]}
+                    onChange={handleProductFiscalGroupChange}
+                  />
+                </div>
+              ) : null}
 
               <div className="product-form-grid product-form-grid-two">
                 <label>

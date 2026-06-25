@@ -12,6 +12,7 @@ import {
   PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
   PLATFORM_ACCOUNT_TYPE_STORAGE_KEY
 } from "@/lib/platform-session";
+import { hasFiscalEntitlement, loadSubscriptionEntitlements } from "@/lib/subscription-entitlements";
 
 type OnboardingStatus = {
   precisa_onboarding: boolean;
@@ -31,6 +32,28 @@ const routePermissions = [
   { prefix: "/estoque", permission: "estoque" }
 ];
 
+const fiscalEntitlementRoutes = [
+  "/meu-sistema/grupos-fiscais",
+  "/meu-sistema/documentos-fiscais",
+  "/grupos-fiscais",
+  "/documentos-fiscais"
+];
+
+function readStoredPermissions() {
+  const rawPermissions = window.localStorage.getItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
+
+  if (!rawPermissions) {
+    return ["*"];
+  }
+
+  try {
+    const parsed = JSON.parse(rawPermissions);
+    return Array.isArray(parsed) ? parsed : ["*"];
+  } catch {
+    return ["*"];
+  }
+}
+
 export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -46,33 +69,13 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
       return;
     }
 
+    const authToken = token;
+
     async function validateAccess() {
       try {
-        const status = await apiGet<OnboardingStatus>("/onboarding/status", { token });
-
-        if (cancelled) {
-          return;
-        }
-
-        if (status.precisa_onboarding) {
-          router.replace("/onboarding");
-          return;
-        }
-
         const accountType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
-        const rawPermissions = window.localStorage.getItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
-        let permissions: string[] = ["*"];
-
-        if (rawPermissions) {
-          try {
-            const parsed = JSON.parse(rawPermissions);
-            permissions = Array.isArray(parsed) ? parsed : ["*"];
-          } catch {
-            permissions = ["*"];
-          }
-        }
-
-        const requiredPermission = routePermissions.find(route =>
+        const permissions = readStoredPermissions();
+        const requiredPermission = routePermissions.find((route) =>
           pathname.startsWith(route.prefix)
         )?.permission;
         const isMainAccountOnlyPage = pathname.startsWith("/meu-sistema/configuracoes");
@@ -82,6 +85,33 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
 
         if (!canAccessPage) {
           router.replace("/meu-sistema");
+          return;
+        }
+
+        if (fiscalEntitlementRoutes.some((route) => pathname.startsWith(route))) {
+          const entitlements = await loadSubscriptionEntitlements(authToken);
+
+          if (cancelled) {
+            return;
+          }
+
+          if (!hasFiscalEntitlement(entitlements)) {
+            router.replace("/meu-sistema?bloqueio=emissao_fiscal");
+            return;
+          }
+        }
+
+        const status = await apiGet<OnboardingStatus>("/onboarding/status", {
+          cacheTtlMs: 120_000,
+          token: authToken
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (status.precisa_onboarding) {
+          router.replace("/onboarding");
           return;
         }
 

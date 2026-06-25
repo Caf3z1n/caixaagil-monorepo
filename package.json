@@ -6,11 +6,12 @@
   "workspaces": [
     "api",
     "web",
+    "admin",
     "pdv",
     "packages/*"
   ],
   "scripts": {
-    "dev:all": "npm --prefix pdv exec concurrently -- -k -n API,WEB,PDV -c cyan,green,magenta \"npm --prefix api run dev\" \"npm --prefix web run dev\" \"npm --prefix pdv run dev\"",
+    "dev:all": "npm --prefix pdv exec concurrently -- -k -n API,WEB,ADMIN,PDV -c cyan,green,yellow,magenta \"npm --prefix api run dev\" \"npm --prefix web run dev\" \"npm --prefix admin run dev\" \"npm --prefix pdv run dev\"",
     "dev:api": "npm --prefix api run dev",
     "start:api": "npm --prefix api run start",
     "build:api": "npm --prefix api run build",
@@ -18,6 +19,9 @@
     "dev:web": "npm --prefix web run dev",
     "build:web": "npm --prefix web run build",
     "typecheck:web": "npm --prefix web run typecheck",
+    "dev:admin": "npm --prefix admin run dev",
+    "build:admin": "npm --prefix admin run build",
+    "typecheck:admin": "npm --prefix admin run typecheck",
     "dev:pdv": "npm --prefix pdv run dev",
     "build:pdv": "npm --prefix pdv run build",
     "typecheck:pdv": "npm --prefix pdv run typecheck"

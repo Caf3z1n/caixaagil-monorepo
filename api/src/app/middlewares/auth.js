@@ -26,10 +26,14 @@ function getRequiredPermission(req) {
 
 function isMainAccountOnlyRoute(req) {
   const baseUrl = req.baseUrl || '';
+  const isEntitlementsRead =
+    req.method === 'GET' &&
+    baseUrl.startsWith('/assinaturas') &&
+    req.path === '/entitlements';
 
   return (
     baseUrl.startsWith('/usuarios') ||
-    baseUrl.startsWith('/assinaturas') ||
+    (baseUrl.startsWith('/assinaturas') && !isEntitlementsRead) ||
     baseUrl.startsWith('/configuracoes') ||
     baseUrl.startsWith('/funcionarios') ||
     baseUrl.startsWith('/nf')

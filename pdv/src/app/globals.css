@@ -11,6 +11,8 @@
   --success: var(--green);
   --danger: oklch(0.58 0.2 29);
   --button-shadow: inset 0 1px 0 oklch(0.99 0.003 76 / 0.22);
+  --pdv-app-scale: 1;
+  --pdv-app-scale-inverse: 1;
 }
 
 * {
@@ -19,7 +21,10 @@
 
 html,
 body {
+  width: 100%;
+  height: 100%;
   min-height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -53,20 +58,51 @@ button {
   border: 0;
 }
 
-:focus,
+:focus {
+  outline: none;
+}
+
 :focus-visible {
-  outline: 0;
+  outline: 2px solid oklch(0.72 0.19 45 / 0.46);
+  outline-offset: 2px;
+}
+
+:where(input, textarea, select):focus-visible {
+  outline: none;
 }
 
 .pdv-onboarding-page {
-  display: grid;
-  place-items: center;
+  width: 100%;
+  height: 100svh;
   min-height: 100svh;
-  padding: 28px 16px;
   overflow-x: hidden;
   overflow-y: auto;
   background: var(--orange);
   color: var(--ink);
+}
+
+.pdv-app-scale-frame {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+  overflow: visible;
+  background: var(--orange);
+}
+
+.pdv-app-scale-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: calc(100% * var(--pdv-app-scale-inverse));
+  min-height: calc(100svh * var(--pdv-app-scale-inverse));
+  transform-origin: top left;
+  transform: scale(var(--pdv-app-scale));
+}
+
+.pdv-app-scale-surface-center {
+  display: grid;
+  place-items: center;
+  padding: 28px 16px;
 }
 
 .pdv-onboarding-card {
@@ -323,26 +359,27 @@ button {
 }
 
 .pdv-system-page {
+  position: relative;
+  width: 100%;
   height: 100svh;
   min-height: 100svh;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-gutter: stable;
   background: var(--orange);
   color: var(--ink);
 }
 
 .pdv-system-header {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 20;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 22px;
+  width: 100%;
   height: 86px;
   min-height: 86px;
-  padding: 0 max(clamp(18px, 4vw, 72px), calc((100vw - 1700px) / 2));
+  padding: 0 clamp(16px, 1.8vw, 36px);
   border-bottom: 0;
   background: var(--orange);
   color: var(--surface);
@@ -359,6 +396,7 @@ button {
   justify-self: start;
   gap: 12px;
   min-width: 0;
+  overflow: hidden;
   color: currentColor;
 }
 
@@ -391,6 +429,7 @@ button {
   letter-spacing: 0.085em;
   line-height: 1;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .pdv-system-brand small {
@@ -407,13 +446,49 @@ button {
 }
 
 .pdv-primary-nav {
+  justify-self: center;
+  width: min(100%, 980px);
+  min-width: 0;
+  max-width: min(64vw, 980px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 1px 3px;
+  scrollbar-width: none;
+}
+
+.pdv-primary-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.pdv-primary-nav-track {
   display: flex;
   align-items: center;
-  justify-content: center;
-  justify-self: center;
+  justify-content: flex-start;
   gap: 8px;
-  min-width: 0;
-  max-width: min(62vw, 980px);
+  width: max-content;
+  min-width: min-content;
+  margin-inline: auto;
+}
+
+@media (max-width: 1500px) {
+  .pdv-system-header {
+    gap: 14px;
+    padding-inline: clamp(8px, 1.3vw, 22px);
+  }
+
+  .pdv-system-brand {
+    min-width: 62px;
+    overflow: visible;
+  }
+
+  .pdv-system-brand span:last-child {
+    display: none;
+  }
+
+  .pdv-primary-nav {
+    max-width: min(72vw, 1080px);
+    padding-inline: 0;
+  }
 }
 
 .pdv-primary-nav-link,
@@ -617,15 +692,95 @@ button {
   background: oklch(1 0 0 / 0.14);
 }
 
+@media (max-width: 1320px) {
+  .pdv-system-header {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: clamp(6px, 1vw, 12px);
+    height: 86px;
+    min-height: 86px;
+    padding: 0 clamp(6px, 0.9vw, 12px);
+  }
+
+  .pdv-system-brand {
+    min-width: 54px;
+  }
+
+  .pdv-system-brand-mark {
+    width: 54px;
+    height: 54px;
+    transform: none;
+  }
+
+  .pdv-primary-nav {
+    justify-self: stretch;
+    width: 100%;
+    max-width: 100%;
+    padding: 0 0 3px;
+  }
+
+  .pdv-primary-nav-track {
+    gap: 6px;
+  }
+
+  .pdv-primary-nav-link,
+  .pdv-primary-nav-placeholder {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 0 10px;
+    gap: 8px;
+    font-size: 0.94rem;
+  }
+
+  .pdv-primary-nav-link kbd {
+    min-width: 36px;
+    height: 26px;
+    padding: 0 7px;
+    font-size: 0.82rem;
+  }
+
+  .pdv-system-header-actions {
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .pdv-header-close-button,
+  .pdv-header-settings-button {
+    min-height: 46px;
+  }
+
+  .pdv-header-close-button {
+    padding: 0 15px;
+  }
+
+  .pdv-header-settings-button {
+    width: 46px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .pdv-system-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .pdv-system-brand {
+    display: none;
+  }
+
+  .pdv-primary-nav-track {
+    margin-inline: 0 auto;
+  }
+}
+
 .pdv-cashier-shell {
+  --pdv-cashier-available-height: calc((100svh * var(--pdv-app-scale-inverse)) - 86px);
   display: grid;
-  align-content: center;
+  align-content: safe center;
   justify-items: center;
   gap: 18px;
   width: min(100% - 32px, 620px);
-  min-height: calc(100svh - 86px);
+  min-height: var(--pdv-cashier-available-height);
   margin: 0 auto;
-  padding: 30px 0 42px;
+  padding: 28px 0;
 }
 
 .pdv-cashier-section-title {
@@ -1025,6 +1180,58 @@ button {
   background: oklch(0.78 0.17 75);
 }
 
+.pdv-billing-notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 620px);
+  min-height: 52px;
+  border: 1px solid oklch(0.82 0.11 57);
+  border-radius: 12px;
+  background: oklch(0.97 0.035 58);
+  color: var(--orange-deep);
+  padding: 11px 13px;
+  box-shadow: 0 18px 48px -38px oklch(0.43 0.18 38 / 0.5);
+}
+
+.pdv-billing-notice-blocked {
+  border-color: oklch(0.7 0.13 29);
+  background: oklch(0.95 0.045 29);
+  color: var(--danger);
+}
+
+.pdv-billing-notice svg {
+  flex: none;
+  color: currentColor;
+}
+
+.pdv-billing-notice span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.pdv-billing-notice strong,
+.pdv-billing-notice small,
+.pdv-billing-notice em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-billing-notice strong {
+  font-size: 0.88rem;
+  font-weight: 950;
+}
+
+.pdv-billing-notice small,
+.pdv-billing-notice em {
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 820;
+}
+
 .pdv-cashier-progress {
   display: flex;
   align-items: center;
@@ -1039,14 +1246,14 @@ button {
 }
 
 .pdv-cashier-shell-scroll {
-  align-content: start;
-  min-height: auto;
-  padding-top: 30px;
-  padding-bottom: 84px;
+  align-content: safe center;
+  min-height: var(--pdv-cashier-available-height);
+  padding-top: 28px;
+  padding-bottom: 28px;
 }
 
 .pdv-cashier-shell-wide.pdv-cashier-shell-scroll {
-  align-content: start;
+  align-content: safe center;
 }
 
 .pdv-session-strip,
@@ -1925,6 +2132,46 @@ button {
 .pdv-employee-auth input:focus-visible {
   border-color: var(--orange);
   box-shadow: 0 0 0 3px oklch(0.72 0.19 45 / 0.14);
+}
+
+.pdv-employee-password-input {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: stretch !important;
+  gap: 0 !important;
+  width: 100%;
+  color: inherit !important;
+}
+
+.pdv-employee-password-input input {
+  min-width: 0;
+  border-radius: 12px 0 0 12px;
+}
+
+.pdv-employee-password-input button {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--line-cool);
+  border-left: 0;
+  border-radius: 0 12px 12px 0;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 180ms ease-out,
+    background-color 180ms ease-out,
+    color 180ms ease-out;
+}
+
+.pdv-employee-password-input:focus-within input,
+.pdv-employee-password-input:focus-within button {
+  border-color: var(--orange);
+}
+
+.pdv-employee-password-input button:hover,
+.pdv-employee-password-input button:focus-visible {
+  background: oklch(0.972 0.006 78);
+  color: var(--orange);
 }
 
 .pdv-command-name-field {
@@ -4799,6 +5046,11 @@ button {
   gap: 12px;
 }
 
+.pdv-settings-section + .pdv-settings-section {
+  padding-top: 16px;
+  border-top: 1px solid var(--line-cool);
+}
+
 .pdv-settings-section-head {
   display: flex;
   align-items: center;
@@ -4928,11 +5180,17 @@ button {
   border-top: 1px solid var(--line-cool);
 }
 
+.pdv-settings-section + .pdv-settings-printing {
+  margin-top: 0;
+}
+
+.pdv-settings-field,
 .pdv-printing-field {
   display: grid;
   gap: 6px;
 }
 
+.pdv-settings-field > span,
 .pdv-printing-field > span {
   color: var(--muted);
   font-size: 0.76rem;
@@ -5371,7 +5629,7 @@ button {
 }
 
 @media (max-width: 640px) {
-  .pdv-onboarding-page {
+  .pdv-app-scale-surface-center {
     padding: 18px 14px;
   }
 
@@ -5395,38 +5653,40 @@ button {
 
   .pdv-system-header {
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "brand actions"
-      "nav nav";
     align-items: center;
-    height: auto;
-    min-height: 118px;
-    padding: 10px 16px 12px;
+    height: 86px;
+    min-height: 86px;
+    padding: 0 6px;
+    gap: 5px;
   }
 
   .pdv-system-brand {
-    grid-area: brand;
+    display: none;
   }
 
   .pdv-system-header-actions {
-    grid-area: actions;
     justify-content: flex-end;
+    gap: 4px;
   }
 
   .pdv-primary-nav {
-    grid-area: nav;
     justify-content: flex-start;
     width: 100%;
     max-width: 100%;
     overflow-x: auto;
+    padding-inline: 0;
     padding-bottom: 2px;
+  }
+
+  .pdv-primary-nav-track {
+    gap: 6px;
   }
 
   .pdv-primary-nav-link,
   .pdv-primary-nav-placeholder {
     min-height: 42px;
-    padding: 0 13px;
-    font-size: 0.92rem;
+    padding: 0 8px;
+    font-size: 0.88rem;
   }
 
   .pdv-primary-nav-count {
@@ -5458,14 +5718,15 @@ button {
 
   .pdv-cashier-shell {
     width: min(100% - 24px, 620px);
-    min-height: calc(100svh - 118px);
-    padding-top: 24px;
+    min-height: var(--pdv-cashier-available-height);
+    padding-top: 22px;
+    padding-bottom: 22px;
   }
 
   .pdv-cashier-shell-scroll {
-    min-height: auto;
+    min-height: var(--pdv-cashier-available-height);
     padding-top: 22px;
-    padding-bottom: 72px;
+    padding-bottom: 22px;
   }
 
   .pdv-cashier-section-main {
@@ -5826,4 +6087,21 @@ button {
   }
 }
 
+
+:where(a, button, input, textarea, select, [role="button"], [role="tab"], [role="switch"], [tabindex]):focus,
+:where(a, button, input, textarea, select, [role="button"], [role="tab"], [role="switch"], [tabindex]):focus-visible,
+:where(
+  .pdv-code-field,
+  .pdv-search-field,
+  .pdv-modal-form,
+  .pdv-cash-received,
+  .pdv-employee-auth,
+  .pdv-command-name-field,
+  .pdv-quantity-control,
+  .pdv-agreement-search,
+  .pdv-cash-payment-received,
+  .pdv-platform-select
+):focus-within {
+  box-shadow: none !important;
+}
 

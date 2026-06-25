@@ -8,6 +8,10 @@ const {
   updateMercadoPagoPreapprovalAmount,
   validateMercadoPagoWebhookSignature,
 } = require('../services/mercadoPagoService');
+const {
+  applyDueScheduledChangeForSubscription,
+  cancelScheduledChangesForSubscription,
+} = require('../services/alteracoesAssinaturaService');
 
 function toCentavos(value) {
   if (value === null || value === undefined || value === '') {
@@ -296,6 +300,7 @@ async function cancelPreviousActiveSubscriptions(assinatura) {
 
     assinaturaAnterior.status = 'substituida';
     assinaturaAnterior.cancelada_em = assinaturaAnterior.cancelada_em || new Date();
+    await cancelScheduledChangesForSubscription(assinaturaAnterior.id, 'assinatura_substituida');
     await assinaturaAnterior.save();
   }
 }
@@ -332,6 +337,12 @@ async function updateAssinaturaFromPreapproval(assinatura, preapproval) {
   }
 
   if (assinatura.status === 'ativa') {
+    const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+
+    if (appliedChanges.length > 0) {
+      await assinatura.reload();
+    }
+
     await cancelPreviousActiveSubscriptions(assinatura);
   }
 }
@@ -378,6 +389,12 @@ async function updateAssinaturaStatus(assinatura, paymentStatus) {
       await assinatura.save();
     } catch {
       // A normalização será tentada novamente no próximo webhook ou consulta de status.
+    }
+
+    const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+
+    if (appliedChanges.length > 0) {
+      await assinatura.reload();
     }
 
     await cancelPreviousActiveSubscriptions(assinatura);

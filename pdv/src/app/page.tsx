@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -12,6 +12,7 @@ import {
 
 import { ApiError, apiPost } from "@/lib/api-client";
 import { getLocalPdvStore, type PdvUpdateStatus } from "@/lib/local-pdv-store";
+import { applyStoredPdvAppScale } from "@/lib/pdv-app-scale";
 import { DesktopCashierFlow } from "./cashier-flow";
 import {
   PdvUpdateModal,
@@ -19,6 +20,7 @@ import {
   previewPdvUpdateModalInDevelopment,
   shouldShowPdvUpdateModal
 } from "./pdv-update-modal";
+import { PdvScaleSurface } from "./pdv-scale-surface";
 
 type PdvStep = "intro" | "activation" | "success";
 type AppState = "checking" | "activation" | "system";
@@ -32,6 +34,17 @@ type PdvSession = {
   status_operacional?: string;
   ultimo_acesso_em?: string | null;
   ultima_sincronizacao_em?: string | null;
+};
+
+type BillingStatus = {
+  fase: "regular" | "aviso" | "atrasada" | "bloqueada" | string;
+  bloqueado: boolean;
+  permite_operacao: boolean;
+  mensagem?: string | null;
+  proximo_pagamento_em?: string | null;
+  dias_em_atraso?: number;
+  dias_para_bloqueio?: number | null;
+  bloqueia_em?: string | null;
 };
 
 type CommandSettings = {
@@ -67,6 +80,7 @@ type PairResponse = {
   pdv: PdvSession;
   configuracoes?: ApiPdvSettings | null;
   funcionarios?: ApiEmployee[];
+  billing_status?: BillingStatus | null;
 };
 
 type SessionResponse = {
@@ -74,6 +88,7 @@ type SessionResponse = {
   pdv: PdvSession;
   configuracoes?: ApiPdvSettings | null;
   funcionarios?: ApiEmployee[];
+  billing_status?: BillingStatus | null;
 };
 
 const progressSteps: Array<{ id: PdvStep; label: string }> = [
@@ -85,6 +100,7 @@ const progressSteps: Array<{ id: PdvStep; label: string }> = [
 const deviceIdKey = "caixaagil:pdv:device-id";
 const deviceCredentialKey = "caixaagil:pdv:credential";
 const activatedPdvKey = "caixaagil:pdv:activated-pdv";
+const billingStatusKey = "caixaagil:pdv:billing-status";
 
 function normalizeActivationCode(value: string) {
   const rawCode = value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
@@ -142,14 +158,42 @@ function getStoredPdv() {
   }
 }
 
+function getStoredBillingStatus() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const rawStatus = window.localStorage.getItem(billingStatusKey);
+
+  if (!rawStatus) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawStatus) as BillingStatus;
+  } catch {
+    return null;
+  }
+}
+
 function saveDesktopSession(credencial: string, pdv: PdvSession) {
   window.localStorage.setItem(deviceCredentialKey, credencial);
   window.localStorage.setItem(activatedPdvKey, JSON.stringify(pdv));
 }
 
+function saveBillingStatus(status?: BillingStatus | null) {
+  if (!status) {
+    window.localStorage.removeItem(billingStatusKey);
+    return;
+  }
+
+  window.localStorage.setItem(billingStatusKey, JSON.stringify(status));
+}
+
 function clearDesktopSession() {
   window.localStorage.removeItem(deviceCredentialKey);
   window.localStorage.removeItem(activatedPdvKey);
+  window.localStorage.removeItem(billingStatusKey);
 }
 
 function formatDateTime(value?: string | null) {
@@ -198,6 +242,7 @@ export default function PdvActivationPage() {
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
   const [initialPdvSettings, setInitialPdvSettings] = useState<ApiPdvSettings | null>(null);
   const [initialEmployees, setInitialEmployees] = useState<ApiEmployee[]>([]);
+  const [initialBillingStatus, setInitialBillingStatus] = useState<BillingStatus | null>(null);
   const [stageHeight, setStageHeight] = useState<number | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const activeIndex = Math.max(0, progressSteps.findIndex((item) => item.id === step));
@@ -205,6 +250,15 @@ export default function PdvActivationPage() {
   const startupUpdateVersionKey = startupUpdateStatus?.availableVersion || "unknown";
   const shouldShowStartupUpdateModal =
     shouldShowPdvUpdateModal(startupUpdateStatus) && dismissedStartupUpdateVersion !== startupUpdateVersionKey;
+
+  const handleBillingStatusChange = useCallback((status: BillingStatus | null) => {
+    setInitialBillingStatus(status);
+    saveBillingStatus(status);
+  }, []);
+
+  useLayoutEffect(() => {
+    applyStoredPdvAppScale();
+  }, []);
 
   useEffect(() => {
     if (hasCompletedStartupUpdateCheck) {
@@ -317,11 +371,13 @@ export default function PdvActivationPage() {
       clearDesktopSession();
       setInitialPdvSettings(null);
       setInitialEmployees([]);
+      setInitialBillingStatus(null);
       setAppState("activation");
       return;
     }
 
     setActivatedPdv(storedPdv);
+    setInitialBillingStatus(getStoredBillingStatus());
 
     apiPost<SessionResponse>("/pdvs/sessao", {
       credencial_dispositivo: storedCredential,
@@ -332,6 +388,8 @@ export default function PdvActivationPage() {
         setActivatedPdv(response.pdv);
         setInitialPdvSettings(response.configuracoes ?? null);
         setInitialEmployees(response.funcionarios ?? []);
+        setInitialBillingStatus(response.billing_status ?? null);
+        saveBillingStatus(response.billing_status ?? null);
         setConnectivity("online");
         setSystemMessage("");
         setAppState("system");
@@ -342,6 +400,7 @@ export default function PdvActivationPage() {
           setActivatedPdv(null);
           setInitialPdvSettings(null);
           setInitialEmployees([]);
+          setInitialBillingStatus(null);
           setStep("intro");
           setAppState("activation");
           return;
@@ -369,6 +428,7 @@ export default function PdvActivationPage() {
         setActivatedPdv(null);
         setInitialPdvSettings(null);
         setInitialEmployees([]);
+        setInitialBillingStatus(null);
         setStep("intro");
         setAppState("activation");
         return;
@@ -388,6 +448,8 @@ export default function PdvActivationPage() {
         setActivatedPdv(response.pdv);
         setInitialPdvSettings(response.configuracoes ?? null);
         setInitialEmployees(response.funcionarios ?? []);
+        setInitialBillingStatus(response.billing_status ?? null);
+        saveBillingStatus(response.billing_status ?? null);
         setConnectivity("online");
         setSystemMessage("");
       } catch (error) {
@@ -400,6 +462,7 @@ export default function PdvActivationPage() {
           setActivatedPdv(null);
           setInitialPdvSettings(null);
           setInitialEmployees([]);
+          setInitialBillingStatus(null);
           setStep("intro");
           setAppState("activation");
         }
@@ -535,9 +598,11 @@ export default function PdvActivationPage() {
       });
 
       saveDesktopSession(response.credencial_dispositivo, response.pdv);
+      saveBillingStatus(response.billing_status ?? null);
       setActivatedPdv(response.pdv);
       setInitialPdvSettings(response.configuracoes ?? null);
       setInitialEmployees(response.funcionarios ?? []);
+      setInitialBillingStatus(response.billing_status ?? null);
       setConnectivity("online");
       goToStep("success");
     } catch (error) {
@@ -650,21 +715,19 @@ export default function PdvActivationPage() {
   }
 
   if (appState === "checking") {
-    const loadingTitle = hasCompletedStartupUpdateCheck ? "Validando caixa" : "Validando sistema";
-    const loadingDescription = hasCompletedStartupUpdateCheck
-      ? "Estamos conferindo a credencial local deste PDV."
-      : "Estamos verificando se existe atualização disponível.";
+    const loadingTitle = hasCompletedStartupUpdateCheck ? "Validando PDV" : "Buscando atualizações";
 
     return (
       <>
         <main className="pdv-onboarding-page">
-          <section className="pdv-onboarding-card pdv-onboarding-card-compact" aria-live="polite">
-            <span className="pdv-onboarding-mark">
-              <LoaderCircle aria-hidden="true" className="pdv-spin" size={24} />
-            </span>
-            <h1>{loadingTitle}</h1>
-            <p>{loadingDescription}</p>
-          </section>
+          <PdvScaleSurface centered>
+            <section className="pdv-onboarding-card pdv-onboarding-card-compact" aria-live="polite">
+              <span className="pdv-onboarding-mark">
+                <LoaderCircle aria-hidden="true" className="pdv-spin" size={24} />
+              </span>
+              <h1>{loadingTitle}</h1>
+            </section>
+          </PdvScaleSurface>
         </main>
 
         {shouldShowStartupUpdateModal ? (
@@ -693,7 +756,9 @@ export default function PdvActivationPage() {
           deviceId={getDeviceId()}
           initialSettings={initialPdvSettings}
           initialEmployees={initialEmployees}
+          initialBillingStatus={initialBillingStatus}
           lastAccessLabel={formatDateTime(activatedPdv?.ultimo_acesso_em)}
+          onBillingStatusChange={handleBillingStatusChange}
           onConnectivityChange={setConnectivity}
           onSystemMessage={setSystemMessage}
           pdvIdentity={pdvIdentity}
@@ -706,41 +771,43 @@ export default function PdvActivationPage() {
 
   return (
     <main className="pdv-onboarding-page">
-      <section className="pdv-onboarding-card" aria-label="Ativação do Caixa Ágil PDV">
-        <div className="pdv-onboarding-stage" ref={stageRef} style={stageHeight ? { height: stageHeight } : undefined}>
-          <div
-            className="pdv-onboarding-track"
-            style={{ transform: `translate3d(-${activeIndex * 100}%, 0, 0)` }}
-          >
-            {progressSteps.map((item) => (
-              <div
-                aria-hidden={item.id !== step}
-                className={getPanelClass(item.id)}
-                inert={item.id !== step}
+      <PdvScaleSurface centered>
+        <section className="pdv-onboarding-card" aria-label="Ativação do Caixa Ágil PDV">
+          <div className="pdv-onboarding-stage" ref={stageRef} style={stageHeight ? { height: stageHeight } : undefined}>
+            <div
+              className="pdv-onboarding-track"
+              style={{ transform: `translate3d(-${activeIndex * 100}%, 0, 0)` }}
+            >
+              {progressSteps.map((item) => (
+                <div
+                  aria-hidden={item.id !== step}
+                  className={getPanelClass(item.id)}
+                  inert={item.id !== step}
+                  key={item.id}
+                >
+                  {renderStep(item.id)}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="pdv-onboarding-progress" aria-label={`Etapa ${activeIndex + 1} de ${progressSteps.length}`}>
+            {progressSteps.map((item, index) => (
+              <span
+                className={
+                  index === activeIndex
+                    ? "pdv-progress-dot pdv-progress-dot-active"
+                    : index < activeIndex
+                      ? "pdv-progress-dot pdv-progress-dot-done"
+                      : "pdv-progress-dot"
+                }
                 key={item.id}
-              >
-                {renderStep(item.id)}
-              </div>
+                title={item.label}
+              />
             ))}
           </div>
-        </div>
-
-        <div className="pdv-onboarding-progress" aria-label={`Etapa ${activeIndex + 1} de ${progressSteps.length}`}>
-          {progressSteps.map((item, index) => (
-            <span
-              className={
-                index === activeIndex
-                  ? "pdv-progress-dot pdv-progress-dot-active"
-                  : index < activeIndex
-                    ? "pdv-progress-dot pdv-progress-dot-done"
-                    : "pdv-progress-dot"
-              }
-              key={item.id}
-              title={item.label}
-            />
-          ))}
-        </div>
-      </section>
+        </section>
+      </PdvScaleSurface>
     </main>
   );
 }

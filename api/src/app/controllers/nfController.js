@@ -11,6 +11,7 @@ const {
   Venda,
 } = require('../models');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
+const { ensureFeature } = require('../services/assinaturaEntitlementsService');
 const {
   buildStorageDirectory,
   buildStoredFileName,
@@ -520,8 +521,26 @@ async function appendNfEvent(nf, eventData) {
   });
 }
 
+function handleNfError(res, error, defaultMessage) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      code: error.code,
+      message: error.message || defaultMessage,
+      entitlements: error.entitlements,
+    });
+  }
+
+  return res.status(500).json({
+    message: defaultMessage,
+    detail: error.message,
+  });
+}
+
 module.exports = {
   async list(req, res) {
+    try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
     const limit = normalizeInteger(req.query.limit, 50, { min: 1, max: 100 });
     const offset = normalizeInteger(req.query.offset, 0, { min: 0, max: 1000000 });
     const where = {
@@ -606,10 +625,15 @@ module.exports = {
       limit,
       offset,
     });
+    } catch (error) {
+      return handleNfError(res, error, 'Erro ao listar documentos fiscais.');
+    }
   },
 
   async create(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const body = req.body || {};
       const configuracao = await configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id);
       const modelo = normalizeModelo(body.modelo, configuracao.fiscal?.modelo_prioritario || '65');
@@ -684,14 +708,14 @@ module.exports = {
         });
       }
 
-      return res.status(500).json({
-        message: 'Não foi possível registrar a nota fiscal.',
-        detail: error.message,
-      });
+      return handleNfError(res, error, 'Não foi possível registrar a nota fiscal.');
     }
   },
 
   async show(req, res) {
+    try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
     const nf = await findNfForUser(req.user.id, req.params.id, {
       include: [
         { model: Venda, as: 'venda', required: false },
@@ -721,10 +745,15 @@ module.exports = {
     }
 
     return res.json(sanitizeNf(nf, { includePayload: true }));
+    } catch (error) {
+      return handleNfError(res, error, 'Erro ao carregar documento fiscal.');
+    }
   },
 
   async updateStatus(req, res) {
     try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
       const nf = await findNfForUser(req.user.id, req.params.id);
 
       if (!nf) {
@@ -771,10 +800,7 @@ module.exports = {
 
       return res.json(sanitizeNf(nf, { includePayload: true }));
     } catch (error) {
-      return res.status(500).json({
-        message: 'Não foi possível atualizar a nota fiscal.',
-        detail: error.message,
-      });
+      return handleNfError(res, error, 'Não foi possível atualizar a nota fiscal.');
     }
   },
 };

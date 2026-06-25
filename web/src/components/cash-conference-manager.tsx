@@ -716,8 +716,8 @@ export function CashConferenceManager() {
 
     try {
       const [nextSnapshot, configuracao] = await Promise.all([
-        apiGet<CashConferenceSnapshot>("/caixa/conferencia", { token }),
-        apiGet<ConfiguracaoSistema>("/configuracoes", { token }).catch(() => null)
+        apiGet<CashConferenceSnapshot>("/caixa/conferencia", { cacheTtlMs: 60_000, token }),
+        apiGet<ConfiguracaoSistema>("/configuracoes", { cacheTtlMs: 60_000, token }).catch(() => null)
       ]);
 
       setSnapshot(nextSnapshot);

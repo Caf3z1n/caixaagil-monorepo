@@ -762,7 +762,7 @@ export function FiscalGroupsManager() {
     }
 
     try {
-      const result = await apiGet<GrupoFiscal[]>("/grupos-fiscais", { token });
+      const result = await apiGet<GrupoFiscal[]>("/grupos-fiscais", { cacheTtlMs: 60_000, token });
 
       setFiscalGroups(result);
       setLoadError(null);

@@ -9,6 +9,7 @@ const {
   Produto,
   SaldoEstoqueProduto,
 } = require('../models');
+const { ensureFeature } = require('../services/assinaturaEntitlementsService');
 
 const iconesPermitidos = new Set([
   'package',
@@ -616,6 +617,14 @@ async function loadSnapshot(usuarioId, options = {}) {
 }
 
 function handleCatalogError(res, error, defaultMessage) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      code: error.code,
+      message: error.message || defaultMessage,
+      entitlements: error.entitlements,
+    });
+  }
+
   if (error.name === 'SequelizeUniqueConstraintError') {
     return res.status(409).json({
       message: 'Já existe um cadastro com esses dados.',
@@ -824,6 +833,11 @@ module.exports = {
 
     try {
       const payload = buildProdutoPayload(req.body);
+
+      if (payload.grupo_fiscal_id) {
+        await ensureFeature(req.user.id, 'emissao_fiscal');
+      }
+
       const validationError = await validateProdutoPayload(req.user.id, payload, {
         transaction,
       });
@@ -900,6 +914,11 @@ module.exports = {
       }
 
       const payload = buildProdutoPayload(req.body);
+
+      if (payload.grupo_fiscal_id && payload.grupo_fiscal_id !== produto.grupo_fiscal_id) {
+        await ensureFeature(req.user.id, 'emissao_fiscal');
+      }
+
       const validationError = await validateProdutoPayload(req.user.id, payload, {
         transaction,
         allowInactiveCategoriaId: produto.categoria_id,

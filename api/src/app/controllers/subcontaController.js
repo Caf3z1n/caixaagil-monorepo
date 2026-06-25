@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { DespesaCaixa, Subconta, Usuario } = require('../models');
+const { ensureLimitAvailable } = require('../services/assinaturaEntitlementsService');
 
 const permissoesDisponiveis = [
   {
@@ -205,6 +206,8 @@ module.exports = {
         return res.status(400).json({ message: 'Senha não atende aos requisitos mínimos.' });
       }
 
+      await ensureLimitAvailable(req.user.id, 'subcontas_ativas');
+
       const subconta = await Subconta.create({
         usuario_id: req.user.id,
         email,
@@ -224,8 +227,10 @@ module.exports = {
       }
 
       return res.status(error.statusCode || 500).json({
+        code: error.code,
         message: error.message || 'Erro ao criar subconta.',
         detail: error.statusCode ? undefined : error.message,
+        entitlements: error.entitlements,
       });
     }
   },
@@ -415,6 +420,8 @@ module.exports = {
       }
 
       if (!subconta.ativo) {
+        await ensureLimitAvailable(req.user.id, 'subcontas_ativas');
+
         await subconta.update({ ativo: true });
       }
 
@@ -429,7 +436,12 @@ module.exports = {
         message: 'Subconta ativada.',
       });
     } catch (error) {
-      return res.status(500).json({ message: 'Erro ao ativar subconta.', detail: error.message });
+      return res.status(error.statusCode || 500).json({
+        code: error.code,
+        message: error.message || 'Erro ao ativar subconta.',
+        detail: error.statusCode ? undefined : error.message,
+        entitlements: error.entitlements,
+      });
     }
   },
 };
