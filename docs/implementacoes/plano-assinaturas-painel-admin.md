@@ -99,17 +99,25 @@ Status: implementada.
 
 ## Etapa 9: endurecimento Mercado Pago
 
-Objetivo: deixar o billing mais confiável e rastreável.
+Objetivo: deixar o billing mais confiável, rastreável e validável antes de avançar para uso real com clientes.
+
+Status: implementada e validada em produção técnica.
 
 - Centralizar integração Mercado Pago em serviços de domínio.
 - Melhorar sincronização entre assinatura local, preapproval e pagamentos.
 - Tratar falhas, webhooks duplicados e estados pendentes.
 - Revisar uso de `start_date`, atualização de valor recorrente e cobrança futura.
-- Criar rotinas de reconciliação para assinaturas e pagamentos.
+- Corrigir reserva transacional de código personalizado para evitar erro de `FOR UPDATE` com `include`/alias do Sequelize.
+- Endurecer cancelamento de preapproval com fallback para a grafia aceita pela API real do Mercado Pago.
+- Criar smoke automatizado para planos públicos, planos personalizados grátis, planos personalizados pagos com trial em dias, uso único de código, entitlements, limites, inadimplência, downgrade agendado, ações administrativas e auditoria.
+- Validar fluxo visual de cadastro com código personalizado pago no navegador contra produção, confirmando ausência de erro no modal e abertura do estado de checkout.
+- Limpar dados sintéticos e cancelar preapprovals criados nos testes.
 
 ## Etapa 10: validação final
 
 Objetivo: garantir que o fluxo completo esteja consistente antes de liberar.
+
+Status: validação automatizada inicial criada; manter esta etapa como checklist antes de abrir clientes reais.
 
 - Validar cadastro novo com plano comum.
 - Validar cadastro com código personalizado.
@@ -119,3 +127,4 @@ Objetivo: garantir que o fluxo completo esteja consistente antes de liberar.
 - Validar limites de PDV e subcontas.
 - Validar bloqueio de recursos fiscais em plano sem permissão.
 - Validar painel administrativo com dados reais e sem vazamento para clientes.
+- Validar checkout com cartão real em produção quando decidir liberar clientes reais.
