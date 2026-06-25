@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'caixaagil-api',
       script: 'dist/server.js',
-      cwd: __dirname,
+      cwd: process.env.CAIXAAGIL_API_CWD || __dirname,
       env: {
         NODE_ENV: 'production',
       },
