@@ -29,7 +29,7 @@ ConfiguracaoSistema.init(
       type: DataTypes.JSONB,
       allowNull: false,
       defaultValue: {
-        ativo: true,
+        ativo: false,
       },
     },
     controle_funcionarios: {
@@ -43,7 +43,7 @@ ConfiguracaoSistema.init(
       type: DataTypes.JSONB,
       allowNull: false,
       defaultValue: {
-        ativo: true,
+        ativo: false,
       },
     },
     fiscal: {

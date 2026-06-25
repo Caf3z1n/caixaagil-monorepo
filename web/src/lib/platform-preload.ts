@@ -18,7 +18,6 @@ const platformRouteConfigs: PlatformPrefetchRoute[] = [
   { href: "/meu-sistema/documentos-fiscais" },
   { href: "/meu-sistema/funcionarios" },
   { href: "/subcontas", permission: "pdvs_subcontas" },
-  { href: "/relatorios" },
   { href: "/conta" }
 ];
 

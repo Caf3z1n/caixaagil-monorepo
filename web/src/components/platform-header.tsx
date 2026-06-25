@@ -22,7 +22,6 @@ type PlatformNavItem = {
 const platformNavItems: PlatformNavItem[] = [
   { href: "/meu-sistema", label: "Meu sistema" },
   { href: "/subcontas", label: "PDVs e subcontas", permission: "pdvs_subcontas" },
-  { href: "/relatorios", label: "Relatórios" },
   { href: "/conta", label: "Minha conta" }
 ];
 
@@ -55,7 +54,6 @@ function isOverLightPlatformSurface(pathname: string) {
   return (
     pathname === "/conta" ||
     pathname === "/subcontas" ||
-    pathname === "/relatorios" ||
     pathname === "/conferencia-caixa" ||
     pathname.startsWith("/home")
   );

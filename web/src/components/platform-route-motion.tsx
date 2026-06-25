@@ -3,7 +3,6 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  BarChart3,
   FileCheck2,
   HandCoins,
   LayoutGrid,
@@ -45,7 +44,6 @@ const pendingRouteMeta: Array<{ prefix: string; meta: PendingRouteMeta }> = [
   { prefix: "/meu-sistema/funcionarios", meta: { icon: UsersRound, rows: 5, size: "medium", title: "Funcionários" } },
   { prefix: "/meu-sistema", meta: { icon: LayoutGrid, title: "Meu sistema", variant: "menu" } },
   { prefix: "/subcontas", meta: { icon: Monitor, rows: 5, size: "medium", title: "PDVs e subcontas" } },
-  { prefix: "/relatorios", meta: { icon: BarChart3, title: "Relatórios", variant: "main" } },
   { prefix: "/conta", meta: { icon: UserCircle, title: "Minha conta", variant: "main" } }
 ];
 

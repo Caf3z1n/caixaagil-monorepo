@@ -1,12 +1,12 @@
 import Link from "next/link";
 import {
   ArrowRight,
-  BarChart3,
   CalendarClock,
   CheckCircle2,
   MonitorDown,
   PackageCheck,
   ReceiptText,
+  Settings2,
   ShieldCheck,
   UserPlus,
   UsersRound
@@ -38,11 +38,11 @@ const nextActions = [
     action: "Abrir PDVs e subcontas"
   },
   {
-    title: "Acompanhar relatórios",
-    text: "Quando o PDV sincronizar, vendas, estoque e fechamento aparecem aqui.",
-    href: "/relatorios",
-    icon: BarChart3,
-    action: "Ver relatórios"
+    title: "Configurar operação",
+    text: "Ative recursos do caixa e ajuste o sistema antes da primeira venda.",
+    href: "/meu-sistema/configuracoes",
+    icon: Settings2,
+    action: "Abrir configurações"
   }
 ];
 
@@ -78,7 +78,7 @@ export default function PlatformHomePage() {
             <span className="platform-soft-badge">Caixa Ágil pronto</span>
             <h2>Comece pelo computador do caixa.</h2>
             <p>
-              O app desktop concentra a venda. Esta área fica como central de conta, relatórios,
+              O app desktop concentra a venda. Esta área fica como central de conta, configurações,
               equipe, PDVs e assinatura.
             </p>
           </div>
@@ -193,7 +193,7 @@ export default function PlatformHomePage() {
             <MonitorDown aria-hidden="true" size={18} />
             <span>
               <strong>Instalar o app desktop</strong>
-              <small>Depois da instalação, o PDV começa a sincronizar dados para relatórios.</small>
+              <small>Depois da instalação, o PDV começa a sincronizar vendas, estoque e fechamento.</small>
             </span>
           </div>
           <div className="platform-task-row">

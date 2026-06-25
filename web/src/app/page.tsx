@@ -62,7 +62,7 @@ const productHighlights = [
     width: 1536,
     height: 1024,
     alt: "Ilustração 3D com documentos fiscais, recebimentos, calculadora, dinheiro e painel de resultado.",
-    label: "Emissão de notas e relatórios",
+    label: "Emissão de notas e fechamento",
     text: "No fechamento, o caixa mostra o que entrou, por qual forma de pagamento e o que precisa ser conferido. Convênios e recebimentos ficam registrados para não se perderem no papel. Se o comércio contratar o plano fiscal, a emissão de NFC-e e NF-e entra no mesmo fluxo, com histórico e contingência quando precisar.",
     points: ["Fechamento do turno", "Convênios registrados", "NFC-e/NF-e"]
   }

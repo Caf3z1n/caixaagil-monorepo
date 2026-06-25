@@ -104,11 +104,11 @@ const defaultPaymentSettings: PaymentSettings = {
 };
 
 const defaultCommandSettings: CommandSettings = {
-  ativo: true
+  ativo: false
 };
 
 const defaultExpenseSettings: ExpenseSettings = {
-  ativo: true
+  ativo: false
 };
 
 const defaultEmployeeSettings: EmployeeSettings = {
@@ -174,13 +174,13 @@ function normalizePaymentSettings(value?: Partial<PaymentSettings> | null): Paym
 
 function normalizeCommandSettings(value?: Partial<CommandSettings> | null): CommandSettings {
   return {
-    ativo: value?.ativo !== false
+    ativo: value?.ativo === true
   };
 }
 
 function normalizeExpenseSettings(value?: Partial<ExpenseSettings> | null): ExpenseSettings {
   return {
-    ativo: value?.ativo !== false
+    ativo: value?.ativo === true
   };
 }
 
@@ -1014,7 +1014,7 @@ export default function MeuSistemaConfiguracoesPage() {
                                   <small>{area.description}</small>
                                 </span>
 
-                                <span className="configuration-setting-status">Plano</span>
+                                <span className="configuration-setting-status">Bloqueado</span>
                               </article>
                             );
                           }

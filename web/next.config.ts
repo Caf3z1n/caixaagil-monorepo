@@ -17,11 +17,6 @@ const nextConfig: NextConfig = {
         permanent: true
       },
       {
-        source: "/home/relatorios",
-        destination: "/relatorios",
-        permanent: true
-      },
-      {
         source: "/home/subcontas",
         destination: "/subcontas",
         permanent: true

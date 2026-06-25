@@ -15,7 +15,7 @@ const defaultPaymentMethods = {
 };
 
 const defaultExpenseSettings = {
-  ativo: true,
+  ativo: false,
 };
 
 const defaultEmployeeControlSettings = {
@@ -23,7 +23,7 @@ const defaultEmployeeControlSettings = {
 };
 
 const defaultCommandSettings = {
-  ativo: true,
+  ativo: false,
 };
 
 const fiscalEnvironmentKeys = ['homologacao', 'producao'];

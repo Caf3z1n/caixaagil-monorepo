@@ -162,7 +162,7 @@ function renderMenuItem(item: SystemMenuItem, featured = false, lockedByPlan = f
         <span className="system-home-menu-copy">
           <strong>{item.title}</strong>
         </span>
-        <span className="system-home-menu-status">{lockedByPlan ? "Plano" : "Em breve"}</span>
+        <span className="system-home-menu-status">{lockedByPlan ? "Bloqueado" : "Em breve"}</span>
       </span>
     );
   }
@@ -217,7 +217,7 @@ export default function MeuSistemaPage() {
         if (!cancelled) {
           setEnabledFeatures({
             convenio: Boolean(configuracao.formas_pagamento?.convenio),
-            expenses: configuracao.lancar_despesas?.ativo !== false,
+            expenses: configuracao.lancar_despesas?.ativo === true,
             employees: configuracao.controle_funcionarios?.ativo === true
           });
           setEntitlements(subscriptionEntitlements);

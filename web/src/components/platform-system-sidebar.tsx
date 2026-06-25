@@ -132,7 +132,7 @@ export function PlatformSystemSidebar() {
                     <Icon aria-hidden="true" size={16} />
                     <span>{item.label}</span>
                     {" "}
-                    <em>{lockedByPlan ? "Plano" : "Em breve"}</em>
+                    <em>{lockedByPlan ? "Bloqueado" : "Em breve"}</em>
                   </span>
                 );
               })}
