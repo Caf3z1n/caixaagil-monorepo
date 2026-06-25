@@ -17,6 +17,8 @@ jobs:
   release:
     name: Build and publish PDV
     runs-on: windows-latest
+    env:
+      NEXT_PUBLIC_API_URL: https://api.caixaagil.tech
 
     steps:
       - name: Checkout

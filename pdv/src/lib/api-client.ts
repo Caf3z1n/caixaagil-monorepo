@@ -1,4 +1,4 @@
-const fallbackApiUrl = "http://localhost:3333";
+const fallbackApiUrl = process.env.NODE_ENV === "production" ? "https://api.caixaagil.tech" : "http://localhost:3333";
 
 export class ApiError extends Error {
   status: number;
