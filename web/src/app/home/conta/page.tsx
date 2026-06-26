@@ -365,6 +365,18 @@ function sortPayments(payments: PagamentoAssinatura[]) {
   });
 }
 
+function getAccountPaymentHistory(assinaturas: Assinatura[] = [], assinaturaAtual?: Assinatura | null) {
+  const paymentsById = new Map<number, PagamentoAssinatura>();
+
+  for (const assinatura of [assinaturaAtual, ...assinaturas]) {
+    for (const payment of assinatura?.pagamentos ?? []) {
+      paymentsById.set(payment.id, payment);
+    }
+  }
+
+  return sortPayments([...paymentsById.values()]);
+}
+
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
@@ -452,7 +464,10 @@ export default function PlatformAccountPage() {
     alteracaoAgendada?.plano_snapshot?.moeda || alteracaoAgendada?.moeda || assinatura?.moeda || "BRL";
   const selectedPlanData = planos.find((plano) => plano.id === selectedPlan) || null;
   const prorationPreview = getLocalProrationPreview(assinatura, selectedPlanData);
-  const pagamentos = useMemo(() => sortPayments(assinatura?.pagamentos ?? []), [assinatura]);
+  const pagamentos = useMemo(
+    () => getAccountPaymentHistory(accountData?.assinaturas ?? [], assinatura),
+    [accountData?.assinaturas, assinatura]
+  );
   const subscriptionTone = getStatusTone(assinatura?.status);
   const passwordRequirements = [
     { label: "8 caracteres", passed: newPassword.trim().length >= 8 },
