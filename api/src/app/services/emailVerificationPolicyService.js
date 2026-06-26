@@ -1,4 +1,8 @@
 function isEmailVerificationBypassEnabled() {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+
   const value = String(process.env.EMAIL_VERIFICATION_BYPASS_FOR_TESTS || '')
     .trim()
     .toLowerCase();

@@ -6183,6 +6183,16 @@ export function DesktopCashierFlow({
     .filter(Boolean)
     .join(" ");
   const billingNotice = billingStatus && isBillingAttention(billingStatus) ? billingStatus : null;
+  const isBillingNoticeBlocked = billingNotice ? isBillingBlocked(billingNotice) : false;
+  const isBillingNoticeWarning = billingNotice?.fase === "atrasada";
+  const BillingNoticeIcon = isBillingNoticeBlocked ? Ban : isBillingNoticeWarning ? AlertTriangle : CreditCard;
+  const billingNoticeClassName = [
+    "pdv-billing-notice",
+    isBillingNoticeWarning ? "pdv-billing-notice-warning" : "",
+    isBillingNoticeBlocked ? "pdv-billing-notice-blocked" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <>
@@ -6275,18 +6285,15 @@ export function DesktopCashierFlow({
 
           {billingNotice ? (
             <div
-              className={isBillingBlocked(billingNotice)
-                ? "pdv-billing-notice pdv-billing-notice-blocked"
-                : "pdv-billing-notice"
-              }
-              role={isBillingBlocked(billingNotice) ? "alert" : "status"}
+              className={billingNoticeClassName}
+              role={isBillingNoticeBlocked ? "alert" : "status"}
             >
-              {isBillingBlocked(billingNotice) ? <Ban aria-hidden="true" size={18} /> : <AlertTriangle aria-hidden="true" size={18} />}
+              <BillingNoticeIcon aria-hidden="true" size={18} />
               <span>
                 <strong>{getBillingNoticeTitle(billingNotice)}</strong>
                 <small>{getBillingNoticeDetail(billingNotice)}</small>
               </span>
-              {billingNotice.bloqueia_em && !isBillingBlocked(billingNotice) ? (
+              {billingNotice.bloqueia_em ? (
                 <em>Bloqueio em {formatBillingDate(billingNotice.bloqueia_em)}</em>
               ) : null}
             </div>

@@ -44,6 +44,10 @@ function toDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function toPlain(record) {
+  return record?.get ? record.get({ plain: true }) : record || null;
+}
+
 function sanitizeUsuario(usuario) {
   const data = usuario.get ? usuario.get({ plain: true }) : { ...usuario };
 
@@ -64,6 +68,61 @@ function sanitizeSubconta(subconta) {
   delete data.senha_hash;
   delete data.token_redefinicao_senha;
   delete data.token_redefinicao_senha_expira_em;
+
+  return data;
+}
+
+function getPaymentDate(pagamento) {
+  return pagamento?.pago_em || pagamento?.processado_em || pagamento?.vencimento_em || pagamento?.created_at || pagamento?.createdAt || null;
+}
+
+function sanitizePagamentoAssinatura(pagamento) {
+  const data = toPlain(pagamento);
+
+  if (!data) {
+    return null;
+  }
+
+  delete data.payload_mercado_pago;
+
+  return data;
+}
+
+function getFormaPagamentoResumo(assinatura) {
+  const pagamentos = Array.isArray(assinatura?.pagamentos)
+    ? [...assinatura.pagamentos].sort((left, right) => {
+        const leftDate = new Date(getPaymentDate(left) || 0).getTime();
+        const rightDate = new Date(getPaymentDate(right) || 0).getTime();
+
+        return rightDate - leftDate;
+      })
+    : [];
+  const pagamento = pagamentos.find(item => item?.cartao_ultimos_digitos || item?.cartao_bandeira || item?.forma_pagamento);
+
+  if (!pagamento) {
+    return null;
+  }
+
+  return {
+    tipo: pagamento.tipo_pagamento || null,
+    forma_pagamento: pagamento.forma_pagamento || null,
+    bandeira: pagamento.cartao_bandeira || null,
+    ultimos_digitos: pagamento.cartao_ultimos_digitos || null,
+    atualizado_em: getPaymentDate(pagamento),
+  };
+}
+
+function sanitizeAssinaturaConta(assinatura) {
+  const data = toPlain(assinatura);
+
+  if (!data) {
+    return null;
+  }
+
+  data.pagamentos = Array.isArray(data.pagamentos)
+    ? data.pagamentos.map(sanitizePagamentoAssinatura).filter(Boolean)
+    : [];
+  data.forma_pagamento_resumo = getFormaPagamentoResumo(data);
 
   return data;
 }
@@ -215,9 +274,10 @@ module.exports = {
 
       if (access.tipo_conta === 'usuario') {
         const assinaturas = await findAssinaturas(req.user.id);
+        const assinaturasSanitizadas = assinaturas.map(sanitizeAssinaturaConta).filter(Boolean);
 
-        payload.assinatura = getAssinaturaAtual(assinaturas);
-        payload.assinaturas = assinaturas;
+        payload.assinatura = getAssinaturaAtual(assinaturasSanitizadas);
+        payload.assinaturas = assinaturasSanitizadas;
       }
 
       return res.json(payload);

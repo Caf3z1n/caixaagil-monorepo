@@ -22,6 +22,7 @@ import { ApiError, apiGet, apiPost } from "@/lib/api-client";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import {
+  PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY,
   PLATFORM_ACCOUNT_EMAIL_STORAGE_KEY,
   PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
   PLATFORM_ACCOUNT_TYPE_STORAGE_KEY,
@@ -164,6 +165,15 @@ function getBillingLabel(plan: AuthPlanFromApi) {
   }
 
   return "/mês";
+}
+
+function formatSubscriptionCodeInput(value: string) {
+  const characters = value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 6);
+
+  return characters.length > 3 ? `${characters.slice(0, 3)}-${characters.slice(3)}` : characters;
 }
 
 function normalizePlan(plan: AuthPlanFromApi, customCode?: string): DisplayPlan | null {
@@ -377,9 +387,9 @@ export function AuthFlowModal({
   }
 
   async function applySubscriptionCode() {
-    const code = subscriptionCode.trim();
+    const code = formatSubscriptionCodeInput(subscriptionCode);
 
-    if (!code || customCodeStatus === "checking") {
+    if (code.length < 7 || customCodeStatus === "checking") {
       return;
     }
 
@@ -399,7 +409,7 @@ export function AuthFlowModal({
 
       setCustomPlan(normalizedPlan);
       setSelectedPlan(normalizedPlan.id);
-      setSubscriptionCode(result.codigo);
+      setSubscriptionCode(formatSubscriptionCodeInput(result.codigo));
       setCustomCodeStatus("applied");
       setCustomCodeMessage("Código aplicado.");
     } catch (error) {
@@ -526,6 +536,8 @@ export function AuthFlowModal({
       if (result.token) {
         window.localStorage.setItem(PLATFORM_AUTH_TOKEN_STORAGE_KEY, result.token);
       }
+
+      window.localStorage.setItem(PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY, String(Date.now()));
 
       router.push("/meu-sistema");
     } catch (error) {
@@ -1274,39 +1286,6 @@ export function AuthFlowModal({
                   Selecione como sua conta vai começar. Você poderá alterar isso depois.
                 </p>
 
-                <div className="auth-subscription-code">
-                  <label className="auth-field" htmlFor={`${titleId}-subscription-code`}>
-                    <span>Código personalizado</span>
-                    <input
-                      id={`${titleId}-subscription-code`}
-                      value={subscriptionCode}
-                      onChange={(event) => {
-                        setSubscriptionCode(event.currentTarget.value.toUpperCase());
-                        setCustomPlan(null);
-                        setSelectedPlan((current) => (current === customPlan?.id ? plans[0]?.id ?? null : current));
-                        setCustomCodeStatus("idle");
-                        setCustomCodeMessage("");
-                      }}
-                      placeholder="ABC-123"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <button
-                    className="auth-secondary-action auth-action-light"
-                    type="button"
-                    onClick={applySubscriptionCode}
-                    disabled={customCodeStatus === "checking" || !subscriptionCode.trim()}
-                  >
-                    {customCodeStatus === "checking" ? "Validando..." : "Aplicar"}
-                  </button>
-                </div>
-
-                {customCodeMessage ? (
-                  <AuthFeedback tone={customCodeStatus === "error" ? "error" : "success"}>
-                    {customCodeMessage}
-                  </AuthFeedback>
-                ) : null}
-
                 <div className="auth-plan-options" role="radiogroup" aria-label="Planos">
                   {displayPlans.map((plan) => (
                     <button
@@ -1367,6 +1346,49 @@ export function AuthFlowModal({
                     </button>
                   ))}
                 </div>
+
+                <div
+                  className={subscriptionCode ? "auth-subscription-code auth-subscription-code-has-action" : "auth-subscription-code"}
+                >
+                  <input
+                    id={`${titleId}-subscription-code`}
+                    value={subscriptionCode}
+                    onChange={(event) => {
+                      setSubscriptionCode(formatSubscriptionCodeInput(event.currentTarget.value));
+                      setCustomPlan(null);
+                      setSelectedPlan((current) => (current === customPlan?.id ? plans[0]?.id ?? null : current));
+                      setCustomCodeStatus("idle");
+                      setCustomCodeMessage("");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void applySubscriptionCode();
+                      }
+                    }}
+                    placeholder="Código do plano personalizado"
+                    autoComplete="off"
+                    aria-label="Código do plano personalizado"
+                    inputMode="text"
+                    maxLength={7}
+                  />
+                  {subscriptionCode ? (
+                    <button
+                      className="auth-subscription-code-action"
+                      type="button"
+                      onClick={applySubscriptionCode}
+                      disabled={customCodeStatus === "checking" || subscriptionCode.length < 7}
+                    >
+                      {customCodeStatus === "checking" ? "Validando" : "Aplicar"}
+                    </button>
+                  ) : null}
+                </div>
+
+                {customCodeMessage ? (
+                  <AuthFeedback tone={customCodeStatus === "error" ? "error" : "success"}>
+                    {customCodeMessage}
+                  </AuthFeedback>
+                ) : null}
 
                 <div className="auth-action-row">
                   <button className="auth-secondary-action auth-action-light" type="button" onClick={goBack}>

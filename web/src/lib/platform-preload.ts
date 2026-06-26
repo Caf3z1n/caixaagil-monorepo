@@ -17,13 +17,11 @@ const platformRouteConfigs: PlatformPrefetchRoute[] = [
   { href: "/meu-sistema/despesas" },
   { href: "/meu-sistema/documentos-fiscais" },
   { href: "/meu-sistema/funcionarios" },
-  { href: "/subcontas", permission: "pdvs_subcontas" },
   { href: "/conta" }
 ];
 
 const platformRouteDataPaths = [
-  { prefix: "/subcontas", paths: ["/pdvs", "/subcontas"] },
-  { prefix: "/conta", paths: ["/conta"] },
+  { prefix: "/conta", paths: ["/conta", "/pdvs", "/subcontas"] },
   { prefix: "/meu-sistema/configuracoes", paths: ["/configuracoes"] },
   { prefix: "/meu-sistema/grupos-fiscais", paths: ["/grupos-fiscais"] },
   { prefix: "/grupos-fiscais", paths: ["/grupos-fiscais"] },

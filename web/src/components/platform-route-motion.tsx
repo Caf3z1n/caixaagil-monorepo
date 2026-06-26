@@ -6,7 +6,6 @@ import {
   FileCheck2,
   HandCoins,
   LayoutGrid,
-  Monitor,
   PackageSearch,
   ReceiptText,
   Settings2,
@@ -43,8 +42,7 @@ const pendingRouteMeta: Array<{ prefix: string; meta: PendingRouteMeta }> = [
   { prefix: "/meu-sistema/documentos-fiscais", meta: { icon: ReceiptText, rows: 5, size: "extra-wide", title: "Documentos fiscais" } },
   { prefix: "/meu-sistema/funcionarios", meta: { icon: UsersRound, rows: 5, size: "medium", title: "Funcionários" } },
   { prefix: "/meu-sistema", meta: { icon: LayoutGrid, title: "Meu sistema", variant: "menu" } },
-  { prefix: "/subcontas", meta: { icon: Monitor, rows: 5, size: "medium", title: "PDVs e subcontas" } },
-  { prefix: "/conta", meta: { icon: UserCircle, title: "Minha conta", variant: "main" } }
+  { prefix: "/conta", meta: { icon: UserCircle, title: "Minha conta", variant: "menu" } }
 ];
 
 function isModifiedClick(event: MouseEvent) {

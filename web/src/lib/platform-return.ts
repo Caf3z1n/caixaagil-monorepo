@@ -1,6 +1,6 @@
 export const PLATFORM_RETURN_PARAM = "voltar";
 
-const safeReturnPrefixes = ["/meu-sistema", "/subcontas", "/conta", "/home"];
+const safeReturnPrefixes = ["/meu-sistema", "/conta", "/home"];
 const localReturnBase = "https://caixaagil.local";
 
 export function getSafePlatformReturnPath(value: string | null | undefined, fallbackHref = "/meu-sistema") {

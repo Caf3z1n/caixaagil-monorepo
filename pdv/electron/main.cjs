@@ -22,6 +22,24 @@ const appIconPath = path.join(
   "assets",
   process.platform === "win32" ? "app-icon.ico" : "app-icon.png"
 );
+let mainWindow = null;
+
+function focusMainWindow() {
+  const window = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : BrowserWindow.getAllWindows()[0];
+
+  if (!window) {
+    return;
+  }
+
+  if (window.isMinimized()) {
+    window.restore();
+  }
+
+  window.show();
+  window.focus();
+}
 
 function emitUpdateState() {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -170,34 +188,55 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
+  });
+
   if (isDev) {
     window.loadURL(process.env.CAIXA_AGIL_PDV_URL || "http://localhost:3030");
-    return;
+    return window;
   }
 
   window.loadFile(path.join(__dirname, "..", "out", "index.html"));
+  return window;
 }
 
-app.whenReady().then(() => {
-  app.setName("Caixa Ágil PDV");
-  nativeTheme.themeSource = "light";
-  registerUpdateService();
-  const localStore = createLocalPdvStore(app);
-  localStore.registerIpc(ipcMain);
-  createFiscalWorkerService(app, localStore).registerIpc(ipcMain);
+const singleInstanceLock = app.requestSingleInstanceLock();
 
-  if (process.platform === "win32") {
-    app.setAppUserModelId("br.com.caixaagil.pdv");
-  }
-
-  createWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    focusMainWindow();
   });
-});
+
+  app.whenReady().then(() => {
+    app.setName("Caixa Ágil PDV");
+    nativeTheme.themeSource = "light";
+    registerUpdateService();
+    const localStore = createLocalPdvStore(app);
+    localStore.registerIpc(ipcMain);
+    createFiscalWorkerService(app, localStore).registerIpc(ipcMain);
+
+    if (process.platform === "win32") {
+      app.setAppUserModelId("br.com.caixaagil.pdv");
+    }
+
+    createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+        return;
+      }
+
+      focusMainWindow();
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

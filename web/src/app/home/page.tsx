@@ -33,9 +33,9 @@ const nextActions = [
   {
     title: "Gerenciar PDVs e equipe",
     text: "Cadastre caixas, gere códigos de pareamento e separe acessos da equipe.",
-    href: "/subcontas",
+    href: "/conta",
     icon: UserPlus,
-    action: "Abrir PDVs e subcontas"
+    action: "Abrir minha conta"
   },
   {
     title: "Configurar operação",

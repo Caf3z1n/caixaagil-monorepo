@@ -9,6 +9,7 @@ import { apiGet } from "@/lib/api-client";
 import {
   clearPlatformSession,
   getStoredPlatformAuthToken,
+  PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY,
   PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
   PLATFORM_ACCOUNT_TYPE_STORAGE_KEY
 } from "@/lib/platform-session";
@@ -23,7 +24,6 @@ type PlatformAccessGuardProps = {
 };
 
 const routePermissions = [
-  { prefix: "/subcontas", permission: "pdvs_subcontas" },
   { prefix: "/meu-sistema/grupos-fiscais", permission: "grupos_fiscais" },
   { prefix: "/meu-sistema/produtos", permission: "produtos" },
   { prefix: "/meu-sistema/estoque", permission: "estoque" },
@@ -38,6 +38,7 @@ const fiscalEntitlementRoutes = [
   "/grupos-fiscais",
   "/documentos-fiscais"
 ];
+const accessValidationCacheTtlMs = 5 * 60_000;
 
 function readStoredPermissions() {
   const rawPermissions = window.localStorage.getItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
@@ -52,6 +53,13 @@ function readStoredPermissions() {
   } catch {
     return ["*"];
   }
+}
+
+function hasRecentAccessValidation() {
+  const rawTimestamp = window.localStorage.getItem(PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY);
+  const timestamp = rawTimestamp ? Number(rawTimestamp) : 0;
+
+  return Number.isFinite(timestamp) && Date.now() - timestamp < accessValidationCacheTtlMs;
 }
 
 export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
@@ -72,23 +80,28 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
     const authToken = token;
 
     async function validateAccess() {
+      const accountType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
+      const permissions = readStoredPermissions();
+      const requiredPermission = routePermissions.find((route) =>
+        pathname.startsWith(route.prefix)
+      )?.permission;
+      const isMainAccountOnlyPage = pathname.startsWith("/meu-sistema/configuracoes");
+      const requiresFiscalEntitlement = fiscalEntitlementRoutes.some((route) => pathname.startsWith(route));
+      const canAccessPage =
+        accountType !== "subconta" ||
+        (!isMainAccountOnlyPage && (!requiredPermission || permissions.includes(requiredPermission)));
+
+      if (!canAccessPage) {
+        router.replace("/meu-sistema");
+        return;
+      }
+
+      if (!requiresFiscalEntitlement && (pathname.startsWith("/conta") || hasRecentAccessValidation())) {
+        setIsAllowed(true);
+      }
+
       try {
-        const accountType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
-        const permissions = readStoredPermissions();
-        const requiredPermission = routePermissions.find((route) =>
-          pathname.startsWith(route.prefix)
-        )?.permission;
-        const isMainAccountOnlyPage = pathname.startsWith("/meu-sistema/configuracoes");
-        const canAccessPage =
-          accountType !== "subconta" ||
-          (!isMainAccountOnlyPage && (!requiredPermission || permissions.includes(requiredPermission)));
-
-        if (!canAccessPage) {
-          router.replace("/meu-sistema");
-          return;
-        }
-
-        if (fiscalEntitlementRoutes.some((route) => pathname.startsWith(route))) {
+        if (requiresFiscalEntitlement) {
           const entitlements = await loadSubscriptionEntitlements(authToken);
 
           if (cancelled) {
@@ -115,6 +128,7 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
           return;
         }
 
+        window.localStorage.setItem(PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY, String(Date.now()));
         setIsAllowed(true);
       } catch {
         if (!cancelled) {

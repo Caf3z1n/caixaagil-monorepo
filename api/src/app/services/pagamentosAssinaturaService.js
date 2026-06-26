@@ -30,6 +30,140 @@ function toPlain(record) {
   return record?.get ? record.get({ plain: true }) : record || null;
 }
 
+function firstString(...values) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+
+  return null;
+}
+
+function findFirstStringByKeys(value, keys, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== 'object' || depth > 7 || seen.has(value)) {
+    return null;
+  }
+
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstStringByKeys(item, keys, depth + 1, seen);
+
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (keys.has(key) && item !== null && item !== undefined && String(item).trim()) {
+      return String(item).trim();
+    }
+  }
+
+  for (const item of Object.values(value)) {
+    const found = findFirstStringByKeys(item, keys, depth + 1, seen);
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function normalizePaymentType(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+  return normalized || null;
+}
+
+function normalizeCardLastDigits(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+
+  if (digits.length < 4) {
+    return null;
+  }
+
+  return digits.slice(-4);
+}
+
+function normalizeCardBrand(value, allowUnknown = false) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (['master', 'mastercard', 'mc'].includes(normalized)) {
+    return 'mastercard';
+  }
+
+  if (['amex', 'american_express'].includes(normalized)) {
+    return 'amex';
+  }
+
+  if (['visa', 'elo', 'hipercard', 'hiper', 'diners', 'discover', 'cabal', 'aura', 'maestro'].includes(normalized)) {
+    return normalized === 'hiper' ? 'hipercard' : normalized;
+  }
+
+  if (!allowUnknown || ['pix', 'ticket', 'bolbradesco', 'bank_transfer', 'account_money'].includes(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function isCardPayment({ tipoPagamento, bandeira, ultimosDigitos }) {
+  const type = normalizePaymentType(tipoPagamento);
+
+  return Boolean(ultimosDigitos || bandeira || type?.includes('card') || type?.includes('cartao'));
+}
+
+function extractPaymentMethodDetails(payload, fallbackMethod = null) {
+  const tipoPagamento = normalizePaymentType(
+    firstString(
+      payload?.payment_type_id,
+      payload?.payment?.payment_type_id,
+      payload?.payment_method?.type,
+      findFirstStringByKeys(payload, new Set(['payment_type_id']))
+    )
+  );
+  const ultimosDigitos = normalizeCardLastDigits(
+    firstString(
+      payload?.card?.last_four_digits,
+      payload?.card?.last_four,
+      payload?.card?.last4,
+      payload?.payment?.card?.last_four_digits,
+      payload?.payment?.card?.last_four,
+      payload?.payment?.card?.last4,
+      findFirstStringByKeys(payload, new Set(['last_four_digits', 'last_four', 'last4', 'card_last_four_digits']))
+    )
+  );
+  const directBrand = firstString(
+    payload?.payment_method_id,
+    payload?.payment?.payment_method_id,
+    payload?.payment_method?.id,
+    payload?.payment?.payment_method?.id,
+    payload?.card?.brand,
+    payload?.payment?.card?.brand,
+    fallbackMethod
+  );
+  const knownBrand = normalizeCardBrand(directBrand);
+  const cardPayment = isCardPayment({ tipoPagamento, bandeira: knownBrand, ultimosDigitos });
+  const bandeira = knownBrand || normalizeCardBrand(directBrand, cardPayment);
+
+  return {
+    tipo_pagamento: tipoPagamento || (cardPayment ? 'card' : null),
+    cartao_bandeira: cardPayment ? bandeira : null,
+    cartao_ultimos_digitos: cardPayment ? ultimosDigitos : null,
+  };
+}
+
 function extractPreapprovalId(payload) {
   return (
     payload?.preapproval_id ||
@@ -58,6 +192,9 @@ function extractReference(payload) {
 }
 
 function normalizeMercadoPagoPayment(payload) {
+  const formaPagamento = payload?.payment_method_id || payload?.payment_type_id || null;
+  const paymentMethodDetails = extractPaymentMethodDetails(payload, formaPagamento);
+
   return {
     mercado_pago_payment_id: payload?.id ? String(payload.id) : null,
     mercado_pago_authorized_payment_id: null,
@@ -68,7 +205,8 @@ function normalizeMercadoPagoPayment(payload) {
     valor_centavos: toCentavos(payload?.transaction_amount),
     valor_liquido_centavos: toCentavos(payload?.transaction_details?.net_received_amount),
     moeda: payload?.currency_id || 'BRL',
-    forma_pagamento: payload?.payment_method_id || payload?.payment_type_id || null,
+    forma_pagamento: formaPagamento,
+    ...paymentMethodDetails,
     parcelas: payload?.installments ?? null,
     pago_em: toDate(payload?.date_approved),
     vencimento_em: toDate(payload?.date_of_expiration),
@@ -80,6 +218,8 @@ function normalizeMercadoPagoPayment(payload) {
 async function normalizeMercadoPagoAuthorizedPayment(payload) {
   const paymentId = extractPaymentId(payload);
   const nestedPayment = payload?.payment && typeof payload.payment === 'object' ? payload.payment : null;
+  const formaPagamento = payload?.payment_method_id || nestedPayment?.payment_method_id || nestedPayment?.payment_type_id || null;
+  const paymentMethodDetails = extractPaymentMethodDetails(payload, formaPagamento);
   const authorizedData = {
     mercado_pago_payment_id: paymentId ? String(paymentId) : null,
     mercado_pago_authorized_payment_id: payload?.id ? String(payload.id) : null,
@@ -90,7 +230,8 @@ async function normalizeMercadoPagoAuthorizedPayment(payload) {
     valor_centavos: toCentavos(payload?.transaction_amount ?? payload?.amount ?? nestedPayment?.transaction_amount),
     valor_liquido_centavos: toCentavos(nestedPayment?.transaction_details?.net_received_amount),
     moeda: payload?.currency_id || nestedPayment?.currency_id || 'BRL',
-    forma_pagamento: payload?.payment_method_id || nestedPayment?.payment_method_id || nestedPayment?.payment_type_id || null,
+    forma_pagamento: formaPagamento,
+    ...paymentMethodDetails,
     parcelas: payload?.installments ?? nestedPayment?.installments ?? null,
     pago_em: toDate(payload?.payment_date || payload?.date_approved || nestedPayment?.date_approved),
     vencimento_em: toDate(payload?.debit_date || payload?.date_of_expiration),
@@ -159,6 +300,10 @@ function mergePaymentData(current, next) {
       current.mercado_pago_authorized_payment_id || next.mercado_pago_authorized_payment_id || null,
     mercado_pago_preapproval_id: next.mercado_pago_preapproval_id || current.mercado_pago_preapproval_id || null,
     referencia_externa: next.referencia_externa || current.referencia_externa || null,
+    forma_pagamento: next.forma_pagamento || current.forma_pagamento || null,
+    tipo_pagamento: next.tipo_pagamento || current.tipo_pagamento || null,
+    cartao_bandeira: next.cartao_bandeira || current.cartao_bandeira || null,
+    cartao_ultimos_digitos: next.cartao_ultimos_digitos || current.cartao_ultimos_digitos || null,
     vencimento_em: current.vencimento_em || next.vencimento_em || null,
     payload_mercado_pago: current.payload_mercado_pago || next.payload_mercado_pago || null,
   };
@@ -203,6 +348,14 @@ async function upsertPagamentoAssinatura(paymentData, assinatura) {
   };
 
   if (existing) {
+    const existingData = toPlain(existing);
+
+    for (const key of ['forma_pagamento', 'tipo_pagamento', 'cartao_bandeira', 'cartao_ultimos_digitos']) {
+      if ((payload[key] === null || payload[key] === undefined) && existingData?.[key]) {
+        payload[key] = existingData[key];
+      }
+    }
+
     await existing.update(payload);
     return existing;
   }

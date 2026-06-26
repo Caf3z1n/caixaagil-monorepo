@@ -7,10 +7,9 @@ import { useEffect, useState } from "react";
 import { LogOut } from "lucide-react";
 
 import {
-  PLATFORM_ACCOUNT_EMAIL_STORAGE_KEY,
+  clearPlatformSession,
   PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
-  PLATFORM_ACCOUNT_TYPE_STORAGE_KEY,
-  PLATFORM_AUTH_TOKEN_STORAGE_KEY
+  PLATFORM_ACCOUNT_TYPE_STORAGE_KEY
 } from "@/lib/platform-session";
 
 type PlatformNavItem = {
@@ -21,7 +20,6 @@ type PlatformNavItem = {
 
 const platformNavItems: PlatformNavItem[] = [
   { href: "/meu-sistema", label: "Meu sistema" },
-  { href: "/subcontas", label: "PDVs e subcontas", permission: "pdvs_subcontas" },
   { href: "/conta", label: "Minha conta" }
 ];
 
@@ -52,8 +50,6 @@ function canUseItem(item: PlatformNavItem, accountType: string, accountPermissio
 
 function isOverLightPlatformSurface(pathname: string) {
   return (
-    pathname === "/conta" ||
-    pathname === "/subcontas" ||
     pathname === "/conferencia-caixa" ||
     pathname.startsWith("/home")
   );
@@ -138,10 +134,7 @@ export function PlatformHeader() {
         className="platform-logout-action"
         href="/"
         onClick={() => {
-          window.localStorage.removeItem(PLATFORM_ACCOUNT_EMAIL_STORAGE_KEY);
-          window.localStorage.removeItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
-          window.localStorage.removeItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
-          window.localStorage.removeItem(PLATFORM_AUTH_TOKEN_STORAGE_KEY);
+          clearPlatformSession();
         }}
       >
         <LogOut aria-hidden="true" size={17} />

@@ -284,6 +284,61 @@ async function findReusableCustomCheckout(usuario, codigo) {
   };
 }
 
+function createInvalidSubscriptionCodeError() {
+  const error = new Error('Codigo de assinatura invalido ou ja utilizado.');
+  error.statusCode = 400;
+  return error;
+}
+
+async function reserveSubscriptionCodeForUser(codigoInput, usuarioId, options = {}) {
+  const transaction = options.transaction || null;
+  const codigoAssinatura = await findCodigoAssinaturaDisponivel(codigoInput, {
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction,
+  });
+  const planoPersonalizado = buildPlanoFromCodigoAssinatura(codigoAssinatura);
+
+  if (!codigoAssinatura || !planoPersonalizado) {
+    throw createInvalidSubscriptionCodeError();
+  }
+
+  await codigoAssinatura.update(
+    {
+      ativo: false,
+      usos_realizados: 1,
+      usado_por_usuario_id: usuarioId,
+      usado_em: new Date(),
+    },
+    { transaction }
+  );
+
+  return {
+    codigoAssinatura,
+    planoPersonalizado,
+  };
+}
+
+async function restoreSubscriptionCodeForUser(codigoAssinaturaId, usuarioId) {
+  if (!codigoAssinaturaId || !usuarioId) {
+    return;
+  }
+
+  await CodigoAssinatura.update(
+    {
+      ativo: true,
+      usos_realizados: 0,
+      usado_por_usuario_id: null,
+      usado_em: null,
+    },
+    {
+      where: {
+        id: codigoAssinaturaId,
+        usado_por_usuario_id: usuarioId,
+      },
+    }
+  );
+}
+
 async function buildReusableCheckoutResponse(assinatura) {
   let assinaturaAtual = assinatura;
 
@@ -895,6 +950,7 @@ module.exports = {
   async createManagementCheckout(req, res) {
     try {
       const acao = String(req.body?.acao || '').trim();
+      const codigoAssinaturaInput = acao === 'mudar_plano' ? getCodigoAssinaturaFromBody(req.body) : '';
       await applyDueScheduledChanges({ usuarioId: req.user.id });
       const usuario = await Usuario.findByPk(req.user.id);
 
@@ -918,7 +974,13 @@ module.exports = {
         acao === 'trocar_pagamento'
           ? assinaturaAtual.plano
           : req.body?.plano || req.body?.planoId || req.body?.planId;
-      const plano = await getPlano(planoId);
+      let plano = null;
+
+      if (codigoAssinaturaInput) {
+        plano = buildPlanoFromCodigoAssinatura(await findCodigoAssinaturaDisponivel(codigoAssinaturaInput));
+      } else {
+        plano = await getPlano(planoId);
+      }
 
       if (!['mudar_plano', 'trocar_pagamento'].includes(acao)) {
         return res.status(400).json({ message: 'Escolha uma ação de assinatura válida.' });
@@ -928,7 +990,7 @@ module.exports = {
         return res.status(400).json({ message: 'Escolha um plano válido.' });
       }
 
-      if (acao === 'mudar_plano' && plano.id === assinaturaAtual.plano) {
+      if (acao === 'mudar_plano' && !codigoAssinaturaInput && plano.id === assinaturaAtual.plano) {
         return res.status(400).json({ message: 'Escolha um plano diferente do atual.' });
       }
 
@@ -936,8 +998,6 @@ module.exports = {
         assinaturaAtual.valor_recorrente_centavos || assinaturaAtual.valor_centavos || 0
       );
       const isDowngrade = acao === 'mudar_plano' && plano.valor_centavos < valorAtualCentavos;
-
-      await abandonPendingSubscriptions(req.user.id);
 
       if (isDowngrade) {
         if (assinaturaAtual.mercado_pago_preapproval_id) {
@@ -948,16 +1008,40 @@ module.exports = {
         }
 
         const aplicarEm = assinaturaAtual.proximo_pagamento_em || getFutureNextPaymentDate(assinaturaAtual);
-        const alteracaoAgendada = await scheduleDowngrade({
-          usuarioId: req.user.id,
-          assinaturaAtual,
-          plano,
-          aplicarEm,
-          metadata: {
-            origem: 'painel_cliente',
-            mercado_pago_preapproval_id: assinaturaAtual.mercado_pago_preapproval_id || null,
-          },
-        });
+        let planoParaAgendamento = plano;
+
+        const alteracaoAgendada = codigoAssinaturaInput
+          ? await sequelize.transaction(async transaction => {
+              const reserved = await reserveSubscriptionCodeForUser(codigoAssinaturaInput, req.user.id, { transaction });
+              planoParaAgendamento = reserved.planoPersonalizado;
+
+              return scheduleDowngrade(
+                {
+                  usuarioId: req.user.id,
+                  assinaturaAtual,
+                  plano: planoParaAgendamento,
+                  aplicarEm,
+                  metadata: {
+                    codigo_assinatura: reserved.codigoAssinatura.codigo,
+                    codigo_assinatura_id: reserved.codigoAssinatura.id,
+                    origem: 'painel_cliente',
+                    mercado_pago_preapproval_id: assinaturaAtual.mercado_pago_preapproval_id || null,
+                  },
+                },
+                { transaction }
+              );
+            })
+          : await scheduleDowngrade({
+              usuarioId: req.user.id,
+              assinaturaAtual,
+              plano,
+              aplicarEm,
+              metadata: {
+                origem: 'painel_cliente',
+                mercado_pago_preapproval_id: assinaturaAtual.mercado_pago_preapproval_id || null,
+              },
+            });
+        plano = planoParaAgendamento;
         assinaturaAtual.normalizar_valor_apos_primeiro_pagamento = false;
         assinaturaAtual.valor_normalizado_em = assinaturaAtual.valor_normalizado_em || new Date();
         assinaturaAtual.tipo_movimento = 'mudar_plano_downgrade_agendado';
@@ -980,35 +1064,52 @@ module.exports = {
         });
       }
 
-      const rateio =
-        acao === 'mudar_plano'
-          ? calculateProrationCredit(assinaturaAtual, plano)
-          : {
-              creditoRateioCentavos: 0,
-              proximoPagamentoAtual: getFutureNextPaymentDate(assinaturaAtual),
-              valorPrimeiroPagamentoCentavos: plano.valor_centavos,
-            };
-      const startDate = acao === 'trocar_pagamento' ? rateio.proximoPagamentoAtual : null;
-      const referenciaExterna = `caixa-agil-assinatura-${acao}-${plano.id}-${randomUUID()}`;
-      const assinatura = await Assinatura.create({
-        usuario_id: req.user.id,
-        plano: plano.id,
-        plano_versao_id: plano.plano_versao_id || null,
-        plano_snapshot: buildPlanoSnapshot(plano),
-        status: 'pendente',
-        valor_centavos: plano.valor_centavos,
-        valor_recorrente_centavos: plano.valor_centavos,
-        valor_primeiro_pagamento_centavos: rateio.valorPrimeiroPagamentoCentavos,
-        credito_rateio_centavos: rateio.creditoRateioCentavos,
-        normalizar_valor_apos_primeiro_pagamento:
-          acao === 'mudar_plano' && rateio.valorPrimeiroPagamentoCentavos !== plano.valor_centavos,
-        moeda: 'BRL',
-        referencia_externa: referenciaExterna,
-        ...createCheckoutTokenPayload(),
-        tipo_movimento: acao,
-        assinatura_anterior_id: assinaturaAtual.id,
-        iniciada_em: new Date(),
-      });
+      let codigoAssinaturaReservadoId = null;
+      let rateio = null;
+      let referenciaExterna = null;
+      let assinatura = null;
+
+      try {
+        if (codigoAssinaturaInput) {
+          const reserved = await reserveSubscriptionCodeForUser(codigoAssinaturaInput, req.user.id);
+          codigoAssinaturaReservadoId = reserved.codigoAssinatura.id;
+          plano = reserved.planoPersonalizado;
+        }
+
+        await abandonPendingSubscriptions(req.user.id);
+
+        rateio =
+          acao === 'mudar_plano'
+            ? calculateProrationCredit(assinaturaAtual, plano)
+            : {
+                creditoRateioCentavos: 0,
+                proximoPagamentoAtual: getFutureNextPaymentDate(assinaturaAtual),
+                valorPrimeiroPagamentoCentavos: plano.valor_centavos,
+              };
+        referenciaExterna = `caixa-agil-assinatura-${acao}-${plano.id}-${randomUUID()}`;
+        assinatura = await Assinatura.create({
+          usuario_id: req.user.id,
+          plano: plano.id,
+          plano_versao_id: plano.plano_versao_id || null,
+          plano_snapshot: buildPlanoSnapshot(plano),
+          status: 'pendente',
+          valor_centavos: plano.valor_centavos,
+          valor_recorrente_centavos: plano.valor_centavos,
+          valor_primeiro_pagamento_centavos: rateio.valorPrimeiroPagamentoCentavos,
+          credito_rateio_centavos: rateio.creditoRateioCentavos,
+          normalizar_valor_apos_primeiro_pagamento:
+            acao === 'mudar_plano' && rateio.valorPrimeiroPagamentoCentavos !== plano.valor_centavos,
+          moeda: 'BRL',
+          referencia_externa: referenciaExterna,
+          ...createCheckoutTokenPayload(),
+          tipo_movimento: codigoAssinaturaInput ? 'mudar_plano_personalizado' : acao,
+          assinatura_anterior_id: assinaturaAtual.id,
+          iniciada_em: new Date(),
+        });
+      } catch (error) {
+        await restoreSubscriptionCodeForUser(codigoAssinaturaReservadoId, req.user.id);
+        throw error;
+      }
 
       try {
         const checkout = await createMercadoPagoPreapproval({
@@ -1042,6 +1143,7 @@ module.exports = {
       } catch (error) {
         assinatura.status = 'falha';
         await assinatura.save();
+        await restoreSubscriptionCodeForUser(codigoAssinaturaReservadoId, req.user.id);
 
         return res.status(error.statusCode || 500).json({
           message: error.message || 'Não foi possível iniciar o checkout.',

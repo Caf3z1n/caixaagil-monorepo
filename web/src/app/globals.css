@@ -19,8 +19,7 @@
   --hero-page: 1720px;
   --shadow-soft: 0 24px 52px -38px oklch(0.22 0.02 255 / 0.45);
   --shadow-hard: 0 34px 92px -52px oklch(0.17 0.03 255 / 0.58);
-  --button-shadow:
-    inset 0 1px 0 oklch(0.99 0.003 76 / 0.22);
+  --button-shadow: none;
   --primary-action-bg: var(--orange);
   --primary-action-bg-hover: var(--primary-action-bg);
   --primary-action-fg: var(--surface);
@@ -1800,21 +1799,79 @@ html[data-auth-step-fallback="true"][data-auth-step-motion="backward"] .auth-ste
 }
 
 .auth-subscription-code {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: end;
+  position: relative;
+  display: block;
   margin-top: 4px;
+  padding-top: 4px;
 }
 
-.auth-subscription-code .auth-field {
-  margin: 0;
+.auth-subscription-code input {
+  width: 100%;
+  min-width: 0;
+  height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: oklch(0.995 0.006 62);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  padding: 0 14px;
+  outline: none;
+  transition:
+    border-color 160ms ease-out,
+    background-color 160ms ease-out;
 }
 
-.auth-subscription-code .auth-secondary-action {
-  min-height: 48px;
-  padding-inline: 16px;
-  white-space: nowrap;
+.auth-subscription-code-has-action input {
+  padding-right: 86px;
+}
+
+.auth-subscription-code input::placeholder {
+  color: oklch(0.56 0.015 252);
+  font-weight: 700;
+}
+
+.auth-subscription-code input:hover {
+  border-color: oklch(0.86 0.035 55);
+  background: var(--surface);
+}
+
+.auth-subscription-code input:focus-visible {
+  border-color: var(--orange);
+  background: var(--surface);
+}
+
+.auth-subscription-code-action {
+  position: absolute;
+  right: 12px;
+  top: calc(50% + 2px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--orange);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.auth-subscription-code-action:hover {
+  color: var(--orange-strong);
+}
+
+.auth-subscription-code-action:disabled {
+  color: oklch(0.69 0.025 55);
+  cursor: not-allowed;
 }
 
 .auth-plan-option {
@@ -17596,11 +17653,11 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .platform-payment-history-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
+  grid-template-columns: auto minmax(0, 1fr) minmax(168px, auto);
   align-items: center;
   gap: 18px;
-  min-height: 58px;
-  padding: 11px 0;
+  min-height: 70px;
+  padding: 16px 0;
   border-bottom: 1px solid var(--line-cool);
 }
 
@@ -17616,6 +17673,10 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .platform-payment-history-row > span:last-child {
   justify-items: end;
+}
+
+.platform-payment-history-row > .platform-payment-status {
+  justify-self: start;
 }
 
 .platform-payment-history-row strong {
@@ -19119,14 +19180,16 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   }
 
   .platform-payment-history-row {
-    grid-template-columns: 1fr;
-    gap: 10px;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 8px 12px;
   }
 
   .platform-payment-history-row > span:last-child {
+    grid-column: 2;
     align-items: center;
     grid-template-columns: minmax(0, 1fr) auto;
-    justify-items: stretch;
+    justify-items: start;
   }
 
   .platform-subscription-proration {
@@ -19171,10 +19234,6 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   }
 
   .auth-action-row {
-    grid-template-columns: 1fr;
-  }
-
-  .auth-subscription-code {
     grid-template-columns: 1fr;
   }
 
@@ -20020,8 +20079,11 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   }
 }
 
-:where(a, button, input, textarea, select, [role="button"], [role="tab"], [role="switch"], [tabindex]):focus,
-:where(a, button, input, textarea, select, [role="button"], [role="tab"], [role="switch"], [tabindex]):focus-visible,
+:where(*):focus,
+:where(*):focus-visible {
+  box-shadow: none !important;
+}
+
 :where(
   .auth-password-input,
   .reset-password-input,
@@ -20212,4 +20274,1081 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   .plan-content {
     padding: 22px 20px;
   }
+}
+
+.platform-account-flow-page {
+  align-items: safe center;
+  padding: 30px 16px 28px;
+}
+
+.platform-account-shell {
+  width: min(100%, 840px);
+}
+
+.platform-account-dashboard-card {
+  width: 100%;
+  gap: 0;
+  padding: 0;
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.platform-account-dashboard-card-single {
+  width: min(100%, 680px);
+  justify-self: center;
+}
+
+.platform-account-menu-card {
+  width: min(100%, 780px);
+  justify-self: center;
+}
+
+.platform-account-menu-button {
+  font: inherit;
+}
+
+.platform-account-menu-button .system-home-menu-copy em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-account-menu-payment-detail {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 7px;
+  vertical-align: middle;
+}
+
+.platform-account-menu-payment-detail > span:last-child {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-account-flow-card {
+  width: 100%;
+  gap: 0;
+  padding: 0;
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.platform-account-flow-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 22px 26px;
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.platform-account-flow-head-compact {
+  grid-template-columns: auto auto;
+  justify-content: space-between;
+}
+
+.platform-account-back-button {
+  justify-self: start;
+}
+
+.platform-account-create-button {
+  justify-self: end;
+}
+
+.platform-account-flow-title {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+}
+
+.platform-account-flow-title > span:last-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.platform-account-flow-title strong {
+  color: var(--ink-deep);
+  font-size: 1.06rem;
+  font-weight: 950;
+  line-height: 1.18;
+}
+
+.platform-account-flow-title small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-account-flow-body {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.platform-account-flow-body > .auth-feedback {
+  margin: 20px 28px 0;
+}
+
+.platform-account-flow-body .platform-account-section:first-child {
+  border-top: 0;
+}
+
+.platform-account-flow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.platform-account-flow-actions .platform-primary-button,
+.platform-account-flow-actions .platform-secondary-button {
+  min-height: 42px;
+}
+
+.platform-account-flow-card > .platform-flow-progress {
+  padding: 16px 28px 20px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.platform-account-metric-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 22px 28px 0;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.platform-account-metric-grid span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.platform-account-metric-grid small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 820;
+}
+
+.platform-account-metric-grid strong {
+  color: var(--ink-deep);
+  font-size: 1rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.platform-account-record-table {
+  display: grid;
+  gap: 10px;
+  overflow: visible;
+  margin: 18px 28px 24px;
+}
+
+.platform-account-access-list {
+  margin: 18px 28px 24px;
+}
+
+.platform-account-record-head,
+.platform-account-record-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) minmax(132px, 0.58fr) minmax(88px, auto) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.platform-account-record-head {
+  display: none;
+}
+
+.platform-account-record-head span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.platform-account-record-row {
+  width: 100%;
+  min-height: 74px;
+  padding: 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.platform-account-record-row > span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.platform-account-record-primary {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.platform-account-record-primary > span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.platform-account-record-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border: 1px solid oklch(0.9 0.052 45);
+  border-radius: 12px;
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+}
+
+.platform-account-record-meta {
+  justify-items: end;
+}
+
+.platform-account-record-status {
+  justify-self: end;
+}
+
+.platform-account-record-row strong {
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 930;
+  line-height: 1.22;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-account-record-row small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 720;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-account-record-row-muted {
+  background: oklch(0.985 0.004 76);
+  opacity: 0.74;
+}
+
+.platform-account-record-empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  min-height: 250px;
+  padding: 24px 18px;
+  border: 1px dashed oklch(0.82 0.014 245);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--muted);
+  text-align: center;
+}
+
+.platform-account-empty-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 54px;
+  margin-bottom: 4px;
+  color: var(--orange);
+}
+
+.platform-account-empty-zero {
+  position: absolute;
+  top: -3px;
+  right: -2px;
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--orange);
+  color: var(--surface);
+  font-size: 0.72rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.platform-account-record-empty strong {
+  color: var(--ink-deep);
+  font-size: 1.24rem;
+  font-weight: 950;
+  line-height: 1.08;
+}
+
+.platform-account-record-empty > span:not(.platform-account-empty-icon) {
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 0.94rem;
+  font-weight: 850;
+  line-height: 1.3;
+}
+
+.platform-account-record-empty svg {
+  color: var(--orange);
+}
+
+.platform-account-record-row-skeleton {
+  pointer-events: none;
+}
+
+.platform-account-record-skeleton-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+
+.platform-account-record-skeleton-title {
+  width: min(100%, 150px);
+  height: 12px;
+}
+
+.platform-account-record-skeleton-copy {
+  width: min(100%, 110px);
+  height: 10px;
+}
+
+.platform-account-record-skeleton-pill {
+  width: 78px;
+  height: 24px;
+  border-radius: 999px;
+}
+
+.platform-account-dashboard-head {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 24px 28px;
+}
+
+.platform-account-head-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid oklch(0.9 0.052 45);
+  border-radius: 14px;
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+}
+
+.platform-account-dashboard-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.platform-account-dashboard-copy small {
+  color: var(--orange);
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.platform-account-dashboard-copy strong {
+  color: var(--ink-deep);
+  font-size: 1.18rem;
+  font-weight: 950;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.platform-account-dashboard-copy em {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-style: normal;
+  font-weight: 760;
+}
+
+.platform-account-section {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 22px 28px 24px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.platform-account-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.platform-account-section-title > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--orange);
+}
+
+.platform-account-section-title strong {
+  color: var(--ink-deep);
+  font-size: 0.98rem;
+  font-weight: 950;
+  line-height: 1.2;
+}
+
+.platform-account-section-title small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.platform-account-section-title-static {
+  align-items: flex-start;
+}
+
+.platform-account-plan-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--line-cool);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.platform-account-plan-main {
+  display: grid;
+  align-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 120px;
+  padding: 20px 22px;
+  border-right: 1px solid var(--line-cool);
+}
+
+.platform-account-plan-next-payment {
+  justify-items: end;
+  border-right: 0;
+  text-align: right;
+}
+
+.platform-account-plan-main small {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.platform-account-plan-main strong {
+  color: var(--ink-deep);
+  font-size: 1.28rem;
+  font-weight: 950;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.platform-account-plan-main em {
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.platform-account-plan-actions {
+  display: flex;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.platform-account-plan-actions .platform-primary-button {
+  min-width: 148px;
+}
+
+.platform-account-summary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 0.86fr) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line-cool);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.platform-account-summary-cell {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 118px;
+  padding: 17px 20px;
+  border-right: 1px solid var(--line-cool);
+}
+
+.platform-account-summary-cell:last-child {
+  border-right: 0;
+}
+
+.platform-account-summary-cell small {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.platform-account-summary-cell strong {
+  color: var(--ink-deep);
+  font-size: 1.12rem;
+  font-weight: 950;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
+}
+
+.platform-account-summary-cell em {
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-style: normal;
+  font-weight: 760;
+}
+
+.platform-account-card-method {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.platform-account-card-method strong {
+  white-space: nowrap;
+}
+
+.platform-account-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.platform-account-status-chip-success {
+  background: oklch(0.95 0.035 151);
+  color: oklch(0.34 0.1 151);
+}
+
+.platform-account-status-chip-warning {
+  background: oklch(0.97 0.052 82);
+  color: oklch(0.44 0.1 72);
+}
+
+.platform-account-status-chip-danger {
+  background: oklch(0.96 0.04 28);
+  color: oklch(0.48 0.14 28);
+}
+
+.platform-account-status-chip-neutral {
+  background: oklch(0.955 0.011 245);
+  color: var(--muted);
+}
+
+.platform-payment-brand {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  background: oklch(0.992 0.004 76);
+  color: var(--ink-deep);
+}
+
+.platform-payment-brand b {
+  font-size: 0.61rem;
+  font-weight: 950;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.platform-payment-brand-compact {
+  width: 30px;
+  height: 20px;
+  border-radius: 6px;
+}
+
+.platform-payment-brand-compact b {
+  font-size: 0.46rem;
+}
+
+.platform-payment-brand-compact svg {
+  width: 13px;
+  height: 13px;
+}
+
+.platform-payment-brand-mastercard {
+  border-color: transparent;
+  background: transparent;
+}
+
+.platform-payment-brand-mastercard i {
+  position: absolute;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+}
+
+.platform-payment-brand-mastercard i:first-child {
+  left: 7px;
+  background: oklch(0.62 0.24 29);
+}
+
+.platform-payment-brand-mastercard i:last-child {
+  right: 7px;
+  background: oklch(0.78 0.19 74);
+  mix-blend-mode: multiply;
+}
+
+.platform-payment-brand-compact.platform-payment-brand-mastercard i {
+  top: 3px;
+  width: 14px;
+  height: 14px;
+}
+
+.platform-payment-brand-compact.platform-payment-brand-mastercard i:first-child {
+  left: 5px;
+}
+
+.platform-payment-brand-compact.platform-payment-brand-mastercard i:last-child {
+  right: 5px;
+}
+
+.platform-payment-brand-visa {
+  border-color: oklch(0.82 0.07 264);
+  background: oklch(0.97 0.018 264);
+  color: oklch(0.36 0.16 264);
+}
+
+.platform-payment-brand-elo {
+  border-color: oklch(0.86 0.06 151);
+  background: oklch(0.98 0.018 151);
+  color: oklch(0.33 0.1 151);
+}
+
+.platform-payment-brand-amex {
+  border-color: oklch(0.82 0.08 230);
+  background: oklch(0.96 0.028 230);
+  color: oklch(0.36 0.13 230);
+}
+
+.platform-payment-brand-hipercard {
+  border-color: oklch(0.83 0.08 28);
+  background: oklch(0.97 0.025 28);
+  color: oklch(0.45 0.15 28);
+}
+
+.platform-payment-brand-diners,
+.platform-payment-brand-discover,
+.platform-payment-brand-cabal,
+.platform-payment-brand-aura,
+.platform-payment-brand-maestro {
+  border-color: oklch(0.86 0.025 245);
+  background: oklch(0.976 0.008 245);
+  color: oklch(0.34 0.07 245);
+}
+
+.platform-payment-brand-generic {
+  overflow: visible;
+  border-color: transparent;
+  background: transparent;
+  color: var(--orange);
+}
+
+.platform-payment-brand-generic svg {
+  width: 20px;
+  height: 20px;
+}
+
+.platform-payment-brand-compact.platform-payment-brand-generic svg {
+  width: 14px;
+  height: 14px;
+}
+
+.platform-current-payment-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 14px;
+  background: oklch(0.992 0.006 76);
+}
+
+.platform-current-payment-mark {
+  display: inline-flex;
+  align-items: center;
+}
+
+.platform-current-payment-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.platform-current-payment-copy small {
+  color: var(--orange);
+  font-size: 0.75rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.platform-current-payment-copy strong {
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 1.02rem;
+  font-weight: 950;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-current-payment-copy em,
+.platform-payment-modal-note {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.platform-payment-modal-note {
+  margin: -2px 0 0;
+}
+
+.platform-account-detail-list-inline {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  overflow: hidden;
+  margin-top: 0;
+  border: 1px solid var(--line-cool);
+  border-radius: 14px;
+}
+
+.platform-account-detail-list-inline div,
+.platform-account-detail-list-inline div:first-child {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-content: center;
+  gap: 7px;
+  min-height: 76px;
+  padding: 14px 16px;
+  border-top: 0;
+  border-right: 1px solid var(--line-cool);
+}
+
+.platform-account-detail-list-inline div:last-child {
+  border-right: 0;
+}
+
+.platform-account-access-overview .platform-account-pending-copy {
+  margin-top: 0;
+}
+
+.platform-account-history-section {
+  padding-bottom: 18px;
+}
+
+.platform-account-history-section .platform-payment-history-list {
+  margin-top: 0;
+}
+
+.platform-account-history-section .platform-payment-history-row {
+  min-height: 62px;
+  padding: 12px 0;
+}
+
+.platform-payment-history-method {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.platform-payment-history-method > span {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.platform-payment-history-method small {
+  color: var(--ink-deep);
+  font-weight: 900;
+}
+
+.platform-account-error-card {
+  padding: 24px 28px;
+}
+
+.platform-account-dashboard-skeleton .platform-account-dashboard-head {
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.platform-account-skeleton-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+}
+
+.platform-account-skeleton-section-title {
+  width: 190px;
+  height: 16px;
+}
+
+.platform-account-summary-grid-skeleton .platform-account-summary-cell {
+  gap: 12px;
+}
+
+@media (max-width: 760px) {
+  .platform-account-flow-page {
+    padding: 24px 14px 30px;
+  }
+
+  .platform-account-flow-head {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    padding: 20px 18px;
+  }
+
+  .platform-account-flow-head-compact {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-account-back-button {
+    width: fit-content;
+  }
+
+  .platform-account-create-button {
+    width: 100%;
+  }
+
+  .platform-account-flow-title small {
+    white-space: normal;
+  }
+
+  .platform-account-flow-head > .platform-account-status-chip {
+    justify-self: start;
+  }
+
+  .platform-account-flow-actions {
+    justify-content: stretch;
+  }
+
+  .platform-account-flow-actions .platform-primary-button,
+  .platform-account-flow-actions .platform-secondary-button {
+    width: 100%;
+  }
+
+  .platform-current-payment-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .platform-current-payment-card .platform-account-status-chip {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .platform-account-flow-card > .platform-flow-progress {
+    padding: 14px 18px 18px;
+  }
+
+  .platform-account-metric-grid {
+    margin: 20px 18px 0;
+    padding-bottom: 14px;
+  }
+
+  .platform-account-metric-grid span {
+    flex: 1 1 130px;
+  }
+
+  .platform-account-record-table {
+    margin: 16px 18px 22px;
+  }
+
+  .platform-account-access-list {
+    margin: 16px 18px 22px;
+  }
+
+  .platform-account-record-head {
+    display: none;
+  }
+
+  .platform-account-record-row {
+    grid-template-columns: 38px minmax(0, 1fr);
+    align-items: stretch;
+    gap: 10px 12px;
+    min-height: 0;
+    padding: 14px 16px;
+  }
+
+  .platform-account-record-icon {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+
+  .platform-account-record-primary,
+  .platform-account-record-meta,
+  .platform-account-record-status {
+    grid-column: 2;
+  }
+
+  .platform-account-record-meta,
+  .platform-account-record-status {
+    justify-self: start;
+    justify-items: start;
+  }
+
+  .platform-account-record-meta::before,
+  .platform-account-record-status::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .platform-account-record-primary {
+    align-items: flex-start;
+  }
+
+  .platform-account-record-row strong,
+  .platform-account-record-row small {
+    white-space: normal;
+  }
+
+  .platform-account-dashboard-head {
+    grid-template-columns: 46px minmax(0, 1fr);
+    padding: 20px 18px;
+  }
+
+  .platform-account-dashboard-head .platform-secondary-button,
+  .platform-account-dashboard-head .platform-account-skeleton-button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .platform-account-section {
+    padding: 20px 18px;
+  }
+
+  .platform-account-section-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .platform-account-section-title .platform-secondary-button {
+    width: 100%;
+  }
+
+  .platform-account-section-title-static {
+    align-items: flex-start;
+  }
+
+  .platform-account-plan-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-account-plan-main {
+    min-height: 0;
+    padding: 18px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-cool);
+  }
+
+  .platform-account-plan-next-payment {
+    align-content: center;
+    justify-items: end;
+    border-bottom: 0;
+    text-align: right;
+  }
+
+  .platform-account-plan-actions .platform-primary-button {
+    width: 100%;
+  }
+
+  .platform-account-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-account-summary-cell {
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-cool);
+  }
+
+  .platform-account-summary-cell:last-child {
+    border-bottom: 0;
+  }
+
+  .platform-account-detail-list-inline {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-account-detail-list-inline div,
+  .platform-account-detail-list-inline div:first-child {
+    min-height: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-cool);
+  }
+
+  .platform-account-detail-list-inline div:last-child {
+    border-bottom: 0;
+  }
+
+  .platform-payment-history-method {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .platform-payment-history-method > span {
+    justify-items: start;
+  }
+}
+
+:where(*),
+:where(*)::before,
+:where(*)::after {
+  box-shadow: none !important;
+}
+
+:where(*):focus,
+:where(*):focus-visible,
+:where(*):focus-within {
+  outline: none !important;
+  box-shadow: none !important;
 }

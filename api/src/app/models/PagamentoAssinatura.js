@@ -49,6 +49,15 @@ PagamentoAssinatura.init(
     forma_pagamento: {
       type: DataTypes.STRING,
     },
+    tipo_pagamento: {
+      type: DataTypes.STRING,
+    },
+    cartao_bandeira: {
+      type: DataTypes.STRING,
+    },
+    cartao_ultimos_digitos: {
+      type: DataTypes.STRING(4),
+    },
     parcelas: {
       type: DataTypes.INTEGER,
     },
