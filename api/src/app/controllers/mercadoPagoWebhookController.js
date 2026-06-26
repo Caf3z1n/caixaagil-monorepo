@@ -29,7 +29,7 @@ function toDate(value) {
 }
 
 function getEventType(req) {
-  return String(req.body?.type || req.body?.topic || req.query?.type || req.query?.topic || '').trim();
+  return String(req.body?.type || req.body?.entity || req.body?.topic || req.query?.type || req.query?.topic || '').trim();
 }
 
 function getEventAction(req) {
@@ -88,7 +88,15 @@ function isPreapprovalEvent(eventType, eventAction) {
   const normalizedType = String(eventType || '').toLowerCase();
   const normalizedAction = String(eventAction || '').toLowerCase();
 
-  return normalizedType === 'subscription_preapproval' || normalizedAction.startsWith('subscription_preapproval.');
+  return (
+    normalizedType === 'subscription_preapproval' ||
+    normalizedType === 'preapproval' ||
+    normalizedAction.startsWith('subscription_preapproval.')
+  );
+}
+
+function isExternalResourceLookupError(error) {
+  return [400, 404].includes(Number(error?.statusCode));
 }
 
 async function findAssinatura(paymentData) {
@@ -338,7 +346,7 @@ module.exports = {
         const assinatura = await findAssinaturaByPreapproval(preapproval);
 
         if (!assinatura) {
-          return res.status(202).json({
+          return res.json({
             message: 'Evento Mercado Pago recebido, mas a assinatura local nao foi encontrada.',
             type: eventType,
           });
@@ -366,7 +374,7 @@ module.exports = {
       const paymentData = await fetchWebhookPaymentData(eventType, eventAction, eventId);
 
       if (!paymentData) {
-        return res.status(202).json({
+        return res.json({
           message: 'Evento Mercado Pago recebido, mas nao usado por este fluxo.',
           type: eventType,
         });
@@ -391,8 +399,8 @@ module.exports = {
         pagamentoId: pagamento?.id || null,
       });
     } catch (error) {
-      if (error.statusCode === 404) {
-        return res.status(202).json({
+      if (isExternalResourceLookupError(error)) {
+        return res.json({
           message: 'Webhook Mercado Pago recebido, mas o recurso externo nao foi encontrado.',
           type: eventType,
           action: eventAction,
