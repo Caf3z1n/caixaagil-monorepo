@@ -1159,43 +1159,41 @@ export function AuthFlowModal({
                   )}
                 </p>
 
-                <div className="auth-payment-wait" aria-live="polite">
-                  <span
-                    className={
-                      verificationStatus === "verified"
-                        ? "auth-payment-wait-icon auth-payment-wait-icon-ok"
-                        : verificationStatus === "error"
-                          ? "auth-payment-wait-icon auth-payment-wait-icon-error"
-                        : "auth-payment-wait-icon"
-                    }
-                  >
-                    {verificationStatus === "verified" ? (
-                      <Check aria-hidden="true" size={24} />
-                    ) : verificationStatus === "error" ? (
-                      <X aria-hidden="true" size={24} />
-                    ) : (
-                      <LoaderCircle aria-hidden="true" className="auth-spin" size={24} />
-                    )}
-                  </span>
-                  <span>
-                    <strong>
-                      {verificationStatus === "verified"
-                        ? "Conta confirmada"
-                        : verificationStatus === "error"
-                          ? "Falha no envio"
+                {verificationStatus === "error" ? (
+                  <AuthFeedback tone="error">
+                    {verificationMessage}
+                  </AuthFeedback>
+                ) : (
+                  <div className="auth-payment-wait" aria-live="polite">
+                    <span
+                      className={
+                        verificationStatus === "verified"
+                          ? "auth-payment-wait-icon auth-payment-wait-icon-ok"
+                          : "auth-payment-wait-icon"
+                      }
+                    >
+                      {verificationStatus === "verified" ? (
+                        <Check aria-hidden="true" size={24} />
+                      ) : (
+                        <LoaderCircle aria-hidden="true" className="auth-spin" size={24} />
+                      )}
+                    </span>
+                    <span>
+                      <strong>
+                        {verificationStatus === "verified"
+                          ? "Conta confirmada"
                           : verificationStatus === "sending"
                             ? "Enviando verificação"
                             : "Aguardando confirmação"}
-                    </strong>
-                    <small>
-                      {verificationStatus === "verified"
-                        ? "Agora você pode seguir para a escolha do plano."
-                        : verificationStatus === "error"
-                          ? verificationMessage
+                      </strong>
+                      <small>
+                        {verificationStatus === "verified"
+                          ? "Agora você pode seguir para a escolha do plano."
                           : "Assim que a confirmação chegar, você poderá continuar o cadastro."}
-                    </small>
-                  </span>
-                </div>
+                      </small>
+                    </span>
+                  </div>
+                )}
 
                 {verificationMessage && verificationStatus !== "error" ? (
                   <AuthFeedback tone="success">
