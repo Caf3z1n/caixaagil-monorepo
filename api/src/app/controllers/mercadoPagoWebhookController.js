@@ -391,6 +391,15 @@ module.exports = {
         pagamentoId: pagamento?.id || null,
       });
     } catch (error) {
+      if (error.statusCode === 404) {
+        return res.status(202).json({
+          message: 'Webhook Mercado Pago recebido, mas o recurso externo nao foi encontrado.',
+          type: eventType,
+          action: eventAction,
+          eventId,
+        });
+      }
+
       return res.status(error.statusCode || 500).json({
         message: error.message || 'Erro ao processar webhook Mercado Pago',
       });
