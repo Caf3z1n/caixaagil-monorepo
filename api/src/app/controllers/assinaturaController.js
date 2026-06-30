@@ -123,19 +123,37 @@ function addDays(date, days) {
   return next;
 }
 
+function getSubscriptionInterval(assinatura) {
+  const snapshot = assinatura?.plano_snapshot || {};
+  const intervalo = snapshot.intervalo === 'dias' ? 'dias' : 'mensal';
+  const quantidade = Number(snapshot.intervalo_quantidade || 1);
+
+  return {
+    intervalo,
+    quantidade: Number.isInteger(quantidade) && quantidade > 0 ? quantidade : 1,
+  };
+}
+
+function addSubscriptionInterval(date, assinatura, direction = 1) {
+  const { intervalo, quantidade } = getSubscriptionInterval(assinatura);
+  const amount = quantidade * direction;
+
+  return intervalo === 'dias' ? addDays(date, amount) : addMonths(date, amount);
+}
+
 function getEstimatedNextPaymentDate(assinatura) {
   const baseValue = assinatura?.ativada_em || assinatura?.iniciada_em || assinatura?.createdAt || assinatura?.created_at;
   const baseDate = toDate(baseValue);
 
   if (!baseDate) {
-    return addMonths(new Date(), 1);
+    return addSubscriptionInterval(new Date(), assinatura);
   }
 
-  let nextDate = addMonths(baseDate, 1);
+  let nextDate = addSubscriptionInterval(baseDate, assinatura);
   const now = new Date();
 
   while (nextDate <= now) {
-    nextDate = addMonths(nextDate, 1);
+    nextDate = addSubscriptionInterval(nextDate, assinatura);
   }
 
   return nextDate;
@@ -172,7 +190,7 @@ function getFirstChargeStartDate(plano) {
 }
 
 function getCycleStartDate(assinatura, nextPaymentDate) {
-  const previousCycle = addMonths(nextPaymentDate, -1);
+  const previousCycle = addSubscriptionInterval(nextPaymentDate, assinatura, -1);
   const activatedAt = toDate(assinatura?.ativada_em || assinatura?.iniciada_em || assinatura?.createdAt || assinatura?.created_at);
 
   if (!activatedAt || activatedAt > previousCycle) {
@@ -208,23 +226,69 @@ function calculateProrationCredit(assinaturaAtual, novoPlano) {
   };
 }
 
+function isSubscriptionOverdueForPayment(assinatura, now = new Date()) {
+  const status = String(assinatura?.status || '').toLowerCase();
+  const currentNextPaymentDate = toDate(assinatura?.proximo_pagamento_em);
+
+  if (['falha', 'pagamento_falhou', 'pausada'].includes(status)) {
+    return true;
+  }
+
+  return Boolean(currentNextPaymentDate && currentNextPaymentDate <= now);
+}
+
+function calculatePaymentMethodChangeCharge(assinaturaAtual, plano) {
+  const proximoPagamentoAtual = toDate(assinaturaAtual.proximo_pagamento_em) || getEstimatedNextPaymentDate(assinaturaAtual);
+  const cobrancaImediata = isSubscriptionOverdueForPayment(assinaturaAtual);
+
+  return {
+    creditoRateioCentavos: 0,
+    proximoPagamentoAtual,
+    valorPrimeiroPagamentoCentavos: plano.valor_centavos,
+    cobrancaImediata,
+  };
+}
+
 async function abandonPendingSubscriptions(usuarioId, exceptId = null, options = {}) {
   const where = {
     usuario_id: usuarioId,
     status: 'pendente',
   };
+  const transaction = options.transaction || null;
 
   if (exceptId) {
     where.id = { [Op.ne]: exceptId };
   }
+
+  const assinaturasPendentes = await Assinatura.findAll({
+    attributes: ['id', 'mercado_pago_preapproval_id'],
+    where,
+    transaction,
+  });
 
   await Assinatura.update(
     {
       status: 'abandonada',
       cancelada_em: new Date(),
     },
-    { where, transaction: options.transaction || null }
+    { where, transaction }
   );
+
+  if (transaction || options.cancelMercadoPago === false) {
+    return;
+  }
+
+  for (const assinatura of assinaturasPendentes) {
+    if (!assinatura.mercado_pago_preapproval_id) {
+      continue;
+    }
+
+    try {
+      await cancelMercadoPagoPreapproval(assinatura.mercado_pago_preapproval_id);
+    } catch {
+      // O abandono local nao deve impedir a criacao de um novo checkout.
+    }
+  }
 }
 
 async function ensureCheckoutTokenForSubscription(assinatura) {
@@ -970,7 +1034,9 @@ module.exports = {
         return res.status(403).json({ message: 'Assinatura ativa obrigatória.' });
       }
 
-      if (acao === 'mudar_plano' && assinaturaAtual.status !== 'ativa') {
+      const assinaturaAtualExigeRegularizacao = isSubscriptionOverdueForPayment(assinaturaAtual);
+
+      if (acao === 'mudar_plano' && (assinaturaAtual.status !== 'ativa' || assinaturaAtualExigeRegularizacao)) {
         return res.status(409).json({
           message: 'Regularize a forma de pagamento antes de mudar o plano.',
         });
@@ -1088,13 +1154,12 @@ module.exports = {
         rateio =
           acao === 'mudar_plano'
             ? calculateProrationCredit(assinaturaAtual, plano)
-            : {
-                creditoRateioCentavos: 0,
-                proximoPagamentoAtual: getFutureNextPaymentDate(assinaturaAtual),
-                valorPrimeiroPagamentoCentavos: plano.valor_centavos,
-              };
+            : calculatePaymentMethodChangeCharge(assinaturaAtual, plano);
         referenciaExterna = `caixa-agil-assinatura-${acao}-${plano.id}-${randomUUID()}`;
-        startDate = acao === 'trocar_pagamento' ? getFutureStartDate(rateio.proximoPagamentoAtual) : null;
+        startDate =
+          acao === 'trocar_pagamento' && !rateio.cobrancaImediata
+            ? getFutureStartDate(rateio.proximoPagamentoAtual)
+            : null;
         assinatura = await Assinatura.create({
           usuario_id: req.user.id,
           plano: plano.id,
@@ -1142,6 +1207,7 @@ module.exports = {
           assinaturaId: assinatura.id,
           checkoutToken: assinatura.checkout_token,
           checkoutUrl: checkout.initPoint,
+          cobrancaImediata: Boolean(rateio.cobrancaImediata),
           creditoRateioCentavos: rateio.creditoRateioCentavos,
           mercadoPagoPreapprovalId: checkout.id,
           proximoPagamentoAtual: rateio.proximoPagamentoAtual,
