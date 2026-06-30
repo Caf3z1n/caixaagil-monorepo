@@ -89,15 +89,17 @@ export function PlatformBillingAlert() {
       : "";
 
   return (
-    <section className={`platform-billing-alert ${toneClass}`} aria-live="polite">
-      <Icon aria-hidden="true" size={18} />
-      <span>
-        <strong>{getBillingTitle(billingStatus)}</strong>
-        <small>{getBillingMessage(billingStatus)}</small>
-      </span>
-      {billingStatus.bloqueia_em ? (
-        <em>Bloqueio em {formatDate(billingStatus.bloqueia_em)}</em>
-      ) : null}
-    </section>
+    <div className="platform-billing-alert-band">
+      <section className={`platform-billing-alert ${toneClass}`} aria-live="polite">
+        <Icon aria-hidden="true" size={18} />
+        <span>
+          <strong>{getBillingTitle(billingStatus)}</strong>
+          <small>{getBillingMessage(billingStatus)}</small>
+        </span>
+        {billingStatus.bloqueia_em ? (
+          <em>Bloqueio em {formatDate(billingStatus.bloqueia_em)}</em>
+        ) : null}
+      </section>
+    </div>
   );
 }
