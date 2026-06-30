@@ -1164,7 +1164,7 @@ button {
   align-items: flex-start;
   gap: 7px;
   margin: -2px 0 0;
-  color: oklch(0.42 0.08 55);
+  color: oklch(0.99 0.006 85);
   font-size: 0.88rem;
   font-weight: 850;
   line-height: 1.38;
@@ -2146,32 +2146,47 @@ button {
   align-items: stretch !important;
   gap: 0 !important;
   width: 100%;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
   color: inherit !important;
+  overflow: hidden;
+  transition:
+    border-color 180ms ease-out,
+    box-shadow 180ms ease-out;
 }
 
 .pdv-employee-password-input input {
   min-width: 0;
-  border-radius: 12px 0 0 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pdv-employee-password-input input:focus,
+.pdv-employee-password-input input:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+  outline: none;
 }
 
 .pdv-employee-password-input button {
   display: inline-grid;
   place-items: center;
-  border: 1px solid var(--line-cool);
-  border-left: 0;
-  border-radius: 0 12px 12px 0;
-  background: var(--surface);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
   cursor: pointer;
   transition:
-    border-color 180ms ease-out,
     background-color 180ms ease-out,
     color 180ms ease-out;
 }
 
-.pdv-employee-password-input:focus-within input,
-.pdv-employee-password-input:focus-within button {
+.pdv-employee-password-input:focus-within {
   border-color: var(--orange);
+  box-shadow: 0 0 0 3px oklch(0.72 0.19 45 / 0.14);
 }
 
 .pdv-employee-password-input button:hover,

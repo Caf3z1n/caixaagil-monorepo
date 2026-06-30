@@ -60,6 +60,17 @@ module.exports = {
     }
   },
 
+  async updateShiftSummary(req, res) {
+    try {
+      const resumoTurno = req.body?.resumo_turno ?? req.body?.resumoTurno ?? req.body;
+      const configuracao = await configuracaoSistemaService.updateShiftSummarySettings(req.user.id, resumoTurno);
+
+      return res.json(configuracao);
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuração de resumo do turno.');
+    }
+  },
+
   async updateExpenses(req, res) {
     try {
       const lancarDespesas = req.body?.lancar_despesas ?? req.body?.despesas ?? req.body;
@@ -81,7 +92,7 @@ module.exports = {
 
       return res.json(configuracao);
     } catch (error) {
-      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuraÃ§Ã£o de funcionÃ¡rios.');
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuração de funcionários.');
     }
   },
 

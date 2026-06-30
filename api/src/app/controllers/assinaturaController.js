@@ -27,6 +27,10 @@ const {
 const {
   syncAssinaturaPagamentosMercadoPago,
 } = require('../services/pagamentosAssinaturaService');
+const {
+  findSubscriptionForPlatformAccess,
+  hasSubscriptionActivationEvidence,
+} = require('../services/assinaturaAccessService');
 const { getPublicAppUrl } = require('../services/urlService');
 
 const MIN_MERCADO_PAGO_CHARGE_CENTAVOS = 100;
@@ -69,7 +73,7 @@ function isCheckoutTokenCurrent(assinatura) {
   return isValidCheckoutToken(token) && expiresAt && expiresAt > new Date();
 }
 
-function getStatusFromPreapproval(preapprovalStatus) {
+function getStatusFromPreapproval(preapprovalStatus, assinatura = null) {
   const normalized = String(preapprovalStatus || '').toLowerCase();
 
   if (normalized === 'authorized') {
@@ -81,7 +85,7 @@ function getStatusFromPreapproval(preapprovalStatus) {
   }
 
   if (['rejected', 'inactive'].includes(normalized)) {
-    return 'pagamento_falhou';
+    return hasSubscriptionActivationEvidence(assinatura) ? 'ativa' : 'pagamento_falhou';
   }
 
   if (['pending', 'in_process'].includes(normalized)) {
@@ -394,7 +398,7 @@ async function syncAssinaturaFromMercadoPago(assinatura) {
   }
 
   const preapproval = await getMercadoPagoPreapproval(assinatura.mercado_pago_preapproval_id);
-  const nextStatus = getStatusFromPreapproval(preapproval?.status);
+  const nextStatus = getStatusFromPreapproval(preapproval?.status, assinatura);
   const nextPaymentDate = toDate(preapproval?.next_payment_date);
   let shouldSave = false;
 
@@ -493,7 +497,9 @@ async function finalizeActivatedSubscription(assinatura) {
     where: {
       id: assinatura.assinatura_anterior_id,
       usuario_id: assinatura.usuario_id,
-      status: 'ativa',
+      status: {
+        [Op.in]: ['ativa', 'pagamento_falhou'],
+      },
     },
   });
 
@@ -958,16 +964,16 @@ module.exports = {
         return res.status(404).json({ message: 'Usuário não encontrado.' });
       }
 
-      const assinaturaAtual = await Assinatura.findOne({
-        where: {
-          usuario_id: req.user.id,
-          status: 'ativa',
-        },
-        order: [['id', 'DESC']],
-      });
+      const assinaturaAtual = await findSubscriptionForPlatformAccess(req.user.id);
 
       if (!assinaturaAtual) {
         return res.status(403).json({ message: 'Assinatura ativa obrigatória.' });
+      }
+
+      if (acao === 'mudar_plano' && assinaturaAtual.status !== 'ativa') {
+        return res.status(409).json({
+          message: 'Regularize a forma de pagamento antes de mudar o plano.',
+        });
       }
 
       const planoId =
@@ -1068,6 +1074,7 @@ module.exports = {
       let rateio = null;
       let referenciaExterna = null;
       let assinatura = null;
+      let startDate = null;
 
       try {
         if (codigoAssinaturaInput) {
@@ -1087,6 +1094,7 @@ module.exports = {
                 valorPrimeiroPagamentoCentavos: plano.valor_centavos,
               };
         referenciaExterna = `caixa-agil-assinatura-${acao}-${plano.id}-${randomUUID()}`;
+        startDate = acao === 'trocar_pagamento' ? getFutureStartDate(rateio.proximoPagamentoAtual) : null;
         assinatura = await Assinatura.create({
           usuario_id: req.user.id,
           plano: plano.id,

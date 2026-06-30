@@ -14,7 +14,9 @@
     "migrate:undo:all": "sequelize db:migrate:undo:all",
     "seed": "sequelize db:seed:all",
     "seed:undo": "sequelize db:seed:undo",
-    "seed:undo:all": "sequelize db:seed:undo:all"
+    "seed:undo:all": "sequelize db:seed:undo:all",
+    "legacy:export:caixa-agil": "node scripts/migration/export-legacy-caixa-agil.js",
+    "legacy:import:caixa-agil": "node scripts/migration/import-legacy-caixa-agil.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

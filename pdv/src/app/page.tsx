@@ -51,6 +51,10 @@ type CommandSettings = {
   ativo?: boolean;
 };
 
+type ShiftSummarySettings = {
+  ativo?: boolean;
+};
+
 type ExpenseSettings = {
   ativo?: boolean;
 };
@@ -61,6 +65,7 @@ type EmployeeControlSettings = {
 
 type ApiPdvSettings = {
   comandas?: CommandSettings | null;
+  resumo_turno?: ShiftSummarySettings | null;
   lancar_despesas?: ExpenseSettings | null;
   controle_funcionarios?: EmployeeControlSettings | null;
   formas_pagamento?: Record<string, boolean> | null;

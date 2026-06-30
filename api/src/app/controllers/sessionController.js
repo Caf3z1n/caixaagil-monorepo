@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken');
-const { Assinatura, Subconta, Usuario } = require('../models');
+const { Subconta, Usuario } = require('../models');
 const authConfig = require('../../config/auth');
 const { isEmailVerified } = require('../services/emailVerificationPolicyService');
+const { getPlatformAccess } = require('../services/assinaturaAccessService');
 
 const buildToken = payload =>
   jwt.sign(payload, authConfig.secret, {
@@ -16,15 +17,6 @@ function sanitizeAccessAccount(account) {
   delete safeAccount.token_redefinicao_senha;
   delete safeAccount.token_redefinicao_senha_expira_em;
   return safeAccount;
-}
-
-async function findActiveSubscription(usuarioId) {
-  return Assinatura.findOne({
-    where: {
-      usuario_id: usuarioId,
-      status: 'ativa',
-    },
-  });
 }
 
 module.exports = {
@@ -59,9 +51,9 @@ module.exports = {
         });
       }
 
-      const assinaturaAtiva = await findActiveSubscription(usuario.id);
+      const platformAccess = await getPlatformAccess(usuario.id);
 
-      if (!assinaturaAtiva) {
+      if (!platformAccess.allowed) {
         return res.status(403).json({
           code: 'SUBSCRIPTION_REQUIRED',
           message: 'Finalize a contratação de um plano para liberar o acesso.',
@@ -108,9 +100,9 @@ module.exports = {
       return res.status(403).json({ message: 'Conta principal inativa.' });
     }
 
-    const assinaturaAtiva = await findActiveSubscription(usuarioPrincipal.id);
+    const platformAccess = await getPlatformAccess(usuarioPrincipal.id);
 
-    if (!assinaturaAtiva) {
+    if (!platformAccess.allowed) {
       return res.status(403).json({
         code: 'SUBSCRIPTION_REQUIRED',
         message: 'A conta principal precisa de uma assinatura ativa.',

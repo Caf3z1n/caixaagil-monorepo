@@ -476,6 +476,7 @@ export function AuthFlowModal({
 
     try {
       const result = await apiPost<{
+        acessoPlataforma?: boolean;
         assinaturaAtiva?: boolean;
         email: string;
         emailVerificado?: boolean;
@@ -486,7 +487,8 @@ export function AuthFlowModal({
       );
       const normalizedEmail = result.email || email.trim();
       const nextAccountMode: Exclude<AccountMode, null> = result.existe ? "existing" : "new";
-      const needsActivation = result.existe && (!result.emailVerificado || !result.assinaturaAtiva);
+      const hasPlatformAccess = result.acessoPlataforma ?? result.assinaturaAtiva;
+      const needsActivation = result.existe && (!result.emailVerificado || !hasPlatformAccess);
 
       setEmail(normalizedEmail);
       setAccountMode(nextAccountMode);

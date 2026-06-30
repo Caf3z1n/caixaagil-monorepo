@@ -18,6 +18,7 @@ const {
   applyDueScheduledChangeForSubscription,
   cancelScheduledChangesForSubscription,
 } = require('../services/alteracoesAssinaturaService');
+const { hasSubscriptionActivationEvidence } = require('../services/assinaturaAccessService');
 
 function toDate(value) {
   if (!value) {
@@ -40,7 +41,7 @@ function getEventDataId(req) {
   return String(req.body?.data?.id || req.query?.['data.id'] || req.query?.id || req.body?.id || '').trim();
 }
 
-function getAssinaturaStatus(paymentStatus) {
+function getAssinaturaStatus(paymentStatus, assinatura = null) {
   const normalized = String(paymentStatus || '').toLowerCase();
 
   if (['approved', 'accredited', 'paid', 'processed'].includes(normalized)) {
@@ -51,7 +52,11 @@ function getAssinaturaStatus(paymentStatus) {
     return 'cancelada';
   }
 
-  if (['rejected', 'refunded', 'charged_back'].includes(normalized)) {
+  if (normalized === 'rejected') {
+    return hasSubscriptionActivationEvidence(assinatura) ? 'ativa' : 'pagamento_falhou';
+  }
+
+  if (['refunded', 'charged_back'].includes(normalized)) {
     return 'pagamento_falhou';
   }
 
@@ -62,7 +67,7 @@ function getAssinaturaStatus(paymentStatus) {
   return null;
 }
 
-function getAssinaturaStatusFromPreapproval(preapprovalStatus) {
+function getAssinaturaStatusFromPreapproval(preapprovalStatus, assinatura = null) {
   const normalized = String(preapprovalStatus || '').toLowerCase();
 
   if (normalized === 'authorized') {
@@ -74,7 +79,7 @@ function getAssinaturaStatusFromPreapproval(preapprovalStatus) {
   }
 
   if (['rejected', 'inactive'].includes(normalized)) {
-    return 'pagamento_falhou';
+    return hasSubscriptionActivationEvidence(assinatura) ? 'ativa' : 'pagamento_falhou';
   }
 
   if (['pending', 'in_process'].includes(normalized)) {
@@ -191,7 +196,9 @@ async function cancelPreviousActiveSubscriptions(assinatura) {
     where: {
       id: { [Op.ne]: assinatura.id },
       usuario_id: assinatura.usuario_id,
-      status: 'ativa',
+      status: {
+        [Op.in]: ['ativa', 'pagamento_falhou'],
+      },
     },
   });
 
@@ -216,7 +223,7 @@ async function updateAssinaturaFromPreapproval(assinatura, preapproval) {
     return;
   }
 
-  const assinaturaStatus = getAssinaturaStatusFromPreapproval(preapproval?.status);
+  const assinaturaStatus = getAssinaturaStatusFromPreapproval(preapproval?.status, assinatura);
   const nextPaymentDate = toDate(preapproval?.next_payment_date);
   let shouldSave = false;
 
@@ -258,7 +265,7 @@ async function updateAssinaturaStatus(assinatura, paymentStatus) {
     return;
   }
 
-  const assinaturaStatus = getAssinaturaStatus(paymentStatus);
+  const assinaturaStatus = getAssinaturaStatus(paymentStatus, assinatura);
 
   if (!assinaturaStatus) {
     return;

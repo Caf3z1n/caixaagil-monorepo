@@ -13,6 +13,7 @@ const {
 const {
   syncAssinaturaPagamentosMercadoPago,
 } = require('../services/pagamentosAssinaturaService');
+const { selectSubscriptionReference } = require('../services/assinaturaAccessService');
 const { getAppUrl, getPublicAssetUrl } = require('../services/urlService');
 
 const expiresInMinutes = 30;
@@ -208,7 +209,7 @@ async function findAssinaturas(usuarioId) {
 }
 
 function getAssinaturaAtual(assinaturas) {
-  return assinaturas.find(assinatura => assinatura.status === 'ativa') || assinaturas[0] || null;
+  return selectSubscriptionReference(assinaturas);
 }
 
 async function getCurrentAccess(req) {

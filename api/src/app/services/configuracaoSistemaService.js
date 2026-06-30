@@ -26,6 +26,10 @@ const defaultCommandSettings = {
   ativo: false,
 };
 
+const defaultShiftSummarySettings = {
+  ativo: false,
+};
+
 const fiscalEnvironmentKeys = ['homologacao', 'producao'];
 
 const defaultFiscalEnvironmentSettings = {
@@ -300,6 +304,20 @@ function normalizeEmployeeControlSettings(value = {}) {
 function normalizeCommandSettings(value = {}) {
   return {
     ativo: normalizeBoolean(value?.ativo, defaultCommandSettings.ativo),
+  };
+}
+
+function normalizeShiftSummarySettings(value = {}) {
+  return {
+    ativo: normalizeBoolean(
+      pickFirstDefined(
+        value?.ativo,
+        value?.imprimir_ao_fechar,
+        value?.imprimirAoFechar,
+        value?.printShiftSummaryOnClose
+      ),
+      defaultShiftSummarySettings.ativo
+    ),
   };
 }
 
@@ -754,6 +772,7 @@ function sanitizeConfiguracao(configuracao, options = {}) {
     lancar_despesas: normalizeExpenseSettings(data.lancar_despesas),
     controle_funcionarios: normalizeEmployeeControlSettings(data.controle_funcionarios),
     comandas: normalizeCommandSettings(data.comandas),
+    resumo_turno: normalizeShiftSummarySettings(data.resumo_turno),
     fiscal: sanitizeFiscalSettings(data.fiscal, options.fiscal),
     integracoes: sanitizeIntegrationSettings(data.integracoes),
     updated_at: data.updated_at ?? data.updatedAt ?? null,
@@ -858,6 +877,7 @@ async function getOrCreateConfiguracao(usuarioId, options = {}) {
       lancar_despesas: defaultExpenseSettings,
       controle_funcionarios: defaultEmployeeControlSettings,
       comandas: defaultCommandSettings,
+      resumo_turno: defaultShiftSummarySettings,
       fiscal: {},
       integracoes: defaultIntegrationSettings,
     },
@@ -921,6 +941,16 @@ async function updateCommandSettings(usuarioId, commandSettings) {
   return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
 }
 
+async function updateShiftSummarySettings(usuarioId, shiftSummarySettings) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextShiftSummarySettings = normalizeShiftSummarySettings(shiftSummarySettings);
+
+  configuracao.resumo_turno = nextShiftSummarySettings;
+  await configuracao.save();
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
 async function updateExpenseSettings(usuarioId, expenseSettings) {
   const configuracao = await getOrCreateConfiguracao(usuarioId);
   const nextExpenseSettings = normalizeExpenseSettings(expenseSettings);
@@ -975,6 +1005,7 @@ module.exports = {
   defaultFiscalSettings,
   defaultIntegrationSettings,
   defaultPaymentMethods,
+  defaultShiftSummarySettings,
   decryptSecret,
   getCnpjaApiKey,
   getCommandSettings,
@@ -985,6 +1016,7 @@ module.exports = {
   normalizeIntegrationSettings,
   normalizeFiscalSettings,
   normalizePaymentMethods,
+  normalizeShiftSummarySettings,
   sanitizeConfiguracao,
   sanitizeFiscalSettings,
   sanitizeIntegrationSettings,
@@ -994,4 +1026,5 @@ module.exports = {
   updateFiscalSettings,
   updateIntegrationSettings,
   updatePaymentMethods,
+  updateShiftSummarySettings,
 };

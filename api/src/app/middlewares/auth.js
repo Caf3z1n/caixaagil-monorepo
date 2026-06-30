@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const authConfig = require('../../config/auth');
-const { Assinatura, Subconta, Usuario } = require('../models');
+const { Subconta, Usuario } = require('../models');
+const { getPlatformAccess } = require('../services/assinaturaAccessService');
 const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 
 function getRequiredPermission(req) {
@@ -103,14 +104,9 @@ module.exports = async (req, res, next) => {
       }
     }
 
-    const assinaturaAtiva = await Assinatura.findOne({
-      where: {
-        usuario_id: usuario.id,
-        status: 'ativa',
-      },
-    });
+    const platformAccess = await getPlatformAccess(usuario.id);
 
-    if (!assinaturaAtiva) {
+    if (!platformAccess.allowed) {
       return res.status(403).json({
         code: 'SUBSCRIPTION_REQUIRED',
         message: 'Assinatura ativa obrigatória para acessar este recurso.',
@@ -124,6 +120,7 @@ module.exports = async (req, res, next) => {
       permissoes: subconta ? subconta.permissoes || [] : ['*'],
       email_acesso: subconta?.email || usuario.email,
     };
+    req.subscriptionAccess = platformAccess;
     req.subconta = subconta ? subconta.get({ plain: true }) : null;
     return next();
   } catch (error) {

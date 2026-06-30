@@ -13,6 +13,7 @@ const {
   isEmailVerificationBypassEnabled,
   isEmailVerified,
 } = require('../services/emailVerificationPolicyService');
+const { getPlatformAccess } = require('../services/assinaturaAccessService');
 
 const expiresInMinutes = 30;
 const allowedFields = ['email', 'senha', 'password', 'ativo', 'active'];
@@ -244,6 +245,7 @@ module.exports = {
             },
           })
         : null;
+      const platformAccess = usuarioId ? await getPlatformAccess(usuarioId) : { allowed: false };
 
       return res.json({
         existe: Boolean(account),
@@ -251,6 +253,7 @@ module.exports = {
         tipoConta: account?.tipo || null,
         emailVerificado: account?.tipo === 'subconta' ? true : isEmailVerified(account?.conta),
         assinaturaAtiva: Boolean(assinaturaAtiva),
+        acessoPlataforma: Boolean(platformAccess.allowed),
         permissoes: account?.tipo === 'subconta' ? account.conta.permissoes || [] : ['*'],
       });
     } catch (error) {

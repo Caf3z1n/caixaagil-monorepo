@@ -74,7 +74,9 @@ import {
   type FiscalWorkerResponse,
   type LocalPdvStoreEventPayload,
   type LocalPdvStorePendingEvent,
-  type LocalPdvStoreSummary
+  type LocalPdvStoreSummary,
+  type NonFiscalReceiptPayload,
+  type PrintShiftSummaryResult
 } from "@/lib/local-pdv-store";
 import {
   applyPdvAppScale,
@@ -170,6 +172,7 @@ type BillingStatus = {
 
 type ApiPdvSettings = {
   comandas?: Partial<CommandSettings> | null;
+  resumo_turno?: Partial<ShiftSummarySettings> | null;
   lancar_despesas?: Partial<ExpenseSettings> | null;
   controle_funcionarios?: Partial<EmployeeControlSettings> | null;
   formas_pagamento?: Partial<Record<PaymentMethod, boolean>> | null;
@@ -394,6 +397,33 @@ type PaymentBreakdownItem = {
   count: number;
 };
 
+type ShiftSummaryPrintSnapshot = {
+  session: CashierSession & { closedAt: string };
+  sales: SaleRecord[];
+  expenses: CashExpenseRecord[];
+  agreementReceipts: AgreementReceiptRecord[];
+  salesByPayment: PaymentBreakdownItem[];
+  totals: {
+    salesCents: number;
+    expensesCents: number;
+    expectedCashCents: number;
+  };
+};
+
+type ShiftSummaryPrintModalTone = "pending" | "success" | "error";
+
+type ShiftSummaryPrintModalState = {
+  tone: ShiftSummaryPrintModalTone;
+  title: string;
+  message: string;
+  detail?: string | null;
+  snapshot: ShiftSummaryPrintSnapshot;
+  payload: NonFiscalReceiptPayload;
+  printer?: string | null;
+  printedAt?: string | null;
+  payloadPath?: string | null;
+};
+
 type HistoryMovement =
   | {
       type: "sale";
@@ -428,6 +458,7 @@ type LocalCashierState = {
   catalogProducts: Product[];
   catalogCategories: ProductCategory[];
   commandSettings?: CommandSettings;
+  shiftSummarySettings?: ShiftSummarySettings;
   expenseSettings?: ExpenseSettings;
   employeeControlSettings?: EmployeeControlSettings;
   paymentSettings?: PaymentSettings;
@@ -510,6 +541,10 @@ type CommandSettings = {
   ativo: boolean;
 };
 
+type ShiftSummarySettings = {
+  ativo: boolean;
+};
+
 type ExpenseSettings = {
   ativo: boolean;
 };
@@ -541,6 +576,10 @@ const defaultPaymentSettings: PaymentSettings = {
 
 const defaultCommandSettings: CommandSettings = {
   ativo: true
+};
+
+const defaultShiftSummarySettings: ShiftSummarySettings = {
+  ativo: false
 };
 
 const defaultExpenseSettings: ExpenseSettings = {
@@ -813,6 +852,269 @@ function formatCurrency(cents: number) {
 
 function formatDateTime(value: string) {
   return dateTimeFormatter.format(new Date(value));
+}
+
+const receiptLineWidth = 34;
+const receiptPreferredPrinterPatterns = ["TANCA", "POS-", "EPSON TM", "BEMATECH", "ELGIN", "DARUMA", "TERMICA", "THERMAL"];
+
+function compactReceiptText(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function buildReceiptLine(label: string, value: string) {
+  const left = compactReceiptText(label);
+  const right = compactReceiptText(value);
+
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  if (left.length + right.length + 1 >= receiptLineWidth) {
+    return `${left}\n${right.padStart(receiptLineWidth, " ")}`;
+  }
+
+  return `${left}${" ".repeat(receiptLineWidth - left.length - right.length)}${right}`;
+}
+
+function buildQuantityLabel(quantity: number) {
+  const normalizedQuantity = Number.isFinite(quantity) ? Math.max(0, Math.floor(quantity)) : 0;
+
+  return `${normalizedQuantity.toLocaleString("pt-BR")} un.`;
+}
+
+function formatReceiptDateTime(value?: string | null) {
+  if (!value) {
+    return "Não informado";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Não informado";
+  }
+
+  return formatDateTime(date.toISOString());
+}
+
+function formatCompanyDocument(value: unknown) {
+  const digits = String(value ?? "").replace(/\D/g, "");
+
+  if (digits.length === 14) {
+    return digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
+  }
+
+  if (digits.length === 11) {
+    return digits.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4");
+  }
+
+  return digits;
+}
+
+function getShiftSummaryCompanyName(fiscalSettings: Record<string, unknown> | null, pdvIdentity: string) {
+  const emitente = asRecord(fiscalSettings?.emitente);
+  const name = compactReceiptText(
+    emitente?.nome_fantasia ??
+      emitente?.nomeFantasia ??
+      emitente?.razao_social ??
+      emitente?.razaoSocial ??
+      pdvIdentity
+  );
+
+  return name || "Caixa Ágil";
+}
+
+function getShiftSummaryCompanyLines(fiscalSettings: Record<string, unknown> | null, pdvIdentity: string) {
+  const emitente = asRecord(fiscalSettings?.emitente);
+  const endereco = asRecord(emitente?.endereco);
+  const document = formatCompanyDocument(emitente?.cnpj_cpf ?? emitente?.cnpjCpf ?? emitente?.cnpj);
+  const stateRegistration = compactReceiptText(emitente?.inscricao_estadual ?? emitente?.inscricaoEstadual);
+  const documentLine = [
+    document ? `CNPJ ${document}` : null,
+    stateRegistration ? `IE ${stateRegistration}` : null
+  ].filter(Boolean).join(" | ");
+  const addressLine = [
+    compactReceiptText(endereco?.logradouro),
+    compactReceiptText(endereco?.numero),
+    compactReceiptText(endereco?.bairro)
+  ].filter(Boolean).join(", ");
+  const cityLine = [
+    compactReceiptText(endereco?.municipio),
+    compactReceiptText(endereco?.uf)
+  ].filter(Boolean).join(" - ");
+
+  return [
+    documentLine,
+    addressLine,
+    cityLine,
+    compactReceiptText(pdvIdentity) ? `PDV ${compactReceiptText(pdvIdentity)}` : ""
+  ].filter((line) => line.trim().length > 0);
+}
+
+function buildShiftSummaryTotalsSection(snapshot: ShiftSummaryPrintSnapshot) {
+  const salesTotalCents = snapshot.sales.reduce((total, sale) => total + sale.totalCents, 0);
+  const paidSalesCents = snapshot.sales
+    .filter((sale) => sale.paymentMethod !== "convenio")
+    .reduce((total, sale) => total + sale.totalCents, 0);
+  const agreementLaunchCents = snapshot.sales
+    .filter((sale) => sale.paymentMethod === "convenio")
+    .reduce((total, sale) => total + sale.totalCents, 0);
+  const agreementReceiptCents = snapshot.agreementReceipts.reduce((total, receipt) => total + receipt.totalCents, 0);
+  const itemsCount = snapshot.sales.reduce((total, sale) => total + getCartQuantity(sale.items), 0);
+  const lines = [
+    buildReceiptLine("Entradas no caixa", formatCurrency(snapshot.totals.salesCents)),
+    buildReceiptLine("Vendas do turno", formatCurrency(salesTotalCents)),
+    buildReceiptLine("Vendas recebidas", formatCurrency(paidSalesCents)),
+    buildReceiptLine("Recebimentos convênio", formatCurrency(agreementReceiptCents))
+  ];
+
+  if (snapshot.totals.expensesCents > 0) {
+    lines.push(buildReceiptLine("Despesas do caixa", formatCurrency(snapshot.totals.expensesCents)));
+  }
+
+  if (agreementLaunchCents > 0) {
+    lines.push(buildReceiptLine("Convênio lançado", formatCurrency(agreementLaunchCents)));
+  }
+
+  lines.push(
+    buildReceiptLine("Vendas", String(snapshot.sales.length)),
+    buildReceiptLine("Itens vendidos", buildQuantityLabel(itemsCount))
+  );
+
+  return lines.join("\n");
+}
+
+function buildShiftSummaryPaymentSection(snapshot: ShiftSummaryPrintSnapshot) {
+  const lines = snapshot.salesByPayment.map((paymentSummary) =>
+    buildReceiptLine(paymentSummary.label, formatCurrency(paymentSummary.totalCents))
+  );
+  const agreementLaunchCents = snapshot.sales
+    .filter((sale) => sale.paymentMethod === "convenio")
+    .reduce((total, sale) => total + sale.totalCents, 0);
+
+  if (agreementLaunchCents > 0) {
+    lines.push(buildReceiptLine("Convênio lançado", formatCurrency(agreementLaunchCents)));
+  }
+
+  return lines.length > 0 ? lines.join("\n") : "Nenhuma entrada registrada neste turno.";
+}
+
+function buildShiftSummaryExpensesSection(snapshot: ShiftSummaryPrintSnapshot) {
+  if (snapshot.expenses.length === 0) {
+    return "Nenhuma despesa lançada neste turno.";
+  }
+
+  return snapshot.expenses
+    .map((expense) => buildReceiptLine(expense.title || "Despesa", formatCurrency(expense.amountCents)))
+    .join("\n");
+}
+
+function buildShiftSummaryCategorySection(snapshot: ShiftSummaryPrintSnapshot) {
+  const categoryTotals = new Map<string, { quantity: number; totalCents: number }>();
+
+  for (const sale of snapshot.sales) {
+    for (const item of sale.items) {
+      const categoryLabel = compactReceiptText(item.category) || "Sem categoria";
+      const currentTotal = categoryTotals.get(categoryLabel) ?? {
+        quantity: 0,
+        totalCents: 0
+      };
+
+      currentTotal.quantity += item.quantity;
+      currentTotal.totalCents += item.quantity * item.priceCents;
+      categoryTotals.set(categoryLabel, currentTotal);
+    }
+  }
+
+  const orderedCategories = Array.from(categoryTotals.entries()).sort(
+    (leftEntry, rightEntry) => rightEntry[1].totalCents - leftEntry[1].totalCents
+  );
+  const visibleCategories = orderedCategories.slice(0, 6);
+  const remainingCategories = orderedCategories.slice(6);
+
+  if (remainingCategories.length > 0) {
+    const remainingTotal = remainingCategories.reduce(
+      (total, [, entry]) => ({
+        quantity: total.quantity + entry.quantity,
+        totalCents: total.totalCents + entry.totalCents
+      }),
+      { quantity: 0, totalCents: 0 }
+    );
+
+    visibleCategories.push(["Outras categorias", remainingTotal]);
+  }
+
+  if (visibleCategories.length === 0) {
+    return "Nenhuma venda por categoria neste turno.";
+  }
+
+  return visibleCategories
+    .map(([categoryLabel, entry]) =>
+      buildReceiptLine(`${categoryLabel} (${buildQuantityLabel(entry.quantity)})`, formatCurrency(entry.totalCents))
+    )
+    .join("\n");
+}
+
+function buildShiftSummaryReceiptPayload({
+  fiscalSettings,
+  pdvIdentity,
+  printerName,
+  snapshot
+}: {
+  fiscalSettings: Record<string, unknown> | null;
+  pdvIdentity: string;
+  printerName?: string;
+  snapshot: ShiftSummaryPrintSnapshot;
+}): NonFiscalReceiptPayload {
+  const printedAtLabel = formatReceiptDateTime(new Date().toISOString());
+
+  return {
+    type: "resumo-turno",
+    title: "RESUMO DO TURNO",
+    subtitle: `Turno ${snapshot.session.shiftNumber}`,
+    companyName: getShiftSummaryCompanyName(fiscalSettings, pdvIdentity),
+    companyLines: getShiftSummaryCompanyLines(fiscalSettings, pdvIdentity),
+    highlightLabel: "Entradas no caixa",
+    highlightValue: formatCurrency(snapshot.totals.salesCents),
+    fields: [
+      {
+        label: "Responsável pela abertura",
+        value: snapshot.session.openedByEmployeeName ?? "Não identificado"
+      },
+      {
+        label: "Abertura / Fechamento",
+        value: `${formatReceiptDateTime(snapshot.session.openedAt)} | ${formatReceiptDateTime(snapshot.session.closedAt)}`
+      }
+    ],
+    sections: [
+      {
+        title: "Resumo financeiro",
+        kind: "preformatted",
+        content: buildShiftSummaryTotalsSection(snapshot)
+      },
+      {
+        title: "Entradas por forma",
+        kind: "preformatted",
+        content: buildShiftSummaryPaymentSection(snapshot)
+      },
+      {
+        title: "Despesas do caixa",
+        kind: "preformatted",
+        content: buildShiftSummaryExpensesSection(snapshot)
+      },
+      {
+        title: "Vendas por categoria",
+        kind: "preformatted",
+        content: buildShiftSummaryCategorySection(snapshot)
+      }
+    ],
+    footerNote: `Impresso em ${printedAtLabel}`,
+    printerName,
+    preferredPrinterPatterns: receiptPreferredPrinterPatterns
+  };
 }
 
 function formatSyncDateTime(value?: string | null) {
@@ -1389,6 +1691,12 @@ function normalizeCommandSettings(value?: Partial<CommandSettings> | null): Comm
   };
 }
 
+function normalizeShiftSummarySettings(value?: Partial<ShiftSummarySettings> | null): ShiftSummarySettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
 function normalizeExpenseSettings(value?: Partial<ExpenseSettings> | null): ExpenseSettings {
   return {
     ativo: value?.ativo !== false
@@ -1947,6 +2255,9 @@ export function DesktopCashierFlow({
   const [commandSettings, setCommandSettings] = useState<CommandSettings>(() =>
     normalizeCommandSettings(initialSettings?.comandas)
   );
+  const [shiftSummarySettings, setShiftSummarySettings] = useState<ShiftSummarySettings>(() =>
+    normalizeShiftSummarySettings(initialSettings?.resumo_turno)
+  );
   const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(() =>
     normalizeExpenseSettings(initialSettings?.lancar_despesas)
   );
@@ -1964,6 +2275,9 @@ export function DesktopCashierFlow({
   const [isFiscalEmissionEnabled, setIsFiscalEmissionEnabled] = useState(() =>
     isFiscalEmissionActiveConfig(initialSettings?.fiscal ?? null)
   );
+  const [accountFiscalSettings, setAccountFiscalSettings] = useState<Record<string, unknown> | null>(() =>
+    asRecord(initialSettings?.fiscal) ?? null
+  );
   const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const [selectedSale, setSelectedSale] = useState<SaleRecord | null>(null);
@@ -1977,6 +2291,9 @@ export function DesktopCashierFlow({
   const [isFiscalPrinting, setIsFiscalPrinting] = useState(false);
   const [fiscalPrintMode, setFiscalPrintMode] = useState<FiscalPrintMode | null>(null);
   const fiscalPrintingLockRef = useRef(false);
+  const [shiftSummaryPrintModal, setShiftSummaryPrintModal] = useState<ShiftSummaryPrintModalState | null>(null);
+  const [isShiftSummaryPrinting, setIsShiftSummaryPrinting] = useState(false);
+  const shiftSummaryPrintingLockRef = useRef(false);
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCashPaymentOpen, setIsCashPaymentOpen] = useState(false);
@@ -2044,6 +2361,7 @@ export function DesktopCashierFlow({
     [enabledPaymentOptions]
   );
   const isCommandsEnabled = commandSettings.ativo;
+  const isShiftSummaryPrintEnabled = shiftSummarySettings.ativo;
   const isExpensesEnabled = expenseSettings.ativo;
   const isEmployeeControlEnabled = employeeControlSettings.ativo;
   const activeEmployees = useMemo(
@@ -2243,10 +2561,12 @@ export function DesktopCashierFlow({
     }
 
     setCommandSettings(normalizeCommandSettings(initialSettings.comandas));
+    setShiftSummarySettings(normalizeShiftSummarySettings(initialSettings.resumo_turno));
     setExpenseSettings(normalizeExpenseSettings(initialSettings.lancar_despesas));
     setEmployeeControlSettings(normalizeEmployeeControlSettings(initialSettings.controle_funcionarios));
     setPaymentSettings(normalizePaymentSettings(initialSettings.formas_pagamento));
     setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(initialSettings.fiscal ?? null));
+    setAccountFiscalSettings(asRecord(initialSettings.fiscal) ?? null);
   }, [initialSettings]);
 
   useEffect(() => {
@@ -2293,6 +2613,7 @@ export function DesktopCashierFlow({
       catalogProducts,
       catalogCategories,
       commandSettings,
+      shiftSummarySettings,
       expenseSettings,
       employeeControlSettings,
       paymentSettings
@@ -3078,6 +3399,7 @@ export function DesktopCashierFlow({
       const nextAgreementReceipts = (response.recebimentos_convenio ?? []).map(mapAgreementReceipt);
       const nextEmployees = mergeEmployees((response.funcionarios ?? []).map(mapEmployee));
       const nextCommandSettings = normalizeCommandSettings(response.configuracoes?.comandas);
+      const nextShiftSummarySettings = normalizeShiftSummarySettings(response.configuracoes?.resumo_turno);
       const nextExpenseSettings = normalizeExpenseSettings(response.configuracoes?.lancar_despesas);
       const nextEmployeeControlSettings = normalizeEmployeeControlSettings(response.configuracoes?.controle_funcionarios);
       const nextPaymentSettings = normalizePaymentSettings(response.configuracoes?.formas_pagamento);
@@ -3096,9 +3418,11 @@ export function DesktopCashierFlow({
       setAgreementReceipts((currentReceipts) => mergeAgreementReceipts(currentReceipts, nextAgreementReceipts));
       setEmployees(nextEmployees);
       setCommandSettings(nextCommandSettings);
+      setShiftSummarySettings(nextShiftSummarySettings);
       setExpenseSettings(nextExpenseSettings);
       setEmployeeControlSettings(nextEmployeeControlSettings);
       setPaymentSettings(nextPaymentSettings);
+      setAccountFiscalSettings(asRecord(response.configuracoes?.fiscal) ?? null);
       updateBillingStatus(response.billing_status ?? null);
       setCartItems((currentItems) => mergeCartItemsWithCatalog(currentItems, nextProducts));
       setCommandEditor((currentEditor) =>
@@ -4785,6 +5109,127 @@ export function DesktopCashierFlow({
     await completeOpenSession(null);
   }
 
+  async function getShiftSummaryPrinterName() {
+    try {
+      const store = getLocalPdvStore();
+      const fiscalConfig = await store?.getFiscalConfig?.({ scope: localStoreScope });
+      const printingSettings = getPdvFiscalPrintSettingsFromConfig(asRecord(fiscalConfig));
+
+      return printingSettings.useDefaultPrinter ? "" : printingSettings.printerName;
+    } catch (error) {
+      console.warn("Não foi possível carregar a impressora configurada para o resumo do turno.", error);
+      return "";
+    }
+  }
+
+  async function runShiftSummaryPrint(
+    state: ShiftSummaryPrintModalState,
+    options: { reprint?: boolean } = {}
+  ) {
+    if (shiftSummaryPrintingLockRef.current) {
+      return;
+    }
+
+    const store = getLocalPdvStore();
+
+    shiftSummaryPrintingLockRef.current = true;
+    setIsShiftSummaryPrinting(true);
+    setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
+      ? {
+          ...current,
+          tone: "pending",
+          title: options.reprint ? "Reimprimindo resumo do turno" : "Imprimindo resumo do turno",
+          message: options.reprint ? "Reenviando para a impressora" : "Enviando para a impressora",
+          detail: null
+        }
+      : current);
+
+    if (!store?.printShiftSummary) {
+      const message = "Impressão disponível apenas no app desktop.";
+
+      setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
+        ? {
+            ...current,
+            tone: "error",
+            title: "Falha ao imprimir resumo",
+            message: "Não foi possível enviar o resumo.",
+            detail: message
+          }
+        : current);
+      onSystemMessage(`Resumo do turno não impresso: ${message}`);
+      shiftSummaryPrintingLockRef.current = false;
+      setIsShiftSummaryPrinting(false);
+      return;
+    }
+
+    try {
+      const result: PrintShiftSummaryResult = await store.printShiftSummary({
+        documentKey: state.snapshot.session.id,
+        payload: state.payload
+      });
+
+      setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
+        ? {
+            ...current,
+            tone: "success",
+            title: "Resumo do turno impresso",
+            message: options.reprint ? "Resumo reenviado para impressão." : "Resumo enviado para impressão.",
+            detail: result.message || `Impresso em ${result.printer}.`,
+            printer: result.printer,
+            printedAt: result.printedAt,
+            payloadPath: result.payloadPath ?? current.payloadPath ?? null
+          }
+        : current);
+      onSystemMessage(`Resumo do turno enviado para ${result.printer}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível imprimir o resumo do turno.";
+
+      setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
+        ? {
+            ...current,
+            tone: "error",
+            title: "Falha ao imprimir resumo",
+            message: "Não foi possível enviar o resumo.",
+            detail: message
+          }
+        : current);
+      onSystemMessage(`Não foi possível imprimir o resumo do turno: ${message}`);
+    } finally {
+      shiftSummaryPrintingLockRef.current = false;
+      setIsShiftSummaryPrinting(false);
+    }
+  }
+
+  async function printShiftSummaryOnClose(snapshot: ShiftSummaryPrintSnapshot) {
+    const printerName = await getShiftSummaryPrinterName();
+    const payload = buildShiftSummaryReceiptPayload({
+      fiscalSettings: accountFiscalSettings,
+      pdvIdentity,
+      printerName,
+      snapshot
+    });
+    const modalState: ShiftSummaryPrintModalState = {
+      tone: "pending",
+      title: "Imprimindo resumo do turno",
+      message: "Enviando para a impressora",
+      detail: null,
+      snapshot,
+      payload
+    };
+
+    setShiftSummaryPrintModal(modalState);
+    onSystemMessage("Imprimindo resumo do turno...");
+    await runShiftSummaryPrint(modalState);
+  }
+
+  function printShiftSummaryFromModal() {
+    if (!shiftSummaryPrintModal) {
+      return;
+    }
+
+    void runShiftSummaryPrint(shiftSummaryPrintModal, { reprint: true });
+  }
+
   useEffect(() => {
     let shouldIgnore = false;
     const store = getLocalPdvStore();
@@ -4809,6 +5254,9 @@ export function DesktopCashierFlow({
         const nextCommandSettings = initialSettings
           ? normalizeCommandSettings(initialSettings.comandas)
           : normalizeCommandSettings(savedState.commandSettings);
+        const nextShiftSummarySettings = initialSettings
+          ? normalizeShiftSummarySettings(initialSettings.resumo_turno)
+          : normalizeShiftSummarySettings(savedState.shiftSummarySettings);
         const nextExpenseSettings = initialSettings
           ? normalizeExpenseSettings(initialSettings.lancar_despesas)
           : normalizeExpenseSettings(savedState.expenseSettings);
@@ -4816,8 +5264,10 @@ export function DesktopCashierFlow({
           ? normalizeEmployeeControlSettings(initialSettings.controle_funcionarios)
           : normalizeEmployeeControlSettings(savedState.employeeControlSettings);
         setCommandSettings(nextCommandSettings);
+        setShiftSummarySettings(nextShiftSummarySettings);
         setExpenseSettings(nextExpenseSettings);
         setEmployeeControlSettings(nextEmployeeControlSettings);
+        setAccountFiscalSettings(initialSettings ? asRecord(initialSettings.fiscal) ?? null : null);
         setEmployees(initialSettings ? mergeEmployees((initialEmployees ?? []).map(mapEmployee)) : mergeEmployees(savedState.employees ?? []));
         setCommands(nextCommandSettings.ativo ? savedState.commands ?? [] : []);
         setExpenses(savedState.expenses ?? []);
@@ -4933,6 +5383,7 @@ export function DesktopCashierFlow({
     catalogProducts,
     catalogCategories,
     commandSettings,
+    shiftSummarySettings,
     expenseSettings,
     employeeControlSettings,
     paymentSettings
@@ -4990,7 +5441,7 @@ export function DesktopCashierFlow({
   }, [isExpensesEnabled, onSystemMessage, session, view]);
 
   useEffect(() => {
-    if (session || view !== "menu") {
+    if (session || view !== "menu" || shiftSummaryPrintModal) {
       return;
     }
 
@@ -5015,7 +5466,7 @@ export function DesktopCashierFlow({
     return () => {
       window.removeEventListener("keydown", handleOpenTurnShortcut);
     };
-  }, [session, view]);
+  }, [session, shiftSummaryPrintModal, view]);
 
   useEffect(() => {
     if (
@@ -5035,6 +5486,7 @@ export function DesktopCashierFlow({
       selectedSale ||
       completedSale ||
       completedAgreementReceipt ||
+      shiftSummaryPrintModal ||
       saleCancelRequest
     ) {
       return;
@@ -5101,6 +5553,7 @@ export function DesktopCashierFlow({
     selectedSale,
     completedSale,
     completedAgreementReceipt,
+    shiftSummaryPrintModal,
     saleCancelRequest,
     frontCashAgreementClients.length,
     isCommandsEnabled,
@@ -5128,6 +5581,7 @@ export function DesktopCashierFlow({
       selectedSale ||
       completedSale ||
       completedAgreementReceipt ||
+      shiftSummaryPrintModal ||
       saleCancelRequest
     ) {
       return;
@@ -5178,6 +5632,7 @@ export function DesktopCashierFlow({
     selectedSale,
     completedSale,
     completedAgreementReceipt,
+    shiftSummaryPrintModal,
     saleCancelRequest,
     openProductPicker
   ]);
@@ -5280,6 +5735,18 @@ export function DesktopCashierFlow({
       closedByEmployeeId: employee?.id ?? null,
       closedByEmployeeName: employee?.name ?? null
     };
+    const shiftSummarySnapshot: ShiftSummaryPrintSnapshot = {
+      session: closedSession,
+      sales: sessionActiveSales,
+      expenses: sessionExpenseRecords,
+      agreementReceipts: sessionAgreementReceipts,
+      salesByPayment: sessionSalesByPayment,
+      totals: {
+        salesCents: sessionSales,
+        expensesCents: sessionExpenses,
+        expectedCashCents
+      }
+    };
 
     setSession(null);
     setCartItems([]);
@@ -5305,6 +5772,9 @@ export function DesktopCashierFlow({
         expectedCashCents
       }
     });
+    if (isShiftSummaryPrintEnabled) {
+      void printShiftSummaryOnClose(shiftSummarySnapshot);
+    }
     void resolvePreviewShiftNumber().then(setPreviewShiftNumber);
   }
 
@@ -6497,6 +6967,14 @@ export function DesktopCashierFlow({
             state={fiscalEmissionModal}
             onClose={() => setFiscalEmissionModal(null)}
             onPrint={printFiscalDocumentFromModal}
+          />
+        ) : null}
+        {shiftSummaryPrintModal ? (
+          <ShiftSummaryPrintModal
+            isPrinting={isShiftSummaryPrinting}
+            state={shiftSummaryPrintModal}
+            onClose={() => setShiftSummaryPrintModal(null)}
+            onPrint={printShiftSummaryFromModal}
           />
         ) : null}
         {completedAgreementReceipt ? (
@@ -8481,6 +8959,71 @@ function FiscalEmissionModal({
           <div>
             <strong>{state.message}</strong>
             <span>{fiscalNumberLabel}</span>
+          </div>
+        </section>
+
+        {detail ? (
+          <p className="pdv-fiscal-emission-detail">{detail}</p>
+        ) : null}
+      </div>
+    </CashierModal>
+  );
+}
+
+function ShiftSummaryPrintModal({
+  state,
+  isPrinting,
+  onClose,
+  onPrint
+}: {
+  state: ShiftSummaryPrintModalState;
+  isPrinting: boolean;
+  onClose: () => void;
+  onPrint: () => void;
+}) {
+  const canClose = state.tone !== "pending";
+  const toneClassName = `pdv-fiscal-emission-${state.tone}`;
+  const Icon = state.tone === "success"
+    ? Check
+    : state.tone === "pending"
+      ? LoaderCircle
+      : AlertTriangle;
+  const statusLabel = state.printedAt
+    ? `Impresso em ${formatReceiptDateTime(state.printedAt)}`
+    : `Turno ${state.snapshot.session.shiftNumber}`;
+  const detail = state.printer && state.detail && !state.detail.includes(state.printer)
+    ? `${state.detail} Impressora: ${state.printer}.`
+    : state.detail;
+
+  return (
+    <CashierModal
+      title={state.title}
+      description="Fechamento de turno concluído."
+      dismissible={canClose}
+      size="sm"
+      onClose={onClose}
+      footer={
+        canClose ? (
+          <>
+            <button className="pdv-secondary-action pdv-fiscal-close-action" type="button" onClick={onClose}>
+              Fechar
+            </button>
+            <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
+              {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+              {isPrinting ? "Reimprimindo" : "Reimprimir resumo"}
+            </button>
+          </>
+        ) : null
+      }
+    >
+      <div className={`pdv-fiscal-emission pdv-shift-summary-print ${toneClassName}`}>
+        <section className="pdv-fiscal-emission-status" aria-live="polite">
+          <span className="pdv-fiscal-emission-icon" aria-hidden="true">
+            <Icon className={state.tone === "pending" ? "pdv-spin" : undefined} size={22} strokeWidth={2.6} />
+          </span>
+          <div>
+            <strong>{state.message}</strong>
+            <span>{statusLabel}</span>
           </div>
         </section>
 

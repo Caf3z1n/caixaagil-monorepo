@@ -46,6 +46,13 @@ ConfiguracaoSistema.init(
         ativo: false,
       },
     },
+    resumo_turno: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {
+        ativo: false,
+      },
+    },
     fiscal: {
       type: DataTypes.JSONB,
       allowNull: false,

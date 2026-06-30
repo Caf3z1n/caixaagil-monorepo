@@ -161,7 +161,7 @@ function getBillingBlockedMessage(billingStatus) {
 }
 
 function isPdvOperationalEventType(eventType) {
-  return eventType === 'turno_aberto' || eventType === 'venda_concluida';
+  return eventType === 'venda_concluida';
 }
 
 async function getPdvRegistrosVinculados(usuarioId, pdvId) {

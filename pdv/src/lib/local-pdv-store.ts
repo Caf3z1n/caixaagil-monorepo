@@ -99,6 +99,30 @@ export type PdvUpdateStatus = {
   bytesPerSecond?: number | null;
 };
 
+export type NonFiscalReceiptPayload = {
+  type: string;
+  title: string;
+  subtitle?: string;
+  companyName: string;
+  companyLines?: string[];
+  highlightLabel?: string;
+  highlightValue?: string;
+  fields?: Array<{ label: string; value: string }>;
+  sections?: Array<{ title: string; kind: "text" | "preformatted"; content: string }>;
+  footerNote?: string;
+  signatureLabel?: string;
+  signatureName?: string;
+  printerName?: string;
+  preferredPrinterPatterns?: string[];
+};
+
+export type PrintShiftSummaryResult = {
+  printer: string;
+  message: string;
+  payloadPath?: string;
+  printedAt: string;
+};
+
 export type LocalPdvStoreBridge = {
   loadState<TState>(payload: { scope: string }): Promise<TState | null>;
   saveState(payload: { scope: string; state: unknown }): Promise<{ ok: true; updatedAt: string }>;
@@ -157,6 +181,10 @@ export type LocalPdvStoreBridge = {
     chave?: string;
     status?: string;
   }): Promise<FiscalDocumentRecord[]>;
+  printShiftSummary?(payload: {
+    documentKey?: string;
+    payload: NonFiscalReceiptPayload;
+  }): Promise<PrintShiftSummaryResult>;
   getUpdateStatus?(): Promise<PdvUpdateStatus>;
   checkForUpdates?(): Promise<PdvUpdateStatus>;
   downloadUpdate?(): Promise<PdvUpdateStatus>;
@@ -649,6 +677,10 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
 
       writeJson(getFiscalDocumentsKey(scope), nextDocuments);
       return { ok: true, updated };
+    },
+
+    async printShiftSummary() {
+      throw new Error("Impressão do resumo do turno disponível apenas no app desktop.");
     }
   };
 }

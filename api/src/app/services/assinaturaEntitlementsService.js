@@ -1,5 +1,6 @@
-const { Assinatura, Pdv, Subconta } = require('../models');
+const { Pdv, Subconta } = require('../models');
 const { getBillingStatus } = require('./assinaturaInadimplenciaService');
+const { findSubscriptionForPlatformAccess } = require('./assinaturaAccessService');
 const { buildPlanoSnapshot, getPlano } = require('./planosService');
 
 const FEATURE_MESSAGES = {
@@ -64,13 +65,7 @@ function createEntitlementError(code, message, entitlements, statusCode = 403) {
 }
 
 async function getActiveSubscription(usuarioId) {
-  return Assinatura.findOne({
-    where: {
-      usuario_id: usuarioId,
-      status: 'ativa',
-    },
-    order: [['id', 'DESC']],
-  });
+  return findSubscriptionForPlatformAccess(usuarioId);
 }
 
 async function getUsage(usuarioId) {

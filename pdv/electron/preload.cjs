@@ -86,6 +86,9 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   listFiscalDocuments(payload) {
     return ipcRenderer.invoke("pdv-fiscal:list-documents", payload);
   },
+  printShiftSummary(payload) {
+    return ipcRenderer.invoke("pdv-print:shift-summary", payload);
+  },
   getUpdateStatus() {
     return ipcRenderer.invoke("pdv-update:get-status");
   },

@@ -19,6 +19,7 @@ import {
   HandCoins,
   LoaderCircle,
   PlugZap,
+  Printer,
   QrCode,
   ReceiptText,
   Settings2,
@@ -51,13 +52,23 @@ type PaymentSettings = Record<PaymentMethodKey, boolean>;
 type CommandSettings = {
   ativo: boolean;
 };
+type ShiftSummarySettings = {
+  ativo: boolean;
+};
 type ExpenseSettings = {
   ativo: boolean;
 };
 type EmployeeSettings = {
   ativo: boolean;
 };
-type ConfigurationFlowStep = "menu" | "payments" | "integrations" | "cnpjaIntegration" | "fiscalCompany" | "fiscalIssuance";
+type ConfigurationFlowStep =
+  | "menu"
+  | "preferences"
+  | "payments"
+  | "integrations"
+  | "cnpjaIntegration"
+  | "fiscalCompany"
+  | "fiscalIssuance";
 type ConfigurationFlowMotion = "forward" | "backward";
 
 type IntegrationSettings = {
@@ -70,6 +81,7 @@ type IntegrationSettings = {
 type ConfiguracaoSistema = {
   formas_pagamento: Partial<PaymentSettings>;
   comandas?: Partial<CommandSettings> | null;
+  resumo_turno?: Partial<ShiftSummarySettings> | null;
   lancar_despesas?: Partial<ExpenseSettings> | null;
   controle_funcionarios?: Partial<EmployeeSettings> | null;
   fiscal?: Partial<FiscalSettings> | null;
@@ -81,7 +93,7 @@ type ConfigurationArea = {
   title: string;
   description: string;
   icon: LucideIcon;
-  feature?: "commands" | "convenios" | "employees" | "expenses";
+  feature?: "convenios" | "employees" | "expenses";
   step?: ConfigurationFlowStep;
 };
 
@@ -104,6 +116,10 @@ const defaultPaymentSettings: PaymentSettings = {
 };
 
 const defaultCommandSettings: CommandSettings = {
+  ativo: false
+};
+
+const defaultShiftSummarySettings: ShiftSummarySettings = {
   ativo: false
 };
 
@@ -173,6 +189,12 @@ function normalizePaymentSettings(value?: Partial<PaymentSettings> | null): Paym
 }
 
 function normalizeCommandSettings(value?: Partial<CommandSettings> | null): CommandSettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
+function normalizeShiftSummarySettings(value?: Partial<ShiftSummarySettings> | null): ShiftSummarySettings {
   return {
     ativo: value?.ativo === true
   };
@@ -412,6 +434,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const [flowMotion, setFlowMotion] = useState<ConfigurationFlowMotion>("forward");
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
   const [commandSettings, setCommandSettings] = useState<CommandSettings>(defaultCommandSettings);
+  const [shiftSummarySettings, setShiftSummarySettings] = useState<ShiftSummarySettings>(defaultShiftSummarySettings);
   const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(defaultExpenseSettings);
   const [employeeSettings, setEmployeeSettings] = useState<EmployeeSettings>(defaultEmployeeSettings);
   const [fiscalSettings, setFiscalSettings] = useState<FiscalSettings>(defaultFiscalSettings);
@@ -420,6 +443,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [savingMethod, setSavingMethod] = useState<PaymentMethodKey | null>(null);
   const [isSavingCommands, setIsSavingCommands] = useState(false);
+  const [isSavingShiftSummary, setIsSavingShiftSummary] = useState(false);
   const [isSavingExpenses, setIsSavingExpenses] = useState(false);
   const [isSavingEmployees, setIsSavingEmployees] = useState(false);
   const [isSavingFiscalEmission, setIsSavingFiscalEmission] = useState(false);
@@ -447,6 +471,12 @@ export default function MeuSistemaConfiguracoesPage() {
       title: "PDV",
       areas: [
         {
+          title: "Preferências do PDV",
+          description: "Comandas e impressões do caixa.",
+          icon: Settings2,
+          step: "preferences"
+        },
+        {
           title: "Formas de pagamento",
           description: "Recebimentos habilitados no PDV.",
           icon: CreditCard,
@@ -457,12 +487,6 @@ export default function MeuSistemaConfiguracoesPage() {
           description: "Permissões e identificação no caixa.",
           icon: BadgeCheck,
           feature: "employees"
-        },
-        {
-          title: "Comandas",
-          description: "Criação de comandas no PDV.",
-          icon: ReceiptText,
-          feature: "commands"
         },
         {
           title: "Despesas",
@@ -533,6 +557,7 @@ export default function MeuSistemaConfiguracoesPage() {
 
         setPaymentSettings(normalizePaymentSettings(configuracao.formas_pagamento));
         setCommandSettings(normalizeCommandSettings(configuracao.comandas));
+        setShiftSummarySettings(normalizeShiftSummarySettings(configuracao.resumo_turno));
         setExpenseSettings(normalizeExpenseSettings(configuracao.lancar_despesas));
         setEmployeeSettings(normalizeEmployeeSettings(configuracao.controle_funcionarios));
         setFiscalSettings(normalizeFiscalSettings(configuracao.fiscal));
@@ -764,6 +789,56 @@ export default function MeuSistemaConfiguracoesPage() {
     }
   }
 
+  async function updateShiftSummarySettings(active: boolean) {
+    if (isSavingShiftSummary) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const previousSettings = shiftSummarySettings;
+    const nextSettings = { ativo: active };
+
+    setShiftSummarySettings(nextSettings);
+    setIsSavingShiftSummary(true);
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/resumo-turno",
+        {
+          resumo_turno: nextSettings
+        },
+        { token }
+      );
+
+      setShiftSummarySettings(normalizeShiftSummarySettings(configuracao.resumo_turno));
+      setFeedback({
+        tone: "success",
+        message: active ? "Resumo do turno ativado." : "Resumo do turno desativado."
+      });
+    } catch (error) {
+      setShiftSummarySettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar o resumo do turno."
+      });
+    } finally {
+      setIsSavingShiftSummary(false);
+    }
+  }
+
   async function updateExpenseSettings(active: boolean) {
     if (isSavingExpenses) {
       return;
@@ -991,7 +1066,6 @@ export default function MeuSistemaConfiguracoesPage() {
                         {section.areas.map(area => {
                           const Icon = area.icon;
                           const targetStep = area.step;
-                          const isCommandsArea = area.feature === "commands";
                           const isEmployeesArea = area.feature === "employees";
                           const isExpensesArea = area.feature === "expenses";
                           const isConveniosArea = area.feature === "convenios";
@@ -1077,57 +1151,6 @@ export default function MeuSistemaConfiguracoesPage() {
                                 >
                                   <span className="configuration-switch" aria-hidden="true">
                                     {isSavingEmployees ? (
-                                      <LoaderCircle className="configuration-switch-loader" size={15} />
-                                    ) : (
-                                      <span />
-                                    )}
-                                  </span>
-                                </button>
-                              </article>
-                            );
-                          }
-
-                          if (isCommandsArea) {
-                            const isCommandsActive = commandSettings.ativo;
-
-                            return (
-                              <article
-                                className={
-                                  isCommandsActive
-                                    ? "configuration-setting-row configuration-setting-fiscal-option"
-                                    : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
-                                }
-                                key={area.title}
-                                onBlur={stopConfigurationWave}
-                                onPointerEnter={startConfigurationPointerWave}
-                                onPointerLeave={stopConfigurationWave}
-                              >
-                                <span className="configuration-setting-fiscal-entry configuration-setting-fiscal-entry-static">
-                                  <span className="configuration-setting-icon" aria-hidden="true">
-                                    <Icon size={19} />
-                                  </span>
-
-                                  <span className="configuration-setting-copy">
-                                    <strong>{area.title}</strong>
-                                    <small>{area.description}</small>
-                                  </span>
-                                </span>
-
-                                <button
-                                  aria-checked={isCommandsActive}
-                                  aria-label={isCommandsActive ? "Desativar comandas" : "Ativar comandas"}
-                                  className={
-                                    isCommandsActive
-                                      ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
-                                      : "configuration-setting-fiscal-toggle"
-                                  }
-                                  disabled={isLoading || isSavingCommands}
-                                  role="switch"
-                                  type="button"
-                                  onClick={() => void updateCommandSettings(!isCommandsActive)}
-                                >
-                                  <span className="configuration-switch" aria-hidden="true">
-                                    {isSavingCommands ? (
                                       <LoaderCircle className="configuration-switch-loader" size={15} />
                                     ) : (
                                       <span />
@@ -1379,6 +1402,127 @@ export default function MeuSistemaConfiguracoesPage() {
                     </section>
                   ))}
                 </div>
+              </div>
+            ) : null}
+
+            {flowStep === "preferences" ? (
+              <div className={`${flowPanelClassName} configuration-payment-panel`} key="preferences">
+                <header className="platform-flow-head configuration-flow-head">
+                  <h1>Preferências do PDV</h1>
+                  <p>Comportamento do caixa durante a operação.</p>
+                </header>
+
+                {feedback ? (
+                  <div className={`auth-feedback auth-feedback-${feedback.tone} configuration-feedback`} role="status">
+                    <span className="auth-feedback-marker">
+                      {feedback.tone === "success" ? (
+                        <Check aria-hidden="true" size={17} />
+                      ) : (
+                        <AlertTriangle aria-hidden="true" size={17} />
+                      )}
+                    </span>
+                    <span className="auth-feedback-copy">
+                      <strong>{feedback.message}</strong>
+                    </span>
+                  </div>
+                ) : null}
+
+                {isLoading ? (
+                  <div className="configuration-payment-skeleton" aria-live="polite">
+                    <span />
+                    <span />
+                  </div>
+                ) : (
+                  <div className="configuration-setting-list">
+                    <article
+                      className={
+                        commandSettings.ativo
+                          ? "configuration-setting-row configuration-setting-fiscal-option"
+                          : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                      }
+                      onBlur={stopConfigurationWave}
+                      onPointerEnter={startConfigurationPointerWave}
+                      onPointerLeave={stopConfigurationWave}
+                    >
+                      <span className="configuration-setting-fiscal-entry configuration-setting-fiscal-entry-static">
+                        <span className="configuration-setting-icon" aria-hidden="true">
+                          <ReceiptText size={19} />
+                        </span>
+
+                        <span className="configuration-setting-copy">
+                          <strong>Comandas</strong>
+                          <small>Criação de comandas no PDV.</small>
+                        </span>
+                      </span>
+
+                      <button
+                        aria-checked={commandSettings.ativo}
+                        aria-label={commandSettings.ativo ? "Desativar comandas" : "Ativar comandas"}
+                        className={
+                          commandSettings.ativo
+                            ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                            : "configuration-setting-fiscal-toggle"
+                        }
+                        disabled={isLoading || isSavingCommands}
+                        role="switch"
+                        type="button"
+                        onClick={() => void updateCommandSettings(!commandSettings.ativo)}
+                      >
+                        <span className="configuration-switch" aria-hidden="true">
+                          {isSavingCommands ? (
+                            <LoaderCircle className="configuration-switch-loader" size={15} />
+                          ) : (
+                            <span />
+                          )}
+                        </span>
+                      </button>
+                    </article>
+
+                    <article
+                      className={
+                        shiftSummarySettings.ativo
+                          ? "configuration-setting-row configuration-setting-fiscal-option"
+                          : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                      }
+                      onBlur={stopConfigurationWave}
+                      onPointerEnter={startConfigurationPointerWave}
+                      onPointerLeave={stopConfigurationWave}
+                    >
+                      <span className="configuration-setting-fiscal-entry configuration-setting-fiscal-entry-static">
+                        <span className="configuration-setting-icon" aria-hidden="true">
+                          <Printer size={19} />
+                        </span>
+
+                        <span className="configuration-setting-copy">
+                          <strong>Resumo do turno</strong>
+                          <small>Imprimir no fechamento do caixa</small>
+                        </span>
+                      </span>
+
+                      <button
+                        aria-checked={shiftSummarySettings.ativo}
+                        aria-label={shiftSummarySettings.ativo ? "Desativar resumo do turno" : "Ativar resumo do turno"}
+                        className={
+                          shiftSummarySettings.ativo
+                            ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                            : "configuration-setting-fiscal-toggle"
+                        }
+                        disabled={isLoading || isSavingShiftSummary}
+                        role="switch"
+                        type="button"
+                        onClick={() => void updateShiftSummarySettings(!shiftSummarySettings.ativo)}
+                      >
+                        <span className="configuration-switch" aria-hidden="true">
+                          {isSavingShiftSummary ? (
+                            <LoaderCircle className="configuration-switch-loader" size={15} />
+                          ) : (
+                            <span />
+                          )}
+                        </span>
+                      </button>
+                    </article>
+                  </div>
+                )}
               </div>
             ) : null}
 

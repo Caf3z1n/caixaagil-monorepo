@@ -1,5 +1,9 @@
 const { Op } = require('sequelize');
 const { Assinatura, PagamentoAssinatura } = require('../models');
+const {
+  hasSubscriptionActivationEvidence,
+  selectSubscriptionReference,
+} = require('./assinaturaAccessService');
 
 const DIAS_TOLERANCIA_BLOQUEIO = 7;
 const UM_DIA_MS = 24 * 60 * 60 * 1000;
@@ -174,8 +178,13 @@ function calcularReguaInadimplencia({ assinatura, pagamentos = [], now = new Dat
     .filter(Boolean)
     .filter(pagamento => !pagamento.assinatura_id || Number(pagamento.assinatura_id) === Number(data.id));
   const pagamentoReferencia = getPagamentoReferencia(pagamentosDaAssinatura);
+  const assinaturaTemHistoricoOperacional =
+    hasSubscriptionActivationEvidence(data) || pagamentosDaAssinatura.some(isPagamentoAprovado);
 
-  if (STATUS_ASSINATURA_BLOQUEADOS.has(statusAssinatura)) {
+  if (
+    STATUS_ASSINATURA_BLOQUEADOS.has(statusAssinatura) &&
+    !(statusAssinatura === 'pagamento_falhou' && assinaturaTemHistoricoOperacional)
+  ) {
     return buildBillingStatus({
       assinatura: data,
       bloqueado: true,
@@ -187,7 +196,10 @@ function calcularReguaInadimplencia({ assinatura, pagamentos = [], now = new Dat
     });
   }
 
-  if (STATUS_ASSINATURA_SEM_OPERACAO.has(statusAssinatura)) {
+  if (
+    STATUS_ASSINATURA_SEM_OPERACAO.has(statusAssinatura) &&
+    !(statusAssinatura === 'pagamento_falhou' && assinaturaTemHistoricoOperacional)
+  ) {
     return buildBillingStatus({
       assinatura: data,
       bloqueado: true,
@@ -304,7 +316,7 @@ async function findAssinaturaReferencia(usuarioId) {
   });
   const plainAssinaturas = assinaturas.map(toPlain);
 
-  return plainAssinaturas.find(assinatura => normalizeStatus(assinatura.status) === 'ativa') || plainAssinaturas[0] || null;
+  return selectSubscriptionReference(plainAssinaturas);
 }
 
 async function getBillingStatus(usuarioId, options = {}) {
