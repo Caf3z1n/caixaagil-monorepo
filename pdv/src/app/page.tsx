@@ -11,9 +11,10 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiPost } from "@/lib/api-client";
-import { getLocalPdvStore, type PdvUpdateStatus } from "@/lib/local-pdv-store";
+import { getLocalPdvStore, type PdvRemoteSupportStatus, type PdvUpdateStatus } from "@/lib/local-pdv-store";
 import { applyStoredPdvAppScale } from "@/lib/pdv-app-scale";
 import { DesktopCashierFlow } from "./cashier-flow";
+import { CashierModal } from "./cashier-modal";
 import {
   PdvUpdateModal,
   pdvUpdatePreviewStatus,
@@ -94,6 +95,27 @@ type SessionResponse = {
   configuracoes?: ApiPdvSettings | null;
   funcionarios?: ApiEmployee[];
   billing_status?: BillingStatus | null;
+};
+
+type RemoteSupportConfigResponse = {
+  provider: "rustdesk" | string;
+  servidor: string;
+  relay_servidor?: string | null;
+  chave_publica?: string | null;
+  config_string: string;
+  instalador: {
+    url: string;
+    sha256: string;
+  };
+};
+
+type RemoteSupportApiStatusResponse = {
+  suporte_remoto: {
+    status: string;
+    rustdesk_id?: string | null;
+    versao?: string | null;
+    erro?: string | null;
+  };
 };
 
 const progressSteps: Array<{ id: PdvStep; label: string }> = [
@@ -244,6 +266,10 @@ export default function PdvActivationPage() {
   const [isStartupUpdateActionRunning, setIsStartupUpdateActionRunning] = useState(false);
   const [dismissedStartupUpdateVersion, setDismissedStartupUpdateVersion] = useState<string | null>(null);
   const [isActivating, setIsActivating] = useState(false);
+  const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
+  const [isSupportConfiguring, setIsSupportConfiguring] = useState(false);
+  const [supportStatus, setSupportStatus] = useState<PdvRemoteSupportStatus | null>(null);
+  const [supportMessage, setSupportMessage] = useState("");
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
   const [initialPdvSettings, setInitialPdvSettings] = useState<ApiPdvSettings | null>(null);
   const [initialEmployees, setInitialEmployees] = useState<ApiEmployee[]>([]);
@@ -587,6 +613,93 @@ export default function PdvActivationPage() {
     }
   }
 
+  function getDesktopCredentialPayload() {
+    return {
+      credencial_dispositivo: getStoredCredential(),
+      dispositivo_id: getDeviceId()
+    };
+  }
+
+  async function reportRemoteSupportStatus(payload: Record<string, unknown>) {
+    const credentialPayload = getDesktopCredentialPayload();
+
+    if (!credentialPayload.credencial_dispositivo) {
+      return null;
+    }
+
+    return apiPost<RemoteSupportApiStatusResponse>("/pdvs/suporte-remoto/status", {
+      ...credentialPayload,
+      ...payload
+    });
+  }
+
+  async function configureRemoteSupport() {
+    const credentialPayload = getDesktopCredentialPayload();
+
+    if (!credentialPayload.credencial_dispositivo) {
+      setSupportMessage("Ative o PDV antes de configurar o suporte remoto.");
+      return;
+    }
+
+    const store = getLocalPdvStore();
+
+    if (!store?.installRustDeskSupport) {
+      setSupportStatus({ status: "erro", error: "Este ambiente não permite instalação automática do RustDesk." });
+      setSupportMessage("Instalação automática disponível apenas no app desktop do Windows.");
+      await reportRemoteSupportStatus({
+        status: "erro",
+        erro: "Instalação automática indisponível neste ambiente."
+      }).catch(() => null);
+      return;
+    }
+
+    setIsSupportConfiguring(true);
+    setSupportMessage("");
+    setSupportStatus({ status: "configurando", error: null });
+
+    try {
+      await reportRemoteSupportStatus({ status: "configurando" }).catch(() => null);
+      const config = await apiPost<RemoteSupportConfigResponse>("/pdvs/suporte-remoto/config", credentialPayload);
+      const result = await store.installRustDeskSupport({
+        installerUrl: config.instalador.url,
+        installerSha256: config.instalador.sha256,
+        configString: config.config_string
+      });
+
+      setSupportStatus(result);
+
+      if (result.status === "configurado" && result.rustdeskId && result.password) {
+        const response = await reportRemoteSupportStatus({
+          status: "configurado",
+          rustdesk_id: result.rustdeskId,
+          senha: result.password,
+          versao: result.version,
+          servidor: config.servidor
+        });
+
+        setSupportMessage(`RustDesk configurado. ID ${response?.suporte_remoto.rustdesk_id ?? result.rustdeskId}.`);
+        return;
+      }
+
+      const errorMessage = result.error || "Não foi possível configurar o RustDesk.";
+      setSupportMessage(errorMessage);
+      await reportRemoteSupportStatus({
+        status: "erro",
+        erro: errorMessage
+      }).catch(() => null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Não foi possível configurar o suporte remoto.";
+      setSupportStatus({ status: "erro", error: errorMessage });
+      setSupportMessage(errorMessage);
+      await reportRemoteSupportStatus({
+        status: "erro",
+        erro: errorMessage
+      }).catch(() => null);
+    } finally {
+      setIsSupportConfiguring(false);
+    }
+  }
+
   async function activatePdv() {
     if (!canActivate) {
       setStatusMessage("Informe o código de ativação com 6 caracteres.");
@@ -610,6 +723,7 @@ export default function PdvActivationPage() {
       setInitialBillingStatus(response.billing_status ?? null);
       setConnectivity("online");
       goToStep("success");
+      setIsSupportModalOpen(true);
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Não foi possível ativar este PDV.");
     } finally {
@@ -709,7 +823,11 @@ export default function PdvActivationPage() {
             : "Este computador já pode iniciar a operação do caixa."}
         </p>
 
-        <div className="pdv-onboarding-action-row pdv-onboarding-action-row-single">
+        <div className="pdv-onboarding-action-row">
+          <button className="pdv-onboarding-secondary" type="button" onClick={() => setIsSupportModalOpen(true)}>
+            Suporte remoto
+            <ShieldCheck aria-hidden="true" size={17} />
+          </button>
           <button className="pdv-onboarding-primary" type="button" onClick={enterSystem}>
             Abrir sistema
             <ArrowRight aria-hidden="true" size={18} />
@@ -775,6 +893,7 @@ export default function PdvActivationPage() {
   }
 
   return (
+    <>
     <main className="pdv-onboarding-page">
       <PdvScaleSurface centered>
         <section className="pdv-onboarding-card" aria-label="Ativação do Caixa Ágil PDV">
@@ -814,5 +933,73 @@ export default function PdvActivationPage() {
         </section>
       </PdvScaleSurface>
     </main>
+
+      {isSupportModalOpen ? (
+        <CashierModal
+          description="Instale e configure o RustDesk deste computador para atendimento remoto."
+          dismissible={!isSupportConfiguring}
+          headingIcon={<ShieldCheck aria-hidden="true" size={22} />}
+          onClose={() => setIsSupportModalOpen(false)}
+          title="Suporte remoto"
+        >
+          <div className="pdv-support-modal-content">
+            <div className={`pdv-support-status-card pdv-support-status-${supportStatus?.status ?? "nao_configurado"}`}>
+              <span className="pdv-support-status-icon" aria-hidden="true">
+                {isSupportConfiguring || supportStatus?.status === "configurando" ? (
+                  <LoaderCircle className="pdv-spin" size={20} />
+                ) : supportStatus?.status === "configurado" ? (
+                  <Check size={20} />
+                ) : (
+                  <ShieldCheck size={20} />
+                )}
+              </span>
+              <span>
+                <strong>
+                  {supportStatus?.status === "configurado"
+                    ? "RustDesk configurado"
+                    : supportStatus?.status === "erro"
+                      ? "Configuração incompleta"
+                      : isSupportConfiguring
+                        ? "Configurando RustDesk"
+                        : "Aguardando configuração"}
+                </strong>
+                <small>
+                  {supportMessage ||
+                    (supportStatus?.rustdeskId
+                      ? `ID ${supportStatus.rustdeskId}`
+                      : "A instalação pode solicitar permissão de administrador do Windows.")}
+                </small>
+              </span>
+            </div>
+
+            {supportStatus?.error ? <p className="pdv-support-error">{supportStatus.error}</p> : null}
+          </div>
+
+          <div className="pdv-modal-footer-actions">
+            <button
+              className="pdv-onboarding-secondary"
+              disabled={isSupportConfiguring}
+              type="button"
+              onClick={() => setIsSupportModalOpen(false)}
+            >
+              Pular por enquanto
+            </button>
+            <button
+              className="pdv-onboarding-primary"
+              disabled={isSupportConfiguring}
+              type="button"
+              onClick={() => void configureRemoteSupport()}
+            >
+              {isSupportConfiguring ? "Configurando" : supportStatus?.status === "configurado" ? "Reconfigurar" : "Configurar"}
+              {isSupportConfiguring ? (
+                <LoaderCircle aria-hidden="true" className="pdv-spin" size={18} />
+              ) : (
+                <ShieldCheck aria-hidden="true" size={18} />
+              )}
+            </button>
+          </div>
+        </CashierModal>
+      ) : null}
+    </>
   );
 }

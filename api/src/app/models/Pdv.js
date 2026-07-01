@@ -55,6 +55,11 @@ Pdv.init(
       allowNull: false,
       defaultValue: false,
     },
+    suporte_remoto: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {},
+    },
     ativo: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

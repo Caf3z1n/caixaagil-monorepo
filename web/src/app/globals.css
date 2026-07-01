@@ -16428,6 +16428,11 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   font-weight: 850;
 }
 
+.platform-device-state-muted {
+  color: var(--muted);
+  font-weight: 850;
+}
+
 .platform-access-meta b {
   font-size: 0.78rem;
   font-weight: 850;
@@ -16869,6 +16874,78 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   font-weight: 950;
   letter-spacing: 0.04em;
   line-height: 1.04;
+}
+
+.platform-remote-support-modal {
+  width: min(520px, 100%);
+}
+
+.platform-remote-support-credentials {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.platform-remote-support-field {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-height: 68px;
+  padding: 13px 48px 13px 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: oklch(0.99 0.002 248);
+}
+
+.platform-remote-support-field small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.platform-remote-support-field strong {
+  overflow-wrap: anywhere;
+  color: var(--ink-deep);
+  font-size: 0.98rem;
+  font-weight: 920;
+  line-height: 1.25;
+}
+
+.platform-remote-support-field button {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.platform-remote-support-field button:hover,
+.platform-remote-support-field button:focus-visible {
+  border-color: oklch(0.78 0.07 45);
+  color: var(--orange);
+}
+
+.platform-remote-support-skeleton {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.platform-remote-support-skeleton i {
+  display: block;
+  height: 68px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, oklch(0.94 0.006 245), oklch(0.982 0.004 245), oklch(0.94 0.006 245));
+  background-size: 240% 100%;
+  animation: platform-skeleton-shimmer 1.25s linear infinite;
 }
 
 .platform-danger-button {

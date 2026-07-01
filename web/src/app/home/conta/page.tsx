@@ -61,6 +61,18 @@ type PairingState = {
   pdvId: number;
 };
 
+type RemoteSupportSummary = {
+  provider?: string | null;
+  rustdesk_id?: string | null;
+  servidor?: string | null;
+  versao?: string | null;
+  status?: string | null;
+  configurado_em?: string | null;
+  ultimo_check_em?: string | null;
+  erro?: string | null;
+  senha_configurada?: boolean;
+};
+
 type Plano = {
   id: string;
   nome: string;
@@ -220,6 +232,7 @@ type Pdv = {
   registros_vinculados: number;
   pode_excluir: boolean;
   acao_remocao: "excluir" | "desativar";
+  suporte_remoto?: RemoteSupportSummary | null;
 };
 
 type Subconta = {
@@ -243,6 +256,15 @@ type ActivatePdvResponse = {
 
 type UnpairPdvResponse = {
   action: "unpaired";
+  pdv: Pdv;
+  message?: string;
+};
+
+type RemoteSupportCredentialsResponse = RemoteSupportSummary & {
+  senha?: string | null;
+};
+
+type RemoteSupportRotationResponse = {
   pdv: Pdv;
   message?: string;
 };
@@ -762,6 +784,38 @@ function formatPdvLastSync(pdv: Pdv) {
   );
 }
 
+function getRemoteSupportStatusLabel(support?: RemoteSupportSummary | null) {
+  const status = normalizeStatus(support?.status);
+
+  if (status === "configurado") {
+    return "Configurado";
+  }
+
+  if (status === "configurando") {
+    return "Pendente";
+  }
+
+  if (status === "erro") {
+    return "Erro";
+  }
+
+  return "Não configurado";
+}
+
+function getRemoteSupportStatusClass(support?: RemoteSupportSummary | null) {
+  const status = normalizeStatus(support?.status);
+
+  if (status === "configurado") {
+    return "platform-device-state-ok";
+  }
+
+  if (status === "erro") {
+    return "platform-device-state-danger";
+  }
+
+  return "platform-device-state-muted";
+}
+
 function getSubaccountStatusTone(subconta: Subconta) {
   return subconta.ativo ? "success" : "neutral";
 }
@@ -1018,6 +1072,10 @@ export default function PlatformAccountPage() {
   const [isPdvModalOpen, setIsPdvModalOpen] = useState(false);
   const [isPairingModalOpen, setIsPairingModalOpen] = useState(false);
   const [pdvToUnpair, setPdvToUnpair] = useState<Pdv | null>(null);
+  const [remoteSupportCredentialsPdv, setRemoteSupportCredentialsPdv] = useState<Pdv | null>(null);
+  const [remoteSupportCredentials, setRemoteSupportCredentials] = useState<RemoteSupportCredentialsResponse | null>(null);
+  const [isRemoteSupportLoading, setIsRemoteSupportLoading] = useState(false);
+  const [showRemoteSupportPassword, setShowRemoteSupportPassword] = useState(false);
   const [isSubaccountModalOpen, setIsSubaccountModalOpen] = useState(false);
   const [subaccountStep, setSubaccountStep] = useState<SubaccountStep>("email");
   const [subaccountForm, setSubaccountForm] = useState<SubaccountForm>(emptySubaccountForm);
@@ -1046,6 +1104,7 @@ export default function PlatformAccountPage() {
       isPdvModalOpen ||
       isPairingModalOpen ||
       pdvToUnpair ||
+      remoteSupportCredentialsPdv ||
       isSubaccountModalOpen
   );
   const accountModalPresence = useModalPresence(accountStep);
@@ -1056,6 +1115,8 @@ export default function PlatformAccountPage() {
   const pairingModalPresence = useModalPresence(isPairingModalOpen);
   const pdvUnpairPresence = useModalPresence(pdvToUnpair);
   const visiblePdvToUnpair = pdvUnpairPresence.presentValue;
+  const remoteSupportCredentialsPresence = useModalPresence(remoteSupportCredentialsPdv);
+  const visibleRemoteSupportCredentialsPdv = remoteSupportCredentialsPresence.presentValue;
   const subaccountModalPresence = useModalPresence(isSubaccountModalOpen);
   const hasVisibleModal =
     accountModalPresence.isPresent ||
@@ -1063,6 +1124,7 @@ export default function PlatformAccountPage() {
     pdvModalPresence.isPresent ||
     pairingModalPresence.isPresent ||
     pdvUnpairPresence.isPresent ||
+    remoteSupportCredentialsPresence.isPresent ||
     subaccountModalPresence.isPresent;
 
   const token = typeof window === "undefined" ? null : getStoredPlatformAuthToken();
@@ -1338,10 +1400,18 @@ export default function PlatformAccountPage() {
     setFeedback(null);
   }
 
+  function closeRemoteSupportModal() {
+    setRemoteSupportCredentialsPdv(null);
+    setRemoteSupportCredentials(null);
+    setShowRemoteSupportPassword(false);
+    setIsRemoteSupportLoading(false);
+  }
+
   function openCreatePdvModal() {
     setAccountStep(null);
     setSubscriptionStep(null);
     setIsSubaccountModalOpen(false);
+    closeRemoteSupportModal();
     setEditingPdvId(null);
     setPdvForm(emptyPdvForm);
     setFeedback(null);
@@ -1352,6 +1422,7 @@ export default function PlatformAccountPage() {
     setAccountStep(null);
     setSubscriptionStep(null);
     setIsSubaccountModalOpen(false);
+    closeRemoteSupportModal();
     setEditingPdvId(pdv.id);
     setSelectedPdvId(pdv.id);
     setPdvForm({ nome: pdv.nome });
@@ -1371,6 +1442,7 @@ export default function PlatformAccountPage() {
     setIsPdvModalOpen(false);
     setIsPairingModalOpen(false);
     setPdvToUnpair(null);
+    closeRemoteSupportModal();
     setSubaccountStep("email");
     setSubaccountForm(emptySubaccountForm);
     setShowSubaccountPassword(false);
@@ -1389,6 +1461,11 @@ export default function PlatformAccountPage() {
   }
 
   function closeTopAccountPageModal() {
+    if (remoteSupportCredentialsPdv) {
+      closeRemoteSupportModal();
+      return;
+    }
+
     if (pdvToUnpair) {
       setPdvToUnpair(null);
       return;
@@ -1535,6 +1612,69 @@ export default function PlatformAccountPage() {
       }, 1800);
     } catch {
       setFeedback({ message: `Copie manualmente: ${visiblePairing.codigo}`, tone: "neutral" });
+    }
+  }
+
+  async function copyRemoteSupportValue(value: string | null | undefined, successMessage: string, fallbackLabel: string) {
+    const trimmedValue = String(value || "").trim();
+
+    if (!trimmedValue) {
+      setFeedback({ message: `${fallbackLabel} indisponível para este PDV.`, tone: "danger" });
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(trimmedValue);
+      setFeedback({ message: successMessage, tone: "success" });
+    } catch {
+      setFeedback({ message: `${fallbackLabel}: ${trimmedValue}`, tone: "neutral" });
+    }
+  }
+
+  async function handleCopyRemoteSupportId(pdv: Pdv) {
+    await copyRemoteSupportValue(pdv.suporte_remoto?.rustdesk_id, "ID do RustDesk copiado.", "ID do RustDesk");
+  }
+
+  async function handleShowRemoteSupportCredentials(pdv: Pdv) {
+    if (!token) {
+      setFeedback({ message: "Entre novamente para ver a senha do suporte remoto.", tone: "danger" });
+      return;
+    }
+
+    setRemoteSupportCredentialsPdv(pdv);
+    setRemoteSupportCredentials(null);
+    setShowRemoteSupportPassword(false);
+    setIsRemoteSupportLoading(true);
+    setFeedback(null);
+
+    try {
+      const credentials = await apiGet<RemoteSupportCredentialsResponse>(`/pdvs/${pdv.id}/suporte-remoto/credenciais`, { token });
+      setRemoteSupportCredentials(credentials);
+    } catch (error) {
+      setFeedback({ message: getErrorMessage(error, "Não foi possível carregar as credenciais."), tone: "danger" });
+    } finally {
+      setIsRemoteSupportLoading(false);
+    }
+  }
+
+  async function handleRequestRemoteSupportRotation(pdv: Pdv) {
+    if (!token) {
+      setFeedback({ message: "Entre novamente para rotacionar a senha do suporte remoto.", tone: "danger" });
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      setFeedback(null);
+      const result = await apiPost<RemoteSupportRotationResponse>(`/pdvs/${pdv.id}/suporte-remoto/rotacionar`, {}, { token });
+
+      setPdvs((current) => current.map((item) => (item.id === result.pdv.id ? result.pdv : item)));
+      setSelectedPdvId(result.pdv.id);
+      setFeedback({ message: result.message || "Rotação solicitada.", tone: "success" });
+    } catch (error) {
+      setFeedback({ message: getErrorMessage(error, "Não foi possível solicitar a rotação."), tone: "danger" });
+    } finally {
+      setIsSaving(false);
     }
   }
 
@@ -2208,6 +2348,9 @@ export default function PlatformAccountPage() {
 
         <div className="platform-account-flow-body">
           {accessError ? <AuthFeedback tone="error">{accessError}</AuthFeedback> : null}
+          {feedback ? (
+            <AuthFeedback tone={feedback.tone === "danger" ? "error" : feedback.tone || "neutral"}>{feedback.message}</AuthFeedback>
+          ) : null}
 
           <div className="platform-access-list platform-account-access-list" aria-label="PDVs cadastrados">
             {accessLoading ? (
@@ -2217,6 +2360,9 @@ export default function PlatformAccountPage() {
                 const pdvState = !pdv.ativo ? "Desativado" : pdv.pareado_em ? "Pareado" : "Sem dispositivo";
                 const stateClass =
                   pdv.ativo && pdv.pareado_em ? "platform-device-state-ok" : "platform-device-state-danger";
+                const supportStatusLabel = getRemoteSupportStatusLabel(pdv.suporte_remoto);
+                const supportStateClass = getRemoteSupportStatusClass(pdv.suporte_remoto);
+                const supportRustDeskId = pdv.suporte_remoto?.rustdesk_id;
 
                 return (
                   <div
@@ -2232,6 +2378,14 @@ export default function PlatformAccountPage() {
                         <span>{pdv.identificacao}</span>
                         <span aria-hidden="true">·</span>
                         <span className={stateClass}>{pdvState}</span>
+                        <span aria-hidden="true">Â·</span>
+                        <span className={supportStateClass}>Suporte: {supportStatusLabel}</span>
+                        {supportRustDeskId ? (
+                          <>
+                            <span aria-hidden="true">Â·</span>
+                            <span>ID {supportRustDeskId}</span>
+                          </>
+                        ) : null}
                       </small>
                     </span>
                     <span className="platform-access-meta">
@@ -2260,6 +2414,43 @@ export default function PlatformAccountPage() {
                           }}
                         >
                           <KeyRound aria-hidden="true" size={15} />
+                        </button>
+                      ) : null}
+                      {pdv.ativo && pdv.pareado_em && supportRustDeskId ? (
+                        <button
+                          type="button"
+                          aria-label={`Copiar ID RustDesk de ${pdv.nome}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleCopyRemoteSupportId(pdv);
+                          }}
+                        >
+                          <Copy aria-hidden="true" size={15} />
+                        </button>
+                      ) : null}
+                      {pdv.ativo && pdv.pareado_em && supportRustDeskId && pdv.suporte_remoto?.senha_configurada && !isSubconta ? (
+                        <button
+                          type="button"
+                          aria-label={`Ver senha RustDesk de ${pdv.nome}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleShowRemoteSupportCredentials(pdv);
+                          }}
+                        >
+                          <Eye aria-hidden="true" size={15} />
+                        </button>
+                      ) : null}
+                      {pdv.ativo && pdv.pareado_em && supportRustDeskId && !isSubconta ? (
+                        <button
+                          disabled={isSaving}
+                          type="button"
+                          aria-label={`Rotacionar senha RustDesk de ${pdv.nome}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleRequestRemoteSupportRotation(pdv);
+                          }}
+                        >
+                          <RotateCcw aria-hidden="true" size={15} />
                         </button>
                       ) : null}
                       {!pdv.ativo ? (
@@ -2780,6 +2971,87 @@ export default function PlatformAccountPage() {
                   <RotateCcw aria-hidden="true" size={16} />
                 )}
               </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {remoteSupportCredentialsPresence.isPresent && visibleRemoteSupportCredentialsPdv ? (
+        <div
+          className="platform-modal-backdrop"
+          data-modal-state={remoteSupportCredentialsPresence.state}
+          role="presentation"
+          {...accountPageModalDismiss.backdropProps}
+        >
+          <section
+            aria-labelledby="platform-remote-support-modal-title"
+            aria-modal="true"
+            className="platform-modal platform-modal-compact platform-remote-support-modal"
+            role="dialog"
+          >
+            <button className="platform-modal-close" type="button" aria-label="Fechar" onClick={closeRemoteSupportModal}>
+              <X aria-hidden="true" size={18} />
+            </button>
+            <div className="platform-modal-head">
+              <h2 id="platform-remote-support-modal-title">Suporte remoto</h2>
+              <p>{visibleRemoteSupportCredentialsPdv.identificacao} · {visibleRemoteSupportCredentialsPdv.nome}</p>
+            </div>
+            {modalFeedback}
+
+            {isRemoteSupportLoading ? (
+              <div className="platform-remote-support-skeleton" aria-hidden="true">
+                <i />
+                <i />
+              </div>
+            ) : (
+              <div className="platform-remote-support-credentials">
+                <span className="platform-remote-support-field">
+                  <small>ID RustDesk</small>
+                  <strong>{remoteSupportCredentials?.rustdesk_id ?? visibleRemoteSupportCredentialsPdv.suporte_remoto?.rustdesk_id ?? "Sem ID"}</strong>
+                </span>
+
+                {!isSubconta ? (
+                  <span className="platform-remote-support-field">
+                    <small>Senha</small>
+                    <strong>{showRemoteSupportPassword ? remoteSupportCredentials?.senha || "Sem senha" : "••••••••••••"}</strong>
+                    <button
+                      type="button"
+                      aria-label={showRemoteSupportPassword ? "Ocultar senha" : "Mostrar senha"}
+                      onClick={() => setShowRemoteSupportPassword((current) => !current)}
+                    >
+                      {showRemoteSupportPassword ? <EyeOff aria-hidden="true" size={15} /> : <Eye aria-hidden="true" size={15} />}
+                    </button>
+                  </span>
+                ) : null}
+              </div>
+            )}
+
+            <div className="platform-modal-actions">
+              <button
+                className="platform-secondary-button"
+                type="button"
+                onClick={() =>
+                  void copyRemoteSupportValue(
+                    remoteSupportCredentials?.rustdesk_id ?? visibleRemoteSupportCredentialsPdv.suporte_remoto?.rustdesk_id,
+                    "ID do RustDesk copiado.",
+                    "ID do RustDesk"
+                  )
+                }
+              >
+                <Copy aria-hidden="true" size={16} />
+                Copiar ID
+              </button>
+              {!isSubconta ? (
+                <button
+                  className="platform-primary-button"
+                  disabled={!remoteSupportCredentials?.senha}
+                  type="button"
+                  onClick={() => void copyRemoteSupportValue(remoteSupportCredentials?.senha, "Senha copiada.", "Senha")}
+                >
+                  <Copy aria-hidden="true" size={16} />
+                  Copiar senha
+                </button>
+              ) : null}
             </div>
           </section>
         </div>

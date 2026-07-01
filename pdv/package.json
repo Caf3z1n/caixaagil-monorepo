@@ -1,6 +1,6 @@
 {
   "name": "caixaagil-pdv",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
   "main": "electron/main.cjs",
@@ -70,6 +70,10 @@
       {
         "from": "electron/services/non-fiscal-receipt-printer.ps1",
         "to": "non-fiscal-receipt-printer.ps1"
+      },
+      {
+        "from": "electron/services/rustdesk-support-installer.ps1",
+        "to": "rustdesk-support-installer.ps1"
       },
       {
         "from": "node_modules/sql.js/dist",

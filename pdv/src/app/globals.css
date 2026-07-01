@@ -3153,6 +3153,78 @@ button {
   overflow: visible;
 }
 
+.pdv-support-modal-content {
+  display: grid;
+  gap: 12px;
+}
+
+.pdv-support-status-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 76px;
+  padding: 13px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.pdv-support-status-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: oklch(0.974 0.018 55);
+  color: var(--orange);
+}
+
+.pdv-support-status-configurado .pdv-support-status-icon {
+  background: oklch(0.955 0.04 151);
+  color: oklch(0.48 0.14 151);
+}
+
+.pdv-support-status-erro .pdv-support-status-icon {
+  background: oklch(0.965 0.035 28);
+  color: var(--danger);
+}
+
+.pdv-support-status-card strong,
+.pdv-support-status-card small {
+  display: block;
+  min-width: 0;
+}
+
+.pdv-support-status-card strong {
+  color: var(--ink-deep);
+  font-size: 0.94rem;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.pdv-support-status-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.pdv-support-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.pdv-modal-footer-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
 .pdv-update-modal-body {
   display: grid;
   gap: 16px;

@@ -24,6 +24,7 @@ const produtoController = require('./produtoController');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 const { ensureLimitAvailable } = require('../services/assinaturaEntitlementsService');
 const { getBillingStatus } = require('../services/assinaturaInadimplenciaService');
+const { decryptSecret, encryptSecret } = require('../services/secretService');
 const {
   buildStorageDirectory,
   buildStoredFileName,
@@ -34,6 +35,8 @@ const {
 } = require('../services/fileStorageService');
 
 const pairingTtlMinutes = 30;
+const remoteSupportProvider = 'rustdesk';
+const remoteSupportStatuses = new Set(['nao_configurado', 'configurando', 'configurado', 'erro']);
 
 function hashValue(value) {
   return createHash('sha256').update(String(value)).digest('hex');
@@ -66,6 +69,80 @@ function normalizeCodigo(value) {
   }
 
   return rawCode;
+}
+
+function normalizeRemoteSupportStatus(value) {
+  const status = normalizeKey(value);
+  return remoteSupportStatuses.has(status) ? status : 'nao_configurado';
+}
+
+function getRemoteSupportConfig() {
+  const serverHost = normalizeText(process.env.RUSTDESK_SERVER_HOST, 120);
+  const relayHost = normalizeText(process.env.RUSTDESK_RELAY_HOST, 120) || serverHost;
+  const publicKey = normalizeText(process.env.RUSTDESK_PUBLIC_KEY, 512);
+  const configString = normalizeText(process.env.RUSTDESK_CONFIG_STRING, 2048);
+  const installerUrl = normalizeText(process.env.RUSTDESK_INSTALLER_URL, 2048);
+  const installerSha256 = normalizeText(process.env.RUSTDESK_INSTALLER_SHA256, 128).toLowerCase();
+
+  if (!serverHost || !publicKey || !configString || !installerUrl || !installerSha256) {
+    return null;
+  }
+
+  return {
+    provider: remoteSupportProvider,
+    servidor: serverHost,
+    relay_servidor: relayHost,
+    chave_publica: publicKey,
+    config_string: configString,
+    instalador: {
+      url: installerUrl,
+      sha256: installerSha256,
+    },
+  };
+}
+
+function sanitizeRemoteSupport(data) {
+  const support = data && typeof data === 'object' ? data : {};
+  const status = normalizeRemoteSupportStatus(support.status);
+  const rustdeskId = normalizeText(support.rustdesk_id || support.rustdeskId, 80);
+  const hasPassword = Boolean(support.senha_criptografada);
+
+  return {
+    provider: normalizeText(support.provider, 40) || remoteSupportProvider,
+    rustdesk_id: rustdeskId || null,
+    servidor: normalizeText(support.servidor, 120) || null,
+    versao: normalizeText(support.versao, 40) || null,
+    status,
+    configurado_em: support.configurado_em || null,
+    ultimo_check_em: support.ultimo_check_em || null,
+    erro: status === 'erro' ? normalizeText(support.erro, 300) || 'Não foi possível configurar o RustDesk.' : null,
+    senha_configurada: hasPassword,
+  };
+}
+
+function buildRemoteSupportStatusPayload(body, previous = {}) {
+  const now = new Date().toISOString();
+  const status = normalizeRemoteSupportStatus(body?.status);
+  const rustdeskId = normalizeText(body?.rustdesk_id || body?.rustdeskId, 80);
+  const password = normalizeText(body?.senha || body?.password, 256);
+  const previousSupport = previous && typeof previous === 'object' ? previous : {};
+  const encryptedPassword = password ? encryptSecret(password) : previousSupport.senha_criptografada || null;
+
+  return {
+    provider: remoteSupportProvider,
+    rustdesk_id: rustdeskId || previousSupport.rustdesk_id || null,
+    senha_criptografada: encryptedPassword,
+    servidor: normalizeText(body?.servidor, 120) || getRemoteSupportConfig()?.servidor || previousSupport.servidor || null,
+    versao: normalizeText(body?.versao || body?.version, 40) || previousSupport.versao || null,
+    status,
+    configurado_em: status === 'configurado'
+      ? previousSupport.configurado_em || now
+      : previousSupport.configurado_em || null,
+    ultimo_check_em: now,
+    erro: status === 'erro'
+      ? normalizeText(body?.erro || body?.error, 300) || 'Não foi possível configurar o RustDesk.'
+      : null,
+  };
 }
 
 function createPairingCode() {
@@ -147,6 +224,7 @@ function sanitizePdv(pdv, extra = {}) {
       Boolean(data.codigo_pareamento_expira_em) &&
       !data.codigo_pareamento_usado_em &&
       new Date(data.codigo_pareamento_expira_em) > new Date(),
+    suporte_remoto: sanitizeRemoteSupport(data.suporte_remoto),
     status_operacional: resolveStatusOperacional(data),
     ...extra,
   };
@@ -1884,6 +1962,11 @@ function resetPdvDevicePairing(pdv, status = 'pendente') {
   pdv.codigo_pareamento_usado_em = null;
   pdv.sincronizacao_pendente = false;
   pdv.ultima_fila_offline_em = null;
+  pdv.suporte_remoto = {
+    provider: remoteSupportProvider,
+    status: 'nao_configurado',
+    ultimo_check_em: new Date().toISOString(),
+  };
 }
 
 module.exports = {
@@ -2088,6 +2171,79 @@ module.exports = {
     }
   },
 
+  async showRemoteSupportCredentials(req, res) {
+    try {
+      if (req.user.tipo_conta !== 'usuario') {
+        return res.status(403).json({
+          code: 'MAIN_ACCOUNT_REQUIRED',
+          message: 'Este recurso exige a conta principal.',
+        });
+      }
+
+      const pdv = await findUserPdv(req.user.id, req.params.id);
+
+      if (!pdv) {
+        return res.status(404).json({ message: 'PDV não encontrado.' });
+      }
+
+      const suporteRemoto = pdv.suporte_remoto && typeof pdv.suporte_remoto === 'object'
+        ? pdv.suporte_remoto
+        : {};
+      const safeSupport = sanitizeRemoteSupport(suporteRemoto);
+
+      if (!safeSupport.rustdesk_id) {
+        return res.status(404).json({ message: 'Suporte remoto ainda não configurado neste PDV.' });
+      }
+
+      return res.json({
+        ...safeSupport,
+        senha: decryptSecret(suporteRemoto.senha_criptografada) || null,
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao carregar credenciais de suporte remoto.', detail: error.message });
+    }
+  },
+
+  async requestRemoteSupportRotation(req, res) {
+    try {
+      if (req.user.tipo_conta !== 'usuario') {
+        return res.status(403).json({
+          code: 'MAIN_ACCOUNT_REQUIRED',
+          message: 'Este recurso exige a conta principal.',
+        });
+      }
+
+      const pdv = await findUserPdv(req.user.id, req.params.id);
+
+      if (!pdv) {
+        return res.status(404).json({ message: 'PDV não encontrado.' });
+      }
+
+      const suporteRemoto = pdv.suporte_remoto && typeof pdv.suporte_remoto === 'object'
+        ? pdv.suporte_remoto
+        : {};
+
+      pdv.suporte_remoto = {
+        ...suporteRemoto,
+        provider: remoteSupportProvider,
+        status: 'configurando',
+        ultimo_check_em: new Date().toISOString(),
+        erro: null,
+      };
+      await pdv.save();
+
+      const identificacao = await getVirtualIdentificacao(req.user.id, pdv.id);
+      const registrosVinculados = await getPdvRegistrosVinculados(req.user.id, pdv.id);
+
+      return res.json({
+        pdv: sanitizePdv(pdv, { identificacao, registros_vinculados: registrosVinculados }),
+        message: 'Rotação solicitada. Conclua a configuração no computador do caixa.',
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao solicitar rotação do suporte remoto.', detail: error.message });
+    }
+  },
+
   async pairDesktop(req, res) {
     try {
       const codigo = normalizeCodigo(req.body?.codigo || req.body?.codigo_pareamento);
@@ -2181,6 +2337,63 @@ module.exports = {
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao validar sessão do PDV.', detail: error.message });
+    }
+  },
+
+  async showRemoteSupportConfig(req, res) {
+    try {
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
+
+      if (!pdv) {
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const config = getRemoteSupportConfig();
+
+      if (!config) {
+        return res.status(503).json({ message: 'Configuração do RustDesk não disponível na API.' });
+      }
+
+      const now = new Date();
+      pdv.status = 'online';
+      pdv.ultimo_acesso_em = now;
+      await pdv.save();
+
+      return res.json({
+        ...config,
+        pdv: sanitizePdv(pdv, { identificacao: await getVirtualIdentificacao(pdv.usuario_id, pdv.id) }),
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao carregar configuração do suporte remoto.', detail: error.message });
+    }
+  },
+
+  async updateRemoteSupportStatus(req, res) {
+    try {
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
+
+      if (!pdv) {
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const payload = buildRemoteSupportStatusPayload(req.body, pdv.suporte_remoto);
+
+      if (payload.status === 'configurado' && (!payload.rustdesk_id || !payload.senha_criptografada)) {
+        return res.status(400).json({ message: 'Informe o ID e a senha do RustDesk configurado.' });
+      }
+
+      const now = new Date();
+      pdv.status = 'online';
+      pdv.ultimo_acesso_em = now;
+      pdv.suporte_remoto = payload;
+      await pdv.save();
+
+      return res.json({
+        suporte_remoto: sanitizeRemoteSupport(pdv.suporte_remoto),
+        pdv: sanitizePdv(pdv, { identificacao: await getVirtualIdentificacao(pdv.usuario_id, pdv.id) }),
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao atualizar suporte remoto do PDV.', detail: error.message });
     }
   },
 

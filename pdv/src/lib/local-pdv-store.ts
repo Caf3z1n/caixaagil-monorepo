@@ -99,6 +99,15 @@ export type PdvUpdateStatus = {
   bytesPerSecond?: number | null;
 };
 
+export type PdvRemoteSupportStatus = {
+  status: "nao_configurado" | "configurando" | "configurado" | "erro" | string;
+  rustdeskId?: string | null;
+  password?: string | null;
+  version?: string | null;
+  error?: string | null;
+  updatedAt?: string | null;
+};
+
 export type NonFiscalReceiptPayload = {
   type: string;
   title: string;
@@ -189,6 +198,12 @@ export type LocalPdvStoreBridge = {
   checkForUpdates?(): Promise<PdvUpdateStatus>;
   downloadUpdate?(): Promise<PdvUpdateStatus>;
   installUpdate?(): Promise<{ ok: boolean }>;
+  getRemoteSupportStatus?(): Promise<PdvRemoteSupportStatus>;
+  installRustDeskSupport?(payload: {
+    installerUrl: string;
+    installerSha256: string;
+    configString: string;
+  }): Promise<PdvRemoteSupportStatus>;
   onUpdateStatus?(callback: (status: PdvUpdateStatus) => void): () => void;
 };
 

@@ -1,8 +1,7 @@
-const crypto = require('crypto');
 const fs = require('fs');
 const forge = require('node-forge');
 const { Arquivo, ConfiguracaoSistema, Nf } = require('../models');
-const authConfig = require('../../config/auth');
+const { decryptSecret, encryptSecret } = require('./secretService');
 const { toAbsolutePath } = require('./fileStorageService');
 
 const paymentMethodKeys = ['dinheiro', 'pix', 'cartao', 'convenio'];
@@ -144,53 +143,6 @@ function pickFirstDefined(...values) {
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function getSecretKey() {
-  return crypto
-    .createHash('sha256')
-    .update(String(process.env.FISCAL_CONFIG_SECRET || authConfig.secret || 'dev-secret'))
-    .digest();
-}
-
-function encryptSecret(value) {
-  const plainText = normalizeText(value, 2048);
-
-  if (!plainText) {
-    return null;
-  }
-
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', getSecretKey(), iv);
-  const encrypted = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
-}
-
-function decryptSecret(value) {
-  if (typeof value !== 'string' || !value.startsWith('v1:')) {
-    return '';
-  }
-
-  const [, ivRaw, tagRaw, encryptedRaw] = value.split(':');
-
-  if (!ivRaw || !tagRaw || !encryptedRaw) {
-    return '';
-  }
-
-  try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', getSecretKey(), Buffer.from(ivRaw, 'base64'));
-
-    decipher.setAuthTag(Buffer.from(tagRaw, 'base64'));
-
-    return Buffer.concat([
-      decipher.update(Buffer.from(encryptedRaw, 'base64')),
-      decipher.final(),
-    ]).toString('utf8');
-  } catch {
-    return '';
-  }
 }
 
 function resolveEncryptedSecret({ incoming, previous, clear }) {

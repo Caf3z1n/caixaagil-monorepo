@@ -101,6 +101,12 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   installUpdate() {
     return ipcRenderer.invoke("pdv-update:install");
   },
+  getRemoteSupportStatus() {
+    return ipcRenderer.invoke("pdv-support:get-status");
+  },
+  installRustDeskSupport(payload) {
+    return ipcRenderer.invoke("pdv-support:install-rustdesk", payload);
+  },
   onUpdateStatus(callback) {
     if (typeof callback !== "function") {
       return () => {};

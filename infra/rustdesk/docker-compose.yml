@@ -1,0 +1,20 @@
+services:
+  hbbs:
+    container_name: caixaagil-rustdesk-hbbs
+    image: rustdesk/rustdesk-server:latest
+    command: hbbs -r 187.77.46.55:21117
+    volumes:
+      - /home/deploy/caixaagil/shared/rustdesk:/root
+    network_mode: "host"
+    depends_on:
+      - hbbr
+    restart: unless-stopped
+
+  hbbr:
+    container_name: caixaagil-rustdesk-hbbr
+    image: rustdesk/rustdesk-server:latest
+    command: hbbr
+    volumes:
+      - /home/deploy/caixaagil/shared/rustdesk:/root
+    network_mode: "host"
+    restart: unless-stopped

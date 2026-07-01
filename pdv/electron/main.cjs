@@ -3,6 +3,7 @@ const path = require("node:path");
 const { createLocalPdvStore } = require("./local-store.cjs");
 const { createFiscalWorkerService } = require("./fiscal-worker-service.cjs");
 const { createNonFiscalReceiptService } = require("./non-fiscal-receipt-service.cjs");
+const { createRemoteSupportService } = require("./remote-support-service.cjs");
 
 // Mantem o pacote menor evitando backends graficos opcionais removidos no empacotamento.
 app.disableHardwareAcceleration();
@@ -222,6 +223,7 @@ if (!singleInstanceLock) {
     localStore.registerIpc(ipcMain);
     createFiscalWorkerService(app, localStore).registerIpc(ipcMain);
     createNonFiscalReceiptService(app).registerIpc(ipcMain);
+    createRemoteSupportService(app).registerIpc(ipcMain);
 
     if (process.platform === "win32") {
       app.setAppUserModelId("br.com.caixaagil.pdv");
