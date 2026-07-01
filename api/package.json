@@ -15,6 +15,7 @@
     "seed": "sequelize db:seed:all",
     "seed:undo": "sequelize db:seed:undo",
     "seed:undo:all": "sequelize db:seed:undo:all",
+    "check:env:production": "node scripts/ops/check-required-env.js production",
     "legacy:export:caixa-agil": "node scripts/migration/export-legacy-caixa-agil.js",
     "legacy:import:caixa-agil": "node scripts/migration/import-legacy-caixa-agil.js"
   },

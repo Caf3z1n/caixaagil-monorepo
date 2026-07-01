@@ -2,7 +2,7 @@ services:
   hbbs:
     container_name: caixaagil-rustdesk-hbbs
     image: rustdesk/rustdesk-server:latest
-    command: hbbs -r 187.77.46.55:21117
+    command: hbbs -r rustdesk.caixaagil.tech:21117
     volumes:
       - /home/deploy/caixaagil/shared/rustdesk:/root
     network_mode: "host"

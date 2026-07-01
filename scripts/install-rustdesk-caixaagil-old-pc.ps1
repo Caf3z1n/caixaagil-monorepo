@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $InstallerUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.4.8/rustdesk-1.4.8-x86_64.exe"
 $InstallerSha256 = "f0053229fa2a2459c8b86f326c3e7423018a72f010f9758dc21be171b112d1b2"
-$ConfigString = "9JiI6ISawFmIsISPBFXVrZnev52QFJjMrkzVVhUWVVmSqF1ZklVYr82dGxGZnlEcYdXcS1GSHJiOikXZrJCLiUTNuYDNuczNucDOxIiOikXYsVmciwiI1UjL2QjL3cjL3gTMiojI0N3boJye"
+$ConfigString = "QfiIiOikGchJCLi0TQxV1a2p3buNURyIzK5cVVIlVVlpkaRdGZZF2KvdnRsR2ZJBHW3FnUth0RiojI5V2aiwiIoNWZ05CbpdWYhhXahNmLrNXZkR3c1JnI6ISehxWZyJCLig2YlRnLsl2ZhFGepF2Yus2clRGdzVnciojI0N3boJye"
 $StatusPath = Join-Path $env:ProgramData "CaixaAgil\support\rustdesk-status.json"
 
 function Write-SupportStatus {

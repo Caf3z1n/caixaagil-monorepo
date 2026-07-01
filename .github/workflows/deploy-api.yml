@@ -96,6 +96,7 @@ jobs:
           cd "$RELEASE"
           npm ci
           npm run build
+          npm run check:env:production
           npm run migrate
           npm prune --omit=dev
 
