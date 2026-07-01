@@ -3051,17 +3051,22 @@ button {
 
 .pdv-modal-backdrop {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
   z-index: 60;
   display: grid;
   align-items: start;
   justify-items: center;
+  width: calc(100vw * var(--pdv-app-scale-inverse));
+  height: calc(100svh * var(--pdv-app-scale-inverse));
   padding: 28px 16px;
   overflow-x: hidden;
   overflow-y: auto;
   background: oklch(0.16 0.035 255 / 0.48);
   backdrop-filter: blur(12px) saturate(0.9);
   -webkit-backdrop-filter: blur(12px) saturate(0.9);
+  transform: scale(var(--pdv-app-scale));
+  transform-origin: top left;
   animation: pdv-backdrop-enter 180ms ease-out both;
 }
 
@@ -3217,6 +3222,40 @@ button {
   font-size: 0.84rem;
   font-weight: 750;
   line-height: 1.4;
+}
+
+.pdv-support-download-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  gap: 8px;
+  min-height: 38px;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--orange);
+  padding: 0 13px;
+  font-size: 0.84rem;
+  font-weight: 850;
+  cursor: pointer;
+  transition:
+    border-color 180ms ease-out,
+    background-color 180ms ease-out,
+    color 180ms ease-out;
+}
+
+.pdv-support-download-action:hover,
+.pdv-support-download-action:focus-visible {
+  border-color: oklch(0.82 0.075 45);
+  background: oklch(0.978 0.021 55);
+  color: var(--orange-deep);
+  outline: none;
+}
+
+.pdv-support-download-action:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .pdv-modal-footer-actions {

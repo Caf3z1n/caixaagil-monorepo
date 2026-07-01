@@ -2354,7 +2354,6 @@ export default function PlatformAccountPage() {
                   pdv.ativo && pdv.pareado_em ? "platform-device-state-ok" : "platform-device-state-danger";
                 const supportStatusLabel = getRemoteSupportStatusLabel(pdv.suporte_remoto);
                 const supportStateClass = getRemoteSupportStatusClass(pdv.suporte_remoto);
-                const supportRustDeskId = pdv.suporte_remoto?.rustdesk_id;
 
                 return (
                   <div
@@ -2372,12 +2371,6 @@ export default function PlatformAccountPage() {
                         <span className={stateClass}>{pdvState}</span>
                         <span aria-hidden="true">·</span>
                         <span className={supportStateClass}>{supportStatusLabel}</span>
-                        {supportRustDeskId ? (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span>ID {supportRustDeskId}</span>
-                          </>
-                        ) : null}
                       </small>
                     </span>
                     <span className="platform-access-meta">
@@ -2406,43 +2399,6 @@ export default function PlatformAccountPage() {
                           }}
                         >
                           <KeyRound aria-hidden="true" size={15} />
-                        </button>
-                      ) : null}
-                      {pdv.ativo && pdv.pareado_em && supportRustDeskId ? (
-                        <button
-                          type="button"
-                          aria-label={`Copiar ID RustDesk de ${pdv.nome}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleCopyRemoteSupportId(pdv);
-                          }}
-                        >
-                          <Copy aria-hidden="true" size={15} />
-                        </button>
-                      ) : null}
-                      {pdv.ativo && pdv.pareado_em && supportRustDeskId && pdv.suporte_remoto?.senha_configurada && !isSubconta ? (
-                        <button
-                          type="button"
-                          aria-label={`Ver senha RustDesk de ${pdv.nome}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleShowRemoteSupportCredentials(pdv);
-                          }}
-                        >
-                          <Eye aria-hidden="true" size={15} />
-                        </button>
-                      ) : null}
-                      {pdv.ativo && pdv.pareado_em && supportRustDeskId && !isSubconta ? (
-                        <button
-                          disabled={isSaving}
-                          type="button"
-                          aria-label={`Rotacionar senha RustDesk de ${pdv.nome}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleRequestRemoteSupportRotation(pdv);
-                          }}
-                        >
-                          <RotateCcw aria-hidden="true" size={15} />
                         </button>
                       ) : null}
                       {!pdv.ativo ? (

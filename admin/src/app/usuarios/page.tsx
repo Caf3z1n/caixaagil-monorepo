@@ -6,8 +6,10 @@ import {
   AlertTriangle,
   Ban,
   CircleDollarSign,
+  Copy,
   CreditCard,
   Eye,
+  EyeOff,
   History,
   Monitor,
   PauseCircle,
@@ -127,6 +129,40 @@ type UsuariosResponse = {
   usuarios: UsuarioAdmin[];
 };
 
+type RemoteSupportSummary = {
+  provider?: string | null;
+  rustdesk_id?: string | null;
+  servidor?: string | null;
+  versao?: string | null;
+  status?: string | null;
+  configurado_em?: string | null;
+  ultimo_check_em?: string | null;
+  erro?: string | null;
+  senha_configurada?: boolean;
+};
+
+type PdvAdmin = {
+  id: number;
+  nome: string;
+  status: string;
+  ativo: boolean;
+  ultimo_acesso_em?: string | null;
+  ultima_sincronizacao_em?: string | null;
+  suporte_remoto?: RemoteSupportSummary | null;
+};
+
+type RemoteSupportCredentialsResponse = RemoteSupportSummary & {
+  senha?: string | null;
+};
+
+type RemoteSupportCredentialState = {
+  rustdesk_id?: string | null;
+  senha?: string | null;
+  loading?: boolean;
+  showPassword?: boolean;
+  error?: string | null;
+};
+
 type UsuarioDetalheResponse = {
   usuario: {
     id: number;
@@ -140,14 +176,7 @@ type UsuarioDetalheResponse = {
   assinaturas: AssinaturaAdmin[];
   pagamentos: PagamentoAdmin[];
   auditoria?: AcaoAdminAssinatura[];
-  pdvs: Array<{
-    id: number;
-    nome: string;
-    status: string;
-    ativo: boolean;
-    ultimo_acesso_em?: string | null;
-    ultima_sincronizacao_em?: string | null;
-  }>;
+  pdvs: PdvAdmin[];
   subcontas: Array<{
     id: number;
     nome: string;
@@ -447,6 +476,42 @@ function getAccountBillingStatus(usuario: UsuarioAdmin) {
   };
 }
 
+function getRemoteSupportStatusValue(support?: RemoteSupportSummary | null) {
+  return String(support?.status || "nao_configurado").trim().toLowerCase();
+}
+
+function getRemoteSupportStatusLabel(support?: RemoteSupportSummary | null) {
+  const status = getRemoteSupportStatusValue(support);
+
+  if (status === "configurado" && support?.rustdesk_id) {
+    return "Suporte configurado";
+  }
+
+  if (status === "erro") {
+    return "Suporte com erro";
+  }
+
+  if (status === "configurando") {
+    return "Suporte em configuração";
+  }
+
+  return "Suporte pendente";
+}
+
+function getRemoteSupportStatusClass(support?: RemoteSupportSummary | null) {
+  const status = getRemoteSupportStatusValue(support);
+
+  if (status === "configurado" && support?.rustdesk_id) {
+    return "admin-status-pill admin-status-pill-success";
+  }
+
+  if (status === "configurando") {
+    return "admin-status-pill admin-status-pill-warning";
+  }
+
+  return "admin-status-pill admin-status-pill-danger";
+}
+
 function matchesStatusFilter(usuario: UsuarioAdmin, status: string) {
   if (status === "todos") {
     return true;
@@ -499,6 +564,7 @@ export default function AdminUsuariosPage() {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [selectedUser, setSelectedUser] = useState<UsuarioDetalheResponse | null>(null);
+  const [remoteSupportCredentialsByPdv, setRemoteSupportCredentialsByPdv] = useState<Record<number, RemoteSupportCredentialState>>({});
   const [subscriptionActionForm, setSubscriptionActionForm] = useState<SubscriptionActionForm | null>(null);
   const [filters, setFilters] = useState({
     busca: "",
@@ -565,6 +631,7 @@ export default function AdminUsuariosPage() {
     try {
       setIsDetailLoading(true);
       setSubscriptionActionForm(null);
+      setRemoteSupportCredentialsByPdv({});
       setActionFeedback(null);
       const result = await apiGet<UsuarioDetalheResponse>(`/admin/usuarios/${usuarioId}`, { token });
 
@@ -586,6 +653,81 @@ export default function AdminUsuariosPage() {
       diasGratis: "30",
       motivo: ""
     });
+  }
+
+  async function copyAdminValue(value: string | null | undefined, successMessage: string, fallbackLabel: string) {
+    const trimmedValue = String(value || "").trim();
+
+    if (!trimmedValue) {
+      setActionFeedback(`${fallbackLabel} indisponível.`);
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(trimmedValue);
+      setActionFeedback(successMessage);
+    } catch {
+      setActionFeedback(`${fallbackLabel}: ${trimmedValue}`);
+    }
+  }
+
+  async function revealRemoteSupportPassword(pdv: PdvAdmin) {
+    if (!token || !selectedUser) {
+      setActionFeedback("Entre novamente para ver a senha do suporte remoto.");
+      return;
+    }
+
+    const current = remoteSupportCredentialsByPdv[pdv.id];
+
+    if (current?.senha) {
+      setRemoteSupportCredentialsByPdv(previous => ({
+        ...previous,
+        [pdv.id]: {
+          ...current,
+          showPassword: !current.showPassword,
+        },
+      }));
+      return;
+    }
+
+    setRemoteSupportCredentialsByPdv(previous => ({
+      ...previous,
+      [pdv.id]: {
+        rustdesk_id: pdv.suporte_remoto?.rustdesk_id,
+        loading: true,
+        showPassword: false,
+        error: null,
+      },
+    }));
+    setActionFeedback(null);
+
+    try {
+      const credentials = await apiGet<RemoteSupportCredentialsResponse>(
+        `/admin/usuarios/${selectedUser.usuario.id}/pdvs/${pdv.id}/suporte-remoto/credenciais`,
+        { token }
+      );
+
+      setRemoteSupportCredentialsByPdv(previous => ({
+        ...previous,
+        [pdv.id]: {
+          rustdesk_id: credentials.rustdesk_id,
+          senha: credentials.senha,
+          loading: false,
+          showPassword: true,
+          error: null,
+        },
+      }));
+    } catch (error) {
+      setRemoteSupportCredentialsByPdv(previous => ({
+        ...previous,
+        [pdv.id]: {
+          rustdesk_id: pdv.suporte_remoto?.rustdesk_id,
+          loading: false,
+          showPassword: false,
+          error: getErrorMessage(error, "Não foi possível carregar a senha."),
+        },
+      }));
+    }
   }
 
   async function submitSubscriptionAction() {
@@ -784,6 +926,7 @@ export default function AdminUsuariosPage() {
                   onClick={() => {
                     setSelectedUser(null);
                     setSubscriptionActionForm(null);
+                    setRemoteSupportCredentialsByPdv({});
                     setActionFeedback(null);
                   }}
                   aria-label="Fechar detalhes da conta"
@@ -992,21 +1135,72 @@ export default function AdminUsuariosPage() {
                   </div>
                 </section>
 
-                <section className="admin-detail-section" aria-label="PDVs da conta">
+                <section className="admin-detail-section admin-detail-section-wide" aria-label="PDVs da conta">
                   <header>
                     <h3>PDVs</h3>
                     <small>{selectedUser.pdvs.length} cadastro{selectedUser.pdvs.length === 1 ? "" : "s"}</small>
                   </header>
-                  <div className="admin-compact-list">
-                    {selectedUser.pdvs.slice(0, 6).map(pdv => (
-                      <div key={pdv.id}>
-                        <span>
-                          <strong>{pdv.nome}</strong>
-                          <small>{formatDate(pdv.ultima_sincronizacao_em || pdv.ultimo_acesso_em)}</small>
-                        </span>
-                        <em className={pdv.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{pdv.ativo ? "Ativo" : "Inativo"}</em>
-                      </div>
-                    ))}
+                  <div className="admin-compact-list admin-remote-support-list">
+                    {selectedUser.pdvs.slice(0, 6).map(pdv => {
+                      const support = pdv.suporte_remoto;
+                      const credentialsState = remoteSupportCredentialsByPdv[pdv.id];
+                      const rustdeskId = credentialsState?.rustdesk_id || support?.rustdesk_id || null;
+                      const canShowPassword = Boolean(support?.senha_configurada && rustdeskId);
+                      const isPasswordVisible = Boolean(credentialsState?.showPassword);
+
+                      return (
+                        <div className="admin-remote-support-row" key={pdv.id}>
+                          <span className="admin-remote-support-main">
+                            <strong>{pdv.nome}</strong>
+                            <small>
+                              {formatDate(pdv.ultima_sincronizacao_em || pdv.ultimo_acesso_em)}
+                              {rustdeskId ? ` · ID ${rustdeskId}` : " · sem ID de suporte"}
+                            </small>
+                            {isPasswordVisible ? (
+                              <small className="admin-remote-support-secret">Senha {credentialsState?.senha || "indisponível"}</small>
+                            ) : null}
+                            {credentialsState?.error ? (
+                              <small className="admin-remote-support-error">{credentialsState.error}</small>
+                            ) : null}
+                          </span>
+
+                          <span className="admin-remote-support-side">
+                            <em className={pdv.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{pdv.ativo ? "Ativo" : "Inativo"}</em>
+                            <em className={getRemoteSupportStatusClass(support)}>{getRemoteSupportStatusLabel(support)}</em>
+                            {rustdeskId ? (
+                              <span className="admin-remote-support-actions">
+                                <button
+                                  type="button"
+                                  onClick={() => void copyAdminValue(rustdeskId, "ID do RustDesk copiado.", "ID do RustDesk")}
+                                >
+                                  <Copy aria-hidden="true" size={14} />
+                                  ID
+                                </button>
+                                {canShowPassword ? (
+                                  <button
+                                    disabled={Boolean(credentialsState?.loading)}
+                                    type="button"
+                                    onClick={() => void revealRemoteSupportPassword(pdv)}
+                                  >
+                                    {isPasswordVisible ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}
+                                    {credentialsState?.loading ? "Carregando" : isPasswordVisible ? "Ocultar" : "Senha"}
+                                  </button>
+                                ) : null}
+                                {isPasswordVisible && credentialsState?.senha ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => void copyAdminValue(credentialsState.senha, "Senha do RustDesk copiada.", "Senha")}
+                                  >
+                                    <Copy aria-hidden="true" size={14} />
+                                    Copiar
+                                  </button>
+                                ) : null}
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {selectedUser.pdvs.length === 0 ? <p>Nenhum PDV cadastrado.</p> : null}
                   </div>
                 </section>

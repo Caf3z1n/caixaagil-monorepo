@@ -24,6 +24,7 @@ const {
 } = require('../services/codigosAssinaturaService');
 const { buildPlanoSnapshot } = require('../services/planosService');
 const { sanitizeFiscalSettings } = require('../services/configuracaoSistemaService');
+const { decryptSecret } = require('../services/secretService');
 const {
   cancelMercadoPagoPreapproval,
   pauseMercadoPagoPreapproval,
@@ -34,6 +35,9 @@ const { calcularReguaInadimplencia } = require('../services/assinaturaInadimplen
 const {
   syncAssinaturaPagamentosMercadoPago,
 } = require('../services/pagamentosAssinaturaService');
+
+const remoteSupportProvider = 'rustdesk';
+const remoteSupportStatuses = new Set(['nao_configurado', 'configurando', 'configurado', 'erro']);
 
 function normalizeEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -78,6 +82,50 @@ function sanitizeAdministrador(administrador) {
 
 function toPlain(model) {
   return model?.get ? model.get({ plain: true }) : model || null;
+}
+
+function normalizeRemoteSupportStatus(value) {
+  const status = String(value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  return remoteSupportStatuses.has(status) ? status : 'nao_configurado';
+}
+
+function sanitizeRemoteSupportAdmin(data) {
+  const support = data && typeof data === 'object' ? data : {};
+  const status = normalizeRemoteSupportStatus(support.status);
+  const rustdeskId = normalizeText(support.rustdesk_id || support.rustdeskId, 80);
+
+  return {
+    provider: normalizeText(support.provider, 40) || remoteSupportProvider,
+    rustdesk_id: rustdeskId || null,
+    servidor: normalizeText(support.servidor, 120) || null,
+    versao: normalizeText(support.versao, 40) || null,
+    status,
+    configurado_em: support.configurado_em || null,
+    ultimo_check_em: support.ultimo_check_em || null,
+    erro: status === 'erro' ? normalizeText(support.erro, 300) || 'Não foi possível configurar o RustDesk.' : null,
+    senha_configurada: Boolean(support.senha_criptografada),
+  };
+}
+
+function sanitizePdvAdmin(pdv) {
+  const data = toPlain(pdv);
+
+  if (!data) {
+    return null;
+  }
+
+  delete data.credencial_hash;
+  delete data.codigo_pareamento_hash;
+
+  return {
+    ...data,
+    suporte_remoto: sanitizeRemoteSupportAdmin(data.suporte_remoto),
+  };
 }
 
 function normalizeText(value, maxLength = 255) {
@@ -1651,7 +1699,7 @@ module.exports = {
         }),
         pagamentos: pagamentos.map(sanitizePagamentoAdmin).filter(Boolean),
         auditoria: auditoria.map(sanitizeAcaoAdminAssinatura).filter(Boolean),
-        pdvs: pdvs.map(toPlain),
+        pdvs: pdvs.map(sanitizePdvAdmin).filter(Boolean),
         subcontas: subcontas.map(toPlain),
         configuracao: configuracao ? {
           id: configuracao.id,
@@ -1680,6 +1728,44 @@ module.exports = {
         message: 'Erro ao carregar detalhes do usuario.',
         detail: error.message,
       });
+    }
+  },
+
+  async showUserPdvRemoteSupportCredentials(req, res) {
+    try {
+      const usuarioId = Number(req.params.id);
+      const pdvId = Number(req.params.pdvId);
+
+      if (!Number.isInteger(usuarioId) || usuarioId <= 0 || !Number.isInteger(pdvId) || pdvId <= 0) {
+        return res.status(400).json({ message: 'Usuario ou PDV invalido.' });
+      }
+
+      const pdv = await Pdv.findOne({
+        where: {
+          id: pdvId,
+          usuario_id: usuarioId,
+        },
+      });
+
+      if (!pdv) {
+        return res.status(404).json({ message: 'PDV nao encontrado.' });
+      }
+
+      const suporteRemoto = pdv.suporte_remoto && typeof pdv.suporte_remoto === 'object'
+        ? pdv.suporte_remoto
+        : {};
+      const safeSupport = sanitizeRemoteSupportAdmin(suporteRemoto);
+
+      if (!safeSupport.rustdesk_id) {
+        return res.status(404).json({ message: 'Suporte remoto ainda nao configurado neste PDV.' });
+      }
+
+      return res.json({
+        ...safeSupport,
+        senha: decryptSecret(suporteRemoto.senha_criptografada) || null,
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao carregar credenciais de suporte remoto.', detail: error.message });
     }
   },
 

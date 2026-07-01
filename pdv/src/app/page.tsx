@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  Download,
   LoaderCircle,
   PlugZap,
   ShieldCheck
@@ -268,6 +269,7 @@ export default function PdvActivationPage() {
   const [isActivating, setIsActivating] = useState(false);
   const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
   const [isSupportConfiguring, setIsSupportConfiguring] = useState(false);
+  const [isSupportDownloading, setIsSupportDownloading] = useState(false);
   const [supportStatus, setSupportStatus] = useState<PdvRemoteSupportStatus | null>(null);
   const [supportMessage, setSupportMessage] = useState("");
   const [activatedPdv, setActivatedPdv] = useState<PdvSession | null>(null);
@@ -730,6 +732,34 @@ export default function PdvActivationPage() {
     }
   }
 
+  async function downloadRemoteSupportInstaller() {
+    const credentialPayload = getDesktopCredentialPayload();
+
+    if (!credentialPayload.credencial_dispositivo) {
+      setSupportMessage("Ative o PDV antes de baixar o RustDesk.");
+      return;
+    }
+
+    setIsSupportDownloading(true);
+    setSupportMessage("");
+
+    try {
+      const config = await apiPost<RemoteSupportConfigResponse>("/pdvs/suporte-remoto/config", credentialPayload);
+      const downloadWindow = window.open(config.instalador.url, "_blank", "noopener,noreferrer");
+
+      if (!downloadWindow) {
+        setSupportMessage(`Baixe o RustDesk em ${config.instalador.url}`);
+        return;
+      }
+
+      setSupportMessage("Download do RustDesk iniciado.");
+    } catch (error) {
+      setSupportMessage(error instanceof Error ? error.message : "Não foi possível iniciar o download do RustDesk.");
+    } finally {
+      setIsSupportDownloading(false);
+    }
+  }
+
   async function activatePdv() {
     if (!canActivate) {
       setStatusMessage("Informe o código de ativação com 6 caracteres.");
@@ -911,6 +941,16 @@ export default function PdvActivationPage() {
           </div>
 
           {supportStatus?.error ? <p className="pdv-support-error">{supportStatus.error}</p> : null}
+
+          <button
+            className="pdv-support-download-action"
+            disabled={isSupportConfiguring || isSupportDownloading}
+            type="button"
+            onClick={() => void downloadRemoteSupportInstaller()}
+          >
+            {isSupportDownloading ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Download aria-hidden="true" size={17} />}
+            Baixar RustDesk
+          </button>
         </div>
 
         <div className="pdv-modal-footer-actions">
