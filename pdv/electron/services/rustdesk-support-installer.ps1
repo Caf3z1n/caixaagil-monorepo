@@ -23,7 +23,9 @@ function Write-SupportStatus {
   }
 
   $Status.atualizado_em = (Get-Date).ToUniversalTime().ToString("o")
-  $Status | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+  $json = $Status | ConvertTo-Json -Depth 6
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($StatusPath, $json, $utf8NoBom)
 }
 
 function Test-IsAdministrator {
@@ -66,7 +68,12 @@ if (!(Test-IsAdministrator)) {
 function New-RustDeskPassword {
   $chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%*-_"
   $bytes = New-Object byte[] 24
-  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $rng.GetBytes($bytes)
+  } finally {
+    $rng.Dispose()
+  }
   $password = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
   return $password
 }

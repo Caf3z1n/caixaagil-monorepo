@@ -4,7 +4,7 @@ const { spawn } = require("node:child_process");
 
 function readJson(filePath, fallback) {
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
   } catch {
     return fallback;
   }
