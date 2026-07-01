@@ -41,8 +41,5 @@ jobs:
       - name: Pull Vercel environment
         run: npx vercel@latest pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
 
-      - name: Build Admin
-        run: npx vercel@latest build --prod --token="${{ secrets.VERCEL_TOKEN }}"
-
       - name: Deploy Admin
-        run: npx vercel@latest deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"
+        run: npx vercel@latest deploy --prod --token="${{ secrets.VERCEL_TOKEN }}"
