@@ -55,6 +55,18 @@ function getCodigoAssinaturaFromBody(body) {
   );
 }
 
+function getMercadoPagoDeviceSessionIdFromBody(body) {
+  const value =
+    body?.mercado_pago_device_id ||
+    body?.mercadoPagoDeviceId ||
+    body?.device_session_id ||
+    body?.deviceSessionId ||
+    body?.device_id ||
+    body?.deviceId;
+
+  return typeof value === 'string' ? value.trim() : null;
+}
+
 function isValidCheckoutToken(token) {
   return /^[A-Za-z0-9_-]{32,128}$/.test(token);
 }
@@ -695,6 +707,7 @@ module.exports = {
   async createCheckout(req, res) {
     const email = normalizeEmail(req.body?.email);
     const codigoAssinaturaInput = getCodigoAssinaturaFromBody(req.body);
+    const deviceSessionId = getMercadoPagoDeviceSessionIdFromBody(req.body);
 
     if (!isValidEmail(email)) {
       return res.status(400).json({ message: 'Informe um e-mail válido para iniciar o checkout.' });
@@ -807,6 +820,7 @@ module.exports = {
           const checkout = await createMercadoPagoPreapproval({
             appUrl: getPublicAppUrl(req),
             acao: 'contratar',
+            deviceSessionId,
             email,
             plano: reservedResult.planoPersonalizado,
             referenciaExterna: reservedResult.referenciaExterna,
@@ -881,6 +895,7 @@ module.exports = {
       const checkout = await createMercadoPagoPreapproval({
         appUrl: getPublicAppUrl(req),
         acao: 'contratar',
+        deviceSessionId,
         email,
         plano,
         referenciaExterna,
@@ -1021,6 +1036,7 @@ module.exports = {
     try {
       const acao = String(req.body?.acao || '').trim();
       const codigoAssinaturaInput = acao === 'mudar_plano' ? getCodigoAssinaturaFromBody(req.body) : '';
+      const deviceSessionId = getMercadoPagoDeviceSessionIdFromBody(req.body);
       await applyDueScheduledChanges({ usuarioId: req.user.id });
       const usuario = await Usuario.findByPk(req.user.id);
 
@@ -1189,6 +1205,7 @@ module.exports = {
           acao,
           appUrl: getPublicAppUrl(req),
           creditoRateioCentavos: rateio.creditoRateioCentavos,
+          deviceSessionId,
           email: usuario.email,
           plano,
           referenciaExterna,

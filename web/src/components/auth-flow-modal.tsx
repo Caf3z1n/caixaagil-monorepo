@@ -19,6 +19,7 @@ import {
 import { ActionButton } from "./action-button";
 import { AuthFeedback } from "./auth-feedback";
 import { ApiError, apiGet, apiPost } from "@/lib/api-client";
+import { getMercadoPagoDeviceSessionId } from "@/lib/mercado-pago-device";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import {
@@ -283,6 +284,14 @@ export function AuthFlowModal({
       setSelectedPlan(initialPlan ?? plans[0].id);
     }
   }, [initialPlan, plans, selectedPlan, step]);
+
+  useEffect(() => {
+    if (!isOpen || (step !== "plan" && step !== "payment")) {
+      return;
+    }
+
+    void getMercadoPagoDeviceSessionId(1200);
+  }, [isOpen, step]);
 
   const activeStepIndex = useMemo(() => {
     if (step === "email") {
@@ -641,6 +650,7 @@ export function AuthFlowModal({
     setCheckoutMessage("");
 
     try {
+      const deviceSessionId = await getMercadoPagoDeviceSessionId();
       const result = await apiPost<{
         assinaturaAtiva?: boolean;
         checkoutToken?: string;
@@ -649,6 +659,7 @@ export function AuthFlowModal({
         message?: string;
       }>("/assinaturas/checkout", {
         email,
+        ...(deviceSessionId ? { mercado_pago_device_id: deviceSessionId } : {}),
         ...(selectedPlanData.customCode
           ? { codigo_assinatura: selectedPlanData.customCode }
           : { plano: selectedPlan })

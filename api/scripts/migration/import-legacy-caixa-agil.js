@@ -6,7 +6,16 @@ const { Op } = require('sequelize');
 
 require('dotenv').config({ path: path.resolve(__dirname, '..', '..', '.env') });
 
-const sequelize = require('../../src/database');
+function requireApiModule(sourcePath, distPath) {
+  const sourceFullPath = path.resolve(__dirname, '..', '..', sourcePath);
+  if (fs.existsSync(sourceFullPath) || fs.existsSync(`${sourceFullPath}.js`)) {
+    return require(sourceFullPath);
+  }
+
+  return require(path.resolve(__dirname, '..', '..', distPath));
+}
+
+const sequelize = requireApiModule('src/database', 'dist/database');
 const {
   Caixa,
   CategoriaProduto,
@@ -18,7 +27,7 @@ const {
   SaldoEstoqueProduto,
   Usuario,
   Venda,
-} = require('../../src/app/models');
+} = requireApiModule('src/app/models', 'dist/app/models');
 
 const SOURCE_COMPANY_ID = '01KPPS7VVWPCQTKJ7SAKXHQNX6';
 const IMPORT_PDV_NAME = 'PDV importado Caixa Ágil antigo';
@@ -315,6 +324,19 @@ function getItemProductId(item) {
   );
 }
 
+function getProductNaturalKey(row) {
+  const barcode = onlyDigits(row.codigo_barras, 64);
+  if (barcode) {
+    return `barcode:${barcode}`;
+  }
+
+  return `name:${normalizeKey(row.categoria_id)}:${normalizeKey(row.nome)}`;
+}
+
+function getDuplicateProductKeys(rows) {
+  return new Set(countBy(rows, getProductNaturalKey).map(([key]) => key));
+}
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -551,8 +573,33 @@ async function importCategories(exportData, usuarioId, map, transaction, counter
   }
 }
 
-async function findProductByMapOrNaturalKey(row, usuarioId, categoriaId, map, transaction) {
+async function findProductByMapOrNaturalKey(row, usuarioId, categoriaId, map, transaction, duplicateContext) {
+  const naturalKey = getProductNaturalKey(row);
+  const isDuplicateNaturalKey = duplicateContext.keys.has(naturalKey);
   const mappedId = map.produtos[row.id];
+
+  if (mappedId) {
+    const mapped = await Produto.findOne({ where: { id: mappedId, usuario_id: usuarioId }, transaction });
+    if (mapped) {
+      if (!isDuplicateNaturalKey) {
+        return mapped;
+      }
+
+      const usedIds = duplicateContext.usedMappedIdsByKey.get(naturalKey) || new Set();
+      if (!usedIds.has(mapped.id)) {
+        usedIds.add(mapped.id);
+        duplicateContext.usedMappedIdsByKey.set(naturalKey, usedIds);
+        return mapped;
+      }
+
+      delete map.produtos[row.id];
+    }
+  }
+
+  if (isDuplicateNaturalKey) {
+    return null;
+  }
+
   if (mappedId) {
     const mapped = await Produto.findOne({ where: { id: mappedId, usuario_id: usuarioId }, transaction });
     if (mapped) {
@@ -580,6 +627,10 @@ async function findProductByMapOrNaturalKey(row, usuarioId, categoriaId, map, tr
 
 async function importProducts(exportData, usuarioId, map, transaction, counters, warnings) {
   let fallbackCategory = null;
+  const duplicateContext = {
+    keys: getDuplicateProductKeys(exportData.produtos),
+    usedMappedIdsByKey: new Map(),
+  };
 
   for (const row of exportData.produtos) {
     let categoriaId = map.categorias[row.categoria_id];
@@ -590,7 +641,7 @@ async function importProducts(exportData, usuarioId, map, transaction, counters,
       warnings.push(`Product ${row.id} used fallback category.`);
     }
 
-    let product = await findProductByMapOrNaturalKey(row, usuarioId, categoriaId, map, transaction);
+    let product = await findProductByMapOrNaturalKey(row, usuarioId, categoriaId, map, transaction, duplicateContext);
     const payload = {
       usuario_id: usuarioId,
       categoria_id: categoriaId,
@@ -1058,6 +1109,13 @@ async function main() {
   }
 
   const exportDirArg = args['export-dir'] || args._[0];
+  if (!args['target-user-email'] && !args['target-user-id'] && args._[1]) {
+    if (/^\d+$/.test(String(args._[1]))) {
+      args['target-user-id'] = args._[1];
+    } else {
+      args['target-user-email'] = args._[1];
+    }
+  }
 
   if (!exportDirArg) {
     throw new Error('Missing --export-dir.');

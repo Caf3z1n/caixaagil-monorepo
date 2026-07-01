@@ -43,6 +43,16 @@ function getMercadoPagoFrequency(plano) {
   };
 }
 
+function normalizeMercadoPagoDeviceSessionId(value) {
+  const deviceSessionId = String(value || '').trim();
+
+  if (!deviceSessionId || deviceSessionId.length > 256) {
+    return null;
+  }
+
+  return /^[A-Za-z0-9._:-]+$/.test(deviceSessionId) ? deviceSessionId : null;
+}
+
 async function mercadoPagoGet(path) {
   const response = await fetch(`https://api.mercadopago.com${path}`, {
     method: 'GET',
@@ -244,6 +254,7 @@ async function createMercadoPagoPreapproval({
   appUrl,
   creditoRateioCentavos = 0,
   email,
+  deviceSessionId = null,
   plano,
   referenciaExterna,
   startDate = null,
@@ -300,12 +311,19 @@ async function createMercadoPagoPreapproval({
     payload.auto_recurring.start_date = startDate instanceof Date ? startDate.toISOString() : startDate;
   }
 
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  };
+  const normalizedDeviceSessionId = normalizeMercadoPagoDeviceSessionId(deviceSessionId);
+
+  if (normalizedDeviceSessionId) {
+    headers['X-meli-session-id'] = normalizedDeviceSessionId;
+  }
+
   const response = await fetch('https://api.mercadopago.com/preapproval', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 

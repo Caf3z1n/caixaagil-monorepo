@@ -39,6 +39,7 @@ import {
 } from "@/lib/platform-session";
 import { AuthFeedback } from "@/components/auth-feedback";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
+import { getMercadoPagoDeviceSessionId } from "@/lib/mercado-pago-device";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 
@@ -1167,6 +1168,14 @@ export default function PlatformAccountPage() {
     };
   }, [activePairing?.codigo]);
 
+  useEffect(() => {
+    if (!subscriptionStep) {
+      return;
+    }
+
+    void getMercadoPagoDeviceSessionId(1200);
+  }, [subscriptionStep]);
+
   const conta = accountData?.conta;
   const isSubconta = accountData?.tipo_conta === "subconta";
   const accountLabel = isSubconta ? conta?.nome || "Subconta" : "Conta principal";
@@ -1796,13 +1805,21 @@ export default function PlatformAccountPage() {
     try {
       setIsSaving(true);
       setFeedback(null);
-      const result = await apiPost<CheckoutResponse>(
-        "/assinaturas/gerenciar-checkout",
+      const deviceSessionId = await getMercadoPagoDeviceSessionId();
+      const checkoutPayload: Record<string, unknown> =
         acao === "mudar_plano"
           ? selectedCustomSubscriptionCode
             ? { acao, codigo_assinatura: selectedCustomSubscriptionCode }
             : { acao, plano: selectedPlan }
-          : { acao },
+          : { acao };
+
+      if (deviceSessionId) {
+        checkoutPayload.mercado_pago_device_id = deviceSessionId;
+      }
+
+      const result = await apiPost<CheckoutResponse>(
+        "/assinaturas/gerenciar-checkout",
+        checkoutPayload,
         { token }
       );
 
