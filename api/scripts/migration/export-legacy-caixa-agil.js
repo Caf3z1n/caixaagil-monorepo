@@ -9,6 +9,8 @@ const SOURCE_COMPANY_ID = '01KPPS7VVWPCQTKJ7SAKXHQNX6';
 
 const TABLES = [
   'categorias',
+  'categorias_fiscais',
+  'perfis_fiscais',
   'produtos',
   'estoques',
   'saldos_estoque',

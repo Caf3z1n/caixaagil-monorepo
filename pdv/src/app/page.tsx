@@ -620,6 +620,36 @@ export default function PdvActivationPage() {
     };
   }
 
+  const refreshRemoteSupportStatus = useCallback(async () => {
+    const store = getLocalPdvStore();
+
+    if (!store?.getRemoteSupportStatus) {
+      return null;
+    }
+
+    try {
+      const status = await store.getRemoteSupportStatus();
+      setSupportStatus(status);
+      setSupportMessage(status.status === "erro" ? status.error || "" : "");
+      return status;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const openRemoteSupportModal = useCallback(() => {
+    setIsSupportModalOpen(true);
+    void refreshRemoteSupportStatus();
+  }, [refreshRemoteSupportStatus]);
+
+  useEffect(() => {
+    if (appState !== "system") {
+      return;
+    }
+
+    void refreshRemoteSupportStatus();
+  }, [appState, refreshRemoteSupportStatus]);
+
   async function reportRemoteSupportStatus(payload: Record<string, unknown>) {
     const credentialPayload = getDesktopCredentialPayload();
 
@@ -723,7 +753,7 @@ export default function PdvActivationPage() {
       setInitialBillingStatus(response.billing_status ?? null);
       setConnectivity("online");
       goToStep("success");
-      setIsSupportModalOpen(true);
+      openRemoteSupportModal();
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Não foi possível ativar este PDV.");
     } finally {
@@ -824,7 +854,7 @@ export default function PdvActivationPage() {
         </p>
 
         <div className="pdv-onboarding-action-row">
-          <button className="pdv-onboarding-secondary" type="button" onClick={() => setIsSupportModalOpen(true)}>
+          <button className="pdv-onboarding-secondary" type="button" onClick={openRemoteSupportModal}>
             Suporte remoto
             <ShieldCheck aria-hidden="true" size={17} />
           </button>
@@ -834,6 +864,79 @@ export default function PdvActivationPage() {
           </button>
         </div>
       </>
+    );
+  }
+
+  function renderRemoteSupportModal() {
+    if (!isSupportModalOpen) {
+      return null;
+    }
+
+    return (
+      <CashierModal
+        description="Instale e configure o RustDesk deste computador para atendimento remoto."
+        dismissible={!isSupportConfiguring}
+        headingIcon={<ShieldCheck aria-hidden="true" size={22} />}
+        onClose={() => setIsSupportModalOpen(false)}
+        title="Suporte remoto"
+      >
+        <div className="pdv-support-modal-content">
+          <div className={`pdv-support-status-card pdv-support-status-${supportStatus?.status ?? "nao_configurado"}`}>
+            <span className="pdv-support-status-icon" aria-hidden="true">
+              {isSupportConfiguring || supportStatus?.status === "configurando" ? (
+                <LoaderCircle className="pdv-spin" size={20} />
+              ) : supportStatus?.status === "configurado" ? (
+                <Check size={20} />
+              ) : (
+                <ShieldCheck size={20} />
+              )}
+            </span>
+            <span>
+              <strong>
+                {supportStatus?.status === "configurado"
+                  ? "RustDesk configurado"
+                  : supportStatus?.status === "erro"
+                    ? "Configuração incompleta"
+                    : isSupportConfiguring
+                      ? "Configurando RustDesk"
+                      : "Aguardando configuração"}
+              </strong>
+              <small>
+                {supportMessage ||
+                  (supportStatus?.rustdeskId
+                    ? `ID ${supportStatus.rustdeskId}`
+                    : "A instalação pode solicitar permissão de administrador do Windows.")}
+              </small>
+            </span>
+          </div>
+
+          {supportStatus?.error ? <p className="pdv-support-error">{supportStatus.error}</p> : null}
+        </div>
+
+        <div className="pdv-modal-footer-actions">
+          <button
+            className="pdv-onboarding-secondary"
+            disabled={isSupportConfiguring}
+            type="button"
+            onClick={() => setIsSupportModalOpen(false)}
+          >
+            Pular por enquanto
+          </button>
+          <button
+            className="pdv-onboarding-primary"
+            disabled={isSupportConfiguring}
+            type="button"
+            onClick={() => void configureRemoteSupport()}
+          >
+            {isSupportConfiguring ? "Configurando" : supportStatus?.status === "configurado" ? "Reconfigurar" : "Configurar"}
+            {isSupportConfiguring ? (
+              <LoaderCircle aria-hidden="true" className="pdv-spin" size={18} />
+            ) : (
+              <ShieldCheck aria-hidden="true" size={18} />
+            )}
+          </button>
+        </div>
+      </CashierModal>
     );
   }
 
@@ -872,23 +975,30 @@ export default function PdvActivationPage() {
       : "PDV autenticado";
 
     return (
-      <main className="pdv-system-page">
-        <DesktopCashierFlow
-          connectivity={connectivity}
-          deviceCredential={getStoredCredential()}
-          deviceId={getDeviceId()}
-          initialSettings={initialPdvSettings}
-          initialEmployees={initialEmployees}
-          initialBillingStatus={initialBillingStatus}
-          lastAccessLabel={formatDateTime(activatedPdv?.ultimo_acesso_em)}
-          onBillingStatusChange={handleBillingStatusChange}
-          onConnectivityChange={setConnectivity}
-          onSystemMessage={setSystemMessage}
-          pdvIdentity={pdvIdentity}
-          shiftSequenceScope={getShiftSequenceScope(activatedPdv)}
-          systemMessage={systemMessage}
-        />
-      </main>
+      <>
+        <main className="pdv-system-page">
+          <DesktopCashierFlow
+            connectivity={connectivity}
+            deviceCredential={getStoredCredential()}
+            deviceId={getDeviceId()}
+            initialSettings={initialPdvSettings}
+            initialEmployees={initialEmployees}
+            initialBillingStatus={initialBillingStatus}
+            lastAccessLabel={formatDateTime(activatedPdv?.ultimo_acesso_em)}
+            remoteSupportStatus={supportStatus}
+            isRemoteSupportConfiguring={isSupportConfiguring}
+            onBillingStatusChange={handleBillingStatusChange}
+            onConnectivityChange={setConnectivity}
+            onOpenRemoteSupport={openRemoteSupportModal}
+            onSystemMessage={setSystemMessage}
+            pdvIdentity={pdvIdentity}
+            shiftSequenceScope={getShiftSequenceScope(activatedPdv)}
+            systemMessage={systemMessage}
+          />
+        </main>
+
+        {renderRemoteSupportModal()}
+      </>
     );
   }
 
@@ -934,72 +1044,7 @@ export default function PdvActivationPage() {
       </PdvScaleSurface>
     </main>
 
-      {isSupportModalOpen ? (
-        <CashierModal
-          description="Instale e configure o RustDesk deste computador para atendimento remoto."
-          dismissible={!isSupportConfiguring}
-          headingIcon={<ShieldCheck aria-hidden="true" size={22} />}
-          onClose={() => setIsSupportModalOpen(false)}
-          title="Suporte remoto"
-        >
-          <div className="pdv-support-modal-content">
-            <div className={`pdv-support-status-card pdv-support-status-${supportStatus?.status ?? "nao_configurado"}`}>
-              <span className="pdv-support-status-icon" aria-hidden="true">
-                {isSupportConfiguring || supportStatus?.status === "configurando" ? (
-                  <LoaderCircle className="pdv-spin" size={20} />
-                ) : supportStatus?.status === "configurado" ? (
-                  <Check size={20} />
-                ) : (
-                  <ShieldCheck size={20} />
-                )}
-              </span>
-              <span>
-                <strong>
-                  {supportStatus?.status === "configurado"
-                    ? "RustDesk configurado"
-                    : supportStatus?.status === "erro"
-                      ? "Configuração incompleta"
-                      : isSupportConfiguring
-                        ? "Configurando RustDesk"
-                        : "Aguardando configuração"}
-                </strong>
-                <small>
-                  {supportMessage ||
-                    (supportStatus?.rustdeskId
-                      ? `ID ${supportStatus.rustdeskId}`
-                      : "A instalação pode solicitar permissão de administrador do Windows.")}
-                </small>
-              </span>
-            </div>
-
-            {supportStatus?.error ? <p className="pdv-support-error">{supportStatus.error}</p> : null}
-          </div>
-
-          <div className="pdv-modal-footer-actions">
-            <button
-              className="pdv-onboarding-secondary"
-              disabled={isSupportConfiguring}
-              type="button"
-              onClick={() => setIsSupportModalOpen(false)}
-            >
-              Pular por enquanto
-            </button>
-            <button
-              className="pdv-onboarding-primary"
-              disabled={isSupportConfiguring}
-              type="button"
-              onClick={() => void configureRemoteSupport()}
-            >
-              {isSupportConfiguring ? "Configurando" : supportStatus?.status === "configurado" ? "Reconfigurar" : "Configurar"}
-              {isSupportConfiguring ? (
-                <LoaderCircle aria-hidden="true" className="pdv-spin" size={18} />
-              ) : (
-                <ShieldCheck aria-hidden="true" size={18} />
-              )}
-            </button>
-          </div>
-        </CashierModal>
-      ) : null}
+      {renderRemoteSupportModal()}
     </>
   );
 }

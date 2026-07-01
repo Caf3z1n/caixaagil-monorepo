@@ -788,18 +788,14 @@ function getRemoteSupportStatusLabel(support?: RemoteSupportSummary | null) {
   const status = normalizeStatus(support?.status);
 
   if (status === "configurado") {
-    return "Configurado";
-  }
-
-  if (status === "configurando") {
-    return "Pendente";
+    return "Suporte configurado";
   }
 
   if (status === "erro") {
-    return "Erro";
+    return "Suporte com erro";
   }
 
-  return "Não configurado";
+  return "Suporte pendente";
 }
 
 function getRemoteSupportStatusClass(support?: RemoteSupportSummary | null) {
@@ -809,11 +805,7 @@ function getRemoteSupportStatusClass(support?: RemoteSupportSummary | null) {
     return "platform-device-state-ok";
   }
 
-  if (status === "erro") {
-    return "platform-device-state-danger";
-  }
-
-  return "platform-device-state-muted";
+  return "platform-device-state-danger";
 }
 
 function getSubaccountStatusTone(subconta: Subconta) {
@@ -2378,11 +2370,11 @@ export default function PlatformAccountPage() {
                         <span>{pdv.identificacao}</span>
                         <span aria-hidden="true">·</span>
                         <span className={stateClass}>{pdvState}</span>
-                        <span aria-hidden="true">Â·</span>
-                        <span className={supportStateClass}>Suporte: {supportStatusLabel}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className={supportStateClass}>{supportStatusLabel}</span>
                         {supportRustDeskId ? (
                           <>
-                            <span aria-hidden="true">Â·</span>
+                            <span aria-hidden="true">·</span>
                             <span>ID {supportRustDeskId}</span>
                           </>
                         ) : null}

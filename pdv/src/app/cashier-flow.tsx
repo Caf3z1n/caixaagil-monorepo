@@ -53,6 +53,7 @@ import {
   Search,
   Settings,
   Shirt,
+  ShieldCheck,
   ShoppingCart,
   ShoppingBasket,
   Smartphone,
@@ -76,6 +77,7 @@ import {
   type LocalPdvStorePendingEvent,
   type LocalPdvStoreSummary,
   type NonFiscalReceiptPayload,
+  type PdvRemoteSupportStatus,
   type PrintShiftSummaryResult
 } from "@/lib/local-pdv-store";
 import {
@@ -474,9 +476,12 @@ type DesktopCashierFlowProps = {
   initialEmployees?: ApiEmployee[];
   initialBillingStatus?: BillingStatus | null;
   lastAccessLabel: string;
+  remoteSupportStatus?: PdvRemoteSupportStatus | null;
+  isRemoteSupportConfiguring?: boolean;
   systemMessage?: string;
   onBillingStatusChange?: (status: BillingStatus | null) => void;
   onConnectivityChange: (state: ConnectivityState) => void;
+  onOpenRemoteSupport?: () => void;
   onSystemMessage: (message: string) => void;
 };
 
@@ -2226,8 +2231,11 @@ export function DesktopCashierFlow({
   initialEmployees,
   initialBillingStatus,
   lastAccessLabel,
+  remoteSupportStatus,
+  isRemoteSupportConfiguring = false,
   onBillingStatusChange,
   onConnectivityChange,
+  onOpenRemoteSupport,
   systemMessage,
   onSystemMessage
 }: DesktopCashierFlowProps) {
@@ -6907,13 +6915,16 @@ export function DesktopCashierFlow({
             eventSyncError={eventSyncError}
             isCatalogSyncing={isCatalogSyncing}
             isManualSyncing={isManualSyncing}
+            isRemoteSupportConfiguring={isRemoteSupportConfiguring}
             lastAccessLabel={lastAccessLabel}
             localStoreScope={localStoreScope}
             onClose={() => setIsSettingsOpen(false)}
             onAppScaleChange={setAppScale}
+            onOpenRemoteSupport={onOpenRemoteSupport}
             onShowSyncDetails={() => setIsSyncDetailsOpen(true)}
             onSyncNow={syncNow}
             pdvIdentity={pdvIdentity}
+            remoteSupportStatus={remoteSupportStatus}
             syncSummary={syncSummary}
           />
         ) : null}
@@ -7008,12 +7019,15 @@ function PdvSettingsModal({
   eventSyncError,
   isCatalogSyncing,
   isManualSyncing,
+  isRemoteSupportConfiguring,
   localStoreScope,
   onAppScaleChange,
   onClose,
+  onOpenRemoteSupport,
   onShowSyncDetails,
   onSyncNow,
   pdvIdentity,
+  remoteSupportStatus,
   syncSummary
 }: {
   appScale: PdvAppScaleValue;
@@ -7023,13 +7037,16 @@ function PdvSettingsModal({
   eventSyncError: string;
   isCatalogSyncing: boolean;
   isManualSyncing: boolean;
+  isRemoteSupportConfiguring: boolean;
   lastAccessLabel: string;
   localStoreScope: string;
   onAppScaleChange: (scale: PdvAppScaleValue) => void;
   onClose: () => void;
+  onOpenRemoteSupport?: () => void;
   onShowSyncDetails: () => void;
   onSyncNow: () => void | Promise<void>;
   pdvIdentity: string;
+  remoteSupportStatus?: PdvRemoteSupportStatus | null;
   syncSummary: LocalPdvStoreSummary;
 }) {
   const hasQueueProblem = syncSummary.failed > 0 || Boolean(eventSyncError);
@@ -7045,6 +7062,19 @@ function PdvSettingsModal({
     ? "Atualizando dados"
     : `Última sincronização: ${formatSyncDateTime(syncSummary.lastSyncedAt ?? catalogSyncedAt)}`;
   const canSyncNow = !isManualSyncing;
+  const isRemoteSupportConfigured = remoteSupportStatus?.status === "configurado";
+  const remoteSupportStatusLabel = isRemoteSupportConfiguring
+    ? "Configurando"
+    : isRemoteSupportConfigured
+      ? "Configurado"
+      : "Pendente";
+  const remoteSupportStatusClass = isRemoteSupportConfigured
+    ? "pdv-settings-section-status-success"
+    : "pdv-settings-section-status-danger";
+  const remoteSupportDetail = remoteSupportStatus?.rustdeskId
+    ? `ID ${remoteSupportStatus.rustdeskId}`
+    : remoteSupportStatus?.error || "Não configurado";
+  const remoteSupportActionLabel = isRemoteSupportConfigured ? "Ver suporte remoto" : "Configurar suporte remoto";
   const [printSettings, setPrintSettings] = useState<PdvFiscalPrintSettings>(defaultPdvFiscalPrintSettings);
   const [fiscalSeries, setFiscalSeries] = useState(1);
   const [printerOptions, setPrinterOptions] = useState<string[]>([]);
@@ -7220,6 +7250,27 @@ function PdvSettingsModal({
             {isManualSyncing
               ? "Sincronizando"
               : "Sincronizar agora"}
+          </button>
+        </section>
+
+        <section className="pdv-settings-section" aria-label="Suporte remoto do PDV">
+          <div className="pdv-settings-section-head">
+            <ShieldCheck aria-hidden="true" size={20} />
+            <div>
+              <strong>Suporte remoto</strong>
+              <span className={remoteSupportStatusClass}>{remoteSupportStatusLabel}</span>
+              <em>{remoteSupportDetail}</em>
+            </div>
+          </div>
+
+          <button
+            className="pdv-sync-action"
+            disabled={!onOpenRemoteSupport}
+            type="button"
+            onClick={onOpenRemoteSupport}
+          >
+            <ShieldCheck aria-hidden="true" size={17} />
+            {remoteSupportActionLabel}
           </button>
         </section>
 

@@ -5185,6 +5185,10 @@ button {
   color: var(--danger) !important;
 }
 
+.pdv-settings-section-status-success {
+  color: oklch(0.47 0.14 151) !important;
+}
+
 .pdv-settings-inline-alert {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
