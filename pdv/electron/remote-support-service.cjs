@@ -10,6 +10,10 @@ function readJson(filePath, fallback) {
   }
 }
 
+function isLegacyRandomGeneratorError(error) {
+  return typeof error === "string" && error.includes("RandomNumberGenerator") && error.includes("Fill");
+}
+
 function getProgramDataPath(app) {
   return process.env.ProgramData || path.dirname(app.getPath("userData"));
 }
@@ -40,7 +44,7 @@ function normalizeSupportStatus(statusPath) {
     };
   }
 
-  return {
+  const normalized = {
     status: status.status || "nao_configurado",
     rustdeskId: status.rustdesk_id || status.rustdeskId || null,
     password: status.senha || status.password || null,
@@ -48,6 +52,16 @@ function normalizeSupportStatus(statusPath) {
     error: status.erro || status.error || null,
     updatedAt: status.atualizado_em || status.updatedAt || null
   };
+
+  if (normalized.status === "erro" && isLegacyRandomGeneratorError(normalized.error)) {
+    return {
+      ...normalized,
+      status: "nao_configurado",
+      error: null
+    };
+  }
+
+  return normalized;
 }
 
 function runPowerShell(args) {
