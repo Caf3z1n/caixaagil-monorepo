@@ -37,14 +37,15 @@ internal static class Program
         WriteIndented = false
     };
 
-    public static async Task<int> Main()
+    [STAThread]
+    public static int Main()
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
         try
         {
-            var rawRequest = await Console.In.ReadToEndAsync();
+            var rawRequest = Console.In.ReadToEnd();
             rawRequest = rawRequest.TrimStart('\uFEFF');
 
             if (string.IsNullOrWhiteSpace(rawRequest))

@@ -162,21 +162,27 @@ function mergeFiscalConfig(app, scope, savedConfig, overrideConfig) {
   };
 }
 
-function normalizeWorkerResponse(command, rawOutput) {
+function normalizeWorkerResponse(command, rawOutput, rawErrorOutput) {
   const trimmed = String(rawOutput || "").trim();
+  const errorOutput = String(rawErrorOutput || "").trim();
   const jsonLine = trimmed
     .split(/\r?\n/)
     .reverse()
     .find(line => line.trim().startsWith("{") && line.trim().endsWith("}"));
 
   if (!jsonLine) {
+    const technicalMessages = [trimmed, errorOutput].filter(Boolean);
+
     return {
       success: false,
       command,
       status: "worker_saida_invalida",
       friendlyMessage: "O worker fiscal retornou uma saída inválida.",
-      technicalMessage: trimmed || "stdout vazio",
-      data: null
+      technicalMessage: technicalMessages.length > 0 ? technicalMessages.join("\n") : "stdout vazio",
+      data: {
+        rawOutput: trimmed || null,
+        rawErrorOutput: errorOutput || null
+      }
     };
   }
 
@@ -190,7 +196,8 @@ function normalizeWorkerResponse(command, rawOutput) {
       friendlyMessage: "O worker fiscal retornou JSON inválido.",
       technicalMessage: error instanceof Error ? error.message : String(error),
       data: {
-        rawOutput: trimmed
+        rawOutput: trimmed,
+        rawErrorOutput: errorOutput || null
       }
     };
   }
@@ -268,7 +275,7 @@ function runWorker(app, input) {
 
       clearTimeout(timeout);
       settled = true;
-      const response = normalizeWorkerResponse(input.command, stdout);
+      const response = normalizeWorkerResponse(input.command, stdout, stderr);
 
       if (!response.technicalMessage && stderr) {
         response.technicalMessage = stderr.trim();

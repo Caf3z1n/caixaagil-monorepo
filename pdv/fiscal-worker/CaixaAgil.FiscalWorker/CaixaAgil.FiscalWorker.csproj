@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <AssemblyName>CaixaAgil.FiscalWorker</AssemblyName>
     <RootNamespace>CaixaAgil.FiscalWorker</RootNamespace>
     <DebugType>none</DebugType>
