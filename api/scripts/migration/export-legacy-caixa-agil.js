@@ -18,6 +18,7 @@ const TABLES = [
   'sessoes_caixa',
   'conferencias_caixa',
   'vendas',
+  'documentos_fiscais',
   'movimentacoes_estoque',
   'despesas_caixa',
 ];
@@ -174,27 +175,44 @@ async function exportTable(client, tableName, companyId, outputDir) {
     };
   }
 
-  const result = await client.query(`SELECT * FROM "${tableName}" WHERE empresa_id = $1 ORDER BY id`, [companyId]);
-  const payload = {
-    table: tableName,
-    sourceCompanyId: companyId,
-    exportedAt: new Date().toISOString(),
-    rowCount: result.rowCount,
-    rows: result.rows,
-  };
+  const countResult = await client.query(`SELECT COUNT(*)::integer AS total FROM "${tableName}" WHERE empresa_id = $1`, [companyId]);
+  const rowCount = Number(countResult.rows[0]?.total || 0);
   const fileName = `${tableName}.json`;
   const filePath = path.join(outputDir, fileName);
-  const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+  const hash = crypto.createHash('sha256');
+  let bytes = 0;
+  const write = chunk => {
+    fs.appendFileSync(filePath, chunk, 'utf8');
+    hash.update(chunk);
+    bytes += Buffer.byteLength(chunk);
+  };
+  const batchSize = 100;
+  let writtenRows = 0;
 
-  fs.writeFileSync(filePath, serialized, 'utf8');
+  fs.writeFileSync(filePath, '', 'utf8');
+  write(`{"table":${JSON.stringify(tableName)},"sourceCompanyId":${JSON.stringify(companyId)},"exportedAt":${JSON.stringify(new Date().toISOString())},"rowCount":${rowCount},"rows":[\n`);
+
+  for (let offset = 0; offset < rowCount; offset += batchSize) {
+    const result = await client.query(
+      `SELECT * FROM "${tableName}" WHERE empresa_id = $1 ORDER BY id LIMIT $2 OFFSET $3`,
+      [companyId, batchSize, offset]
+    );
+
+    for (const row of result.rows) {
+      write(`${writtenRows > 0 ? ',\n' : ''}${JSON.stringify(row)}`);
+      writtenRows += 1;
+    }
+  }
+
+  write('\n]}\n');
 
   return {
     table: tableName,
     skipped: false,
-    rowCount: result.rowCount,
+    rowCount,
     fileName,
-    bytes: Buffer.byteLength(serialized),
-    sha256: crypto.createHash('sha256').update(serialized).digest('hex'),
+    bytes,
+    sha256: hash.digest('hex'),
   };
 }
 
