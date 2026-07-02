@@ -31,6 +31,7 @@ const {
 
 const SOURCE_COMPANY_ID = '01KPPS7VVWPCQTKJ7SAKXHQNX6';
 const IMPORT_PDV_NAME = 'PDV importado Caixa Ágil antigo';
+const IMPORT_HISTORY_PDV_NAME = 'PDV importado Caixa \u00c1gil antigo - hist\u00f3rico';
 const IMPORT_DEVICE_ID = 'legacy-caixa-agil';
 const MAP_FILE = 'legacy-import-map.json';
 const SCHEMA_TABLES = [
@@ -807,14 +808,34 @@ async function importClients(exportData, usuarioId, map, transaction, counters) 
 }
 
 async function getOrCreateImportPdv(usuarioId, transaction, counters) {
-  let pdv = await Pdv.findOne({
-    where: { usuario_id: usuarioId, nome: IMPORT_PDV_NAME },
-    transaction,
-  });
+  const findByName = nome =>
+    Pdv.findOne({
+      where: { usuario_id: usuarioId, nome },
+      transaction,
+    });
+
+  let desiredName = IMPORT_PDV_NAME;
+  let pdv = await findByName(desiredName);
+
+  if (pdv) {
+    const nonLegacyCashSessionCount = await Caixa.count({
+      where: {
+        usuario_id: usuarioId,
+        pdv_id: pdv.id,
+        id: { [Op.notLike]: 'legacy-%' },
+      },
+      transaction,
+    });
+
+    if (nonLegacyCashSessionCount > 0) {
+      desiredName = IMPORT_HISTORY_PDV_NAME;
+      pdv = await findByName(desiredName);
+    }
+  }
 
   const payload = {
     usuario_id: usuarioId,
-    nome: IMPORT_PDV_NAME,
+    nome: desiredName,
     status: 'inativo',
     ativo: false,
     sincronizacao_pendente: false,
@@ -1175,7 +1196,23 @@ async function main() {
 
 main()
   .catch(error => {
-    console.error(error.message);
+    if (process.env.LEGACY_IMPORT_DEBUG === '1') {
+      console.error(JSON.stringify({
+        name: error.name,
+        message: error.message,
+        errors: Array.isArray(error.errors)
+          ? error.errors.map(item => ({
+              message: item.message,
+              path: item.path,
+              value: item.value,
+              type: item.type,
+            }))
+          : undefined,
+        stack: error.stack,
+      }, null, 2));
+    } else {
+      console.error(error.message);
+    }
     process.exitCode = 1;
   })
   .finally(async () => {

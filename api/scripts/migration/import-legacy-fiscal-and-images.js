@@ -67,6 +67,7 @@ Options:
   --target-user-email <email> Target user email. Required for --apply unless --target-user-id is used.
   --target-user-id <id>       Target user id. Required for --apply unless --target-user-email is used.
   --legacy-media-dir <dir>    Optional old media root containing <companyId>/products files.
+  --skip-images               Import fiscal groups only; do not import product images.
   --apply                     Write changes.
   --dry-run                   Validate only. Default mode.
   --confirm-backup            Required when NODE_ENV=production and --apply is used.
@@ -409,7 +410,7 @@ async function resolveTargetUser(args) {
   return null;
 }
 
-async function importFiscalAndImages({ exportDir, targetUser, apply, legacyMediaDir }) {
+async function importFiscalAndImages({ exportDir, targetUser, apply, legacyMediaDir, skipImages }) {
   const profiles = readExportTable(exportDir, 'perfis_fiscais');
   const products = readExportTable(exportDir, 'produtos');
   const map = loadImportMap(exportDir);
@@ -434,6 +435,7 @@ async function importFiscalAndImages({ exportDir, targetUser, apply, legacyMedia
         produtos_com_imagem_dados: products.filter(product => product.imagem_url_dados).length,
       },
       localChecks: {
+        skipImages,
         legacyMediaDir: legacyMediaDir || null,
         imagens_com_arquivo_local: legacyMediaDir
           ? products.filter(product => getLegacyStorageImage(product, legacyMediaDir)).length
@@ -487,7 +489,10 @@ async function importFiscalAndImages({ exportDir, targetUser, apply, legacyMedia
         }
       }
 
-      if (!legacyProduct.imagem_url_dados && !legacyProduct.imagem_chave && !legacyProduct.imagem_url) {
+      if (
+        skipImages ||
+        (!legacyProduct.imagem_url_dados && !legacyProduct.imagem_chave && !legacyProduct.imagem_url)
+      ) {
         continue;
       }
 
@@ -577,6 +582,7 @@ async function main() {
     targetUser,
     apply,
     legacyMediaDir: args['legacy-media-dir'] ? path.resolve(args['legacy-media-dir']) : null,
+    skipImages: Boolean(args['skip-images']),
   });
   console.log(JSON.stringify(result, null, 2));
 }
