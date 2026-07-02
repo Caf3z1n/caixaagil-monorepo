@@ -64,18 +64,6 @@ function formatUpdateSpeed(bytesPerSecond: number | null | undefined) {
   }).format(speed / 1024)} KB/s`;
 }
 
-export const previewPdvUpdateModalInDevelopment = process.env.NODE_ENV === "development";
-
-export const pdvUpdatePreviewStatus: PdvUpdateStatus = {
-  status: "available",
-  version: "0.3",
-  availableVersion: "0.4",
-  error: null,
-  progress: 0,
-  sizeBytes: 42 * 1024 * 1024,
-  bytesPerSecond: null
-};
-
 export function PdvUpdateModal({
   hasOpenSession,
   isBusy,

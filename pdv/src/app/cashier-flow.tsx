@@ -11,6 +11,7 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type UIEvent as ReactUIEvent,
   type CSSProperties
 } from "react";
 import {
@@ -131,6 +132,8 @@ type ApiCatalogCategory = {
   cor?: string | null;
   produtos_count?: number;
 };
+
+const PRODUCT_PICKER_BATCH_SIZE = 20;
 
 type ApiCatalogProduct = {
   id: number;
@@ -7858,15 +7861,40 @@ function ProductPickerModal({
   onClose: () => void;
 }) {
   const pickerSearchRef = useRef<HTMLInputElement | null>(null);
+  const productPickerListRef = useRef<HTMLDivElement | null>(null);
+  const searchQueryRef = useRef(searchQuery);
+  const productPickerFilterKey = `${selectedCategoryId}::${searchQuery}`;
   const [activeProductId, setActiveProductId] = useState("");
+  const [productPickerWindow, setProductPickerWindow] = useState({
+    filterKey: productPickerFilterKey,
+    limit: PRODUCT_PICKER_BATCH_SIZE
+  });
+  const visibleProductLimit = productPickerWindow.filterKey === productPickerFilterKey
+    ? productPickerWindow.limit
+    : PRODUCT_PICKER_BATCH_SIZE;
   const visibleCategories = useMemo(
     () => categories.filter((category) => category.productsCount > 0 || products.some((product) => product.categoryId === category.id)),
     [categories, products]
   );
-  const groupedProducts = useMemo(() => {
-    const byCategory = new Map<string, { category: ProductCategory; products: Product[] }>();
+  const renderedProducts = useMemo(
+    () => products.slice(0, visibleProductLimit),
+    [products, visibleProductLimit]
+  );
+  const categoryProductTotals = useMemo(() => {
+    const totals = new Map<string, number>();
 
     products.forEach((product) => {
+      const categoryId = product.categoryId ?? "sem-categoria";
+
+      totals.set(categoryId, (totals.get(categoryId) ?? 0) + 1);
+    });
+
+    return totals;
+  }, [products]);
+  const groupedProducts = useMemo(() => {
+    const byCategory = new Map<string, { category: ProductCategory; products: Product[]; totalProducts: number }>();
+
+    renderedProducts.forEach((product) => {
       const fallbackCategory: ProductCategory = {
         id: product.categoryId ?? "sem-categoria",
         name: product.category,
@@ -7877,33 +7905,123 @@ function ProductPickerModal({
       };
       const category = categories.find((item) => item.id === product.categoryId) ?? fallbackCategory;
       const currentGroup = byCategory.get(category.id);
+      const totalProducts = categoryProductTotals.get(category.id) ?? 0;
 
       if (currentGroup) {
         currentGroup.products.push(product);
         return;
       }
 
-      byCategory.set(category.id, { category, products: [product] });
+      byCategory.set(category.id, { category, products: [product], totalProducts });
     });
 
     return Array.from(byCategory.values());
-  }, [categories, products]);
+  }, [categories, categoryProductTotals, renderedProducts]);
   const selectableProducts = useMemo(
     () => isFiscalEmissionEnabled
-      ? products.filter((product) => getProductFiscalIssues(product).length === 0)
-      : products,
-    [isFiscalEmissionEnabled, products]
+      ? renderedProducts.filter((product) => getProductFiscalIssues(product).length === 0)
+      : renderedProducts,
+    [isFiscalEmissionEnabled, renderedProducts]
   );
+  const hasMoreProducts = visibleProductLimit < products.length;
 
   useEffect(() => {
-    pickerSearchRef.current?.focus();
-  }, []);
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
 
   useEffect(() => {
-    setActiveProductId(selectableProducts[0]?.id ?? "");
+    const handleProductPickerTyping = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isSearchInput = target === pickerSearchRef.current;
+      const isTextEntryTarget =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable === true;
+      const isSearchKey =
+        event.key.length === 1 &&
+        event.key.trim().length > 0 &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.isComposing;
+
+      if (!isSearchKey || event.repeat || event.defaultPrevented || isSearchInput || isTextEntryTarget) {
+        return;
+      }
+
+      event.preventDefault();
+      const nextSearchQuery = `${searchQueryRef.current}${event.key}`;
+
+      searchQueryRef.current = nextSearchQuery;
+      pickerSearchRef.current?.focus({ preventScroll: true });
+      onSearchChange(nextSearchQuery);
+    };
+
+    window.addEventListener("keydown", handleProductPickerTyping, true);
+
+    return () => {
+      window.removeEventListener("keydown", handleProductPickerTyping, true);
+    };
+  }, [onSearchChange]);
+
+  useEffect(() => {
+    setProductPickerWindow({
+      filterKey: productPickerFilterKey,
+      limit: PRODUCT_PICKER_BATCH_SIZE
+    });
+    productPickerListRef.current?.scrollTo({ top: 0 });
+  }, [productPickerFilterKey]);
+
+  useEffect(() => {
+    setActiveProductId((currentProductId) => (
+      selectableProducts.some((product) => product.id === currentProductId)
+        ? currentProductId
+        : selectableProducts[0]?.id ?? ""
+    ));
   }, [selectableProducts]);
 
   const activeProduct = selectableProducts.find((product) => product.id === activeProductId) ?? selectableProducts[0] ?? null;
+
+  const assignPickerSearchRef = useCallback((node: HTMLInputElement | null) => {
+    pickerSearchRef.current = node;
+
+    if (!node) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      if (pickerSearchRef.current === node) {
+        node.focus({ preventScroll: true });
+      }
+    });
+  }, []);
+
+  const loadMoreProducts = useCallback(() => {
+    setProductPickerWindow((currentWindow) => {
+      const currentLimit = currentWindow.filterKey === productPickerFilterKey
+        ? currentWindow.limit
+        : PRODUCT_PICKER_BATCH_SIZE;
+
+      return {
+        filterKey: productPickerFilterKey,
+        limit: Math.min(products.length, currentLimit + PRODUCT_PICKER_BATCH_SIZE)
+      };
+    });
+  }, [productPickerFilterKey, products.length]);
+
+  const handleProductListScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
+    if (!hasMoreProducts) {
+      return;
+    }
+
+    const target = event.currentTarget;
+    const distanceToEnd = target.scrollHeight - target.scrollTop - target.clientHeight;
+
+    if (distanceToEnd <= 280) {
+      loadMoreProducts();
+    }
+  }, [hasMoreProducts, loadMoreProducts]);
 
   return (
     <CashierModal
@@ -7915,7 +8033,7 @@ function ProductPickerModal({
       <label className="pdv-search-field pdv-product-picker-search">
         <Search aria-hidden="true" size={22} />
         <input
-          ref={pickerSearchRef}
+          ref={assignPickerSearchRef}
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
           onKeyDown={(event) => {
@@ -7964,7 +8082,11 @@ function ProductPickerModal({
         ))}
       </div>
 
-      <div className="pdv-product-picker-list">
+      <div
+        ref={productPickerListRef}
+        className="pdv-product-picker-list"
+        onScroll={handleProductListScroll}
+      >
         {isLoading ? (
           <>
             <span className="pdv-product-picker-skeleton" />
@@ -7973,7 +8095,7 @@ function ProductPickerModal({
           </>
         ) : null}
 
-        {!isLoading && groupedProducts.map(({ category, products: categoryProducts }) => (
+        {!isLoading && groupedProducts.map(({ category, products: categoryProducts, totalProducts }) => (
           <section
             className="pdv-product-picker-category"
             key={category.id}
@@ -7982,7 +8104,7 @@ function ProductPickerModal({
             <div className="pdv-list-title">
               <CategoryBadge category={category} />
               <strong>{category.name}</strong>
-              <em>{categoryProducts.length} {categoryProducts.length === 1 ? "produto" : "produtos"}</em>
+              <em>{totalProducts} {totalProducts === 1 ? "produto" : "produtos"}</em>
             </div>
 
             <div className="pdv-product-picker-category-items">
@@ -8006,12 +8128,11 @@ function ProductPickerModal({
                     aria-disabled={isFiscalBlocked}
                     aria-selected={isActive}
                     disabled={isFiscalBlocked}
-                    onPointerEnter={(event) => {
+                    onPointerEnter={() => {
                       if (isFiscalBlocked) {
                         return;
                       }
 
-                      setPointerWaveOrigin(event);
                       setActiveProductId(product.id);
                     }}
                     onClick={() => onSelect(product)}

@@ -18,8 +18,6 @@ import { DesktopCashierFlow } from "./cashier-flow";
 import { CashierModal } from "./cashier-modal";
 import {
   PdvUpdateModal,
-  pdvUpdatePreviewStatus,
-  previewPdvUpdateModalInDevelopment,
   shouldShowPdvUpdateModal
 } from "./pdv-update-modal";
 import { PdvScaleSurface } from "./pdv-scale-surface";
@@ -261,9 +259,7 @@ export default function PdvActivationPage() {
   const [statusMessage, setStatusMessage] = useState("");
   const [systemMessage, setSystemMessage] = useState("");
   const [hasCompletedStartupUpdateCheck, setHasCompletedStartupUpdateCheck] = useState(false);
-  const [startupUpdateStatus, setStartupUpdateStatus] = useState<PdvUpdateStatus | null>(() =>
-    previewPdvUpdateModalInDevelopment ? pdvUpdatePreviewStatus : null
-  );
+  const [startupUpdateStatus, setStartupUpdateStatus] = useState<PdvUpdateStatus | null>(null);
   const [isStartupUpdateActionRunning, setIsStartupUpdateActionRunning] = useState(false);
   const [dismissedStartupUpdateVersion, setDismissedStartupUpdateVersion] = useState<string | null>(null);
   const [isActivating, setIsActivating] = useState(false);
@@ -295,11 +291,6 @@ export default function PdvActivationPage() {
 
   useEffect(() => {
     if (hasCompletedStartupUpdateCheck) {
-      return undefined;
-    }
-
-    if (previewPdvUpdateModalInDevelopment) {
-      setStartupUpdateStatus(pdvUpdatePreviewStatus);
       return undefined;
     }
 
@@ -346,51 +337,6 @@ export default function PdvActivationPage() {
       unsubscribe?.();
     };
   }, [hasCompletedStartupUpdateCheck]);
-
-  useEffect(() => {
-    if (!previewPdvUpdateModalInDevelopment || startupUpdateStatus?.status !== "downloading") {
-      return undefined;
-    }
-
-    const updateProgressSteps = [
-      { progress: 24, bytesPerSecond: 4.8 * 1024 * 1024 },
-      { progress: 48, bytesPerSecond: 7.2 * 1024 * 1024 },
-      { progress: 72, bytesPerSecond: 6.6 * 1024 * 1024 },
-      { progress: 91, bytesPerSecond: 5.1 * 1024 * 1024 },
-      { progress: 100, bytesPerSecond: null }
-    ];
-    let progressIndex = 0;
-    const timer = window.setInterval(() => {
-      const nextStep = updateProgressSteps[progressIndex] ?? updateProgressSteps[updateProgressSteps.length - 1];
-      progressIndex += 1;
-
-      setStartupUpdateStatus((currentStatus) => {
-        if (currentStatus?.status !== "downloading") {
-          return currentStatus;
-        }
-
-        if (nextStep.progress >= 100) {
-          window.clearInterval(timer);
-          return {
-            ...currentStatus,
-            status: "downloaded",
-            progress: 100,
-            bytesPerSecond: null
-          };
-        }
-
-        return {
-          ...currentStatus,
-          progress: nextStep.progress,
-          bytesPerSecond: nextStep.bytesPerSecond
-        };
-      });
-    }, 600);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [startupUpdateStatus?.status]);
 
   useEffect(() => {
     if (!hasCompletedStartupUpdateCheck) {
@@ -553,18 +499,6 @@ export default function PdvActivationPage() {
   }
 
   async function downloadStartupPdvUpdate() {
-    if (previewPdvUpdateModalInDevelopment) {
-      setStartupUpdateStatus((currentStatus) => currentStatus
-        ? {
-            ...currentStatus,
-            status: "downloading",
-            progress: 8,
-            bytesPerSecond: 3.4 * 1024 * 1024
-          }
-        : currentStatus);
-      return;
-    }
-
     const store = getLocalPdvStore();
 
     if (!store?.downloadUpdate) {
@@ -583,11 +517,6 @@ export default function PdvActivationPage() {
   }
 
   async function installStartupPdvUpdate() {
-    if (previewPdvUpdateModalInDevelopment) {
-      continueAfterStartupUpdateCheck();
-      return;
-    }
-
     const store = getLocalPdvStore();
 
     if (!store?.installUpdate) {
