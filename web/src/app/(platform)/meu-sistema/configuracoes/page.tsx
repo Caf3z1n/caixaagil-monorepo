@@ -89,6 +89,11 @@ type ConfiguracaoSistema = {
   updated_at?: string | null;
 };
 
+type CnpjaTokenResponse = {
+  token: string;
+  token_configurado?: boolean;
+};
+
 type ConfigurationArea = {
   title: string;
   description: string;
@@ -295,11 +300,13 @@ function IntegrationSettingsManager({
   settings,
   isLoading,
   onCancel,
+  onRevealCnpjaToken,
   onSave
 }: {
   settings: IntegrationSettings;
   isLoading: boolean;
   onCancel: () => void;
+  onRevealCnpjaToken: () => Promise<string>;
   onSave: (settings: IntegrationSettings, cnpjaToken: string) => Promise<IntegrationSettings>;
 }) {
   const [draft, setDraft] = useState<IntegrationSettings>(() => normalizeIntegrationSettings(settings));
@@ -307,11 +314,13 @@ function IntegrationSettingsManager({
   const [showCnpjaToken, setShowCnpjaToken] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingCnpjaToken, setIsLoadingCnpjaToken] = useState(false);
 
   useEffect(() => {
     setDraft(normalizeIntegrationSettings(settings));
     setCnpjaToken("");
     setShowCnpjaToken(false);
+    setIsLoadingCnpjaToken(false);
   }, [settings]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -341,6 +350,7 @@ function IntegrationSettingsManager({
         const savedSettings = await onSave(nextDraft, nextCnpjaToken);
         setDraft(normalizeIntegrationSettings(savedSettings));
         setCnpjaToken("");
+        setShowCnpjaToken(false);
         setFeedback({
           tone: "success",
           message: "CNPJá salvo. As buscas por CNPJ e CEP já usam este token."
@@ -361,6 +371,41 @@ function IntegrationSettingsManager({
 
   function handleCnpjaTokenChange(value: string) {
     setCnpjaToken(value);
+  }
+
+  function handleToggleCnpjaTokenVisibility() {
+    void (async () => {
+      if (showCnpjaToken) {
+        setShowCnpjaToken(false);
+        return;
+      }
+
+      if (!cnpjaToken && draft.cnpja.token_configurado) {
+        setIsLoadingCnpjaToken(true);
+        setFeedback(null);
+
+        try {
+          const currentToken = await onRevealCnpjaToken();
+
+          setCnpjaToken(currentToken);
+          setShowCnpjaToken(true);
+        } catch (error) {
+          setFeedback({
+            tone: "error",
+            message:
+              error instanceof ApiError || error instanceof Error
+                ? error.message
+                : "Não foi possível carregar o token da CNPJá."
+          });
+        } finally {
+          setIsLoadingCnpjaToken(false);
+        }
+
+        return;
+      }
+
+      setShowCnpjaToken(true);
+    })();
   }
 
   if (isLoading) {
@@ -396,19 +441,25 @@ function IntegrationSettingsManager({
             <div className="fiscal-secret-input fiscal-secret-input-inline">
               <input
                 autoComplete="new-password"
-                disabled={isSaving}
+                disabled={isSaving || isLoadingCnpjaToken}
                 placeholder={draft.cnpja.token_configurado ? "Token já configurado" : ""}
                 type={showCnpjaToken ? "text" : "password"}
                 value={cnpjaToken}
                 onChange={event => handleCnpjaTokenChange(event.currentTarget.value)}
               />
               <button
-                aria-label={showCnpjaToken ? "Ocultar token" : "Mostrar token"}
-                disabled={isSaving}
+                aria-label={isLoadingCnpjaToken ? "Carregando token" : showCnpjaToken ? "Ocultar token" : "Mostrar token"}
+                disabled={isSaving || isLoadingCnpjaToken}
                 type="button"
-                onClick={() => setShowCnpjaToken(current => !current)}
+                onClick={handleToggleCnpjaTokenVisibility}
               >
-                {showCnpjaToken ? <EyeOff aria-hidden="true" size={17} /> : <Eye aria-hidden="true" size={17} />}
+                {isLoadingCnpjaToken ? (
+                  <LoaderCircle aria-hidden="true" className="platform-spin" size={17} />
+                ) : showCnpjaToken ? (
+                  <EyeOff aria-hidden="true" size={17} />
+                ) : (
+                  <Eye aria-hidden="true" size={17} />
+                )}
               </button>
             </div>
           </label>
@@ -1018,6 +1069,18 @@ export default function MeuSistemaConfiguracoesPage() {
     setIntegrationSettings(normalizedSettings);
 
     return normalizedSettings;
+  }
+
+  async function revealCnpjaToken() {
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      throw new ApiError("Sessão expirada. Entre novamente para ver o token.", 401);
+    }
+
+    const result = await apiGet<CnpjaTokenResponse>("/configuracoes/integracoes/cnpja/token", { token });
+
+    return result.token;
   }
 
   return (
@@ -1658,6 +1721,7 @@ export default function MeuSistemaConfiguracoesPage() {
                 <IntegrationSettingsManager
                   isLoading={isLoading}
                   onCancel={() => moveToFlowStep("integrations")}
+                  onRevealCnpjaToken={revealCnpjaToken}
                   settings={integrationSettings}
                   onSave={updateIntegrationSettings}
                 />

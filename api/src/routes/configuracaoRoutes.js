@@ -13,6 +13,7 @@ router.put('/resumo-turno', controller.updateShiftSummary);
 router.put('/despesas', controller.updateExpenses);
 router.put('/funcionarios', controller.updateEmployees);
 router.put('/integracoes', controller.updateIntegrations);
+router.get('/integracoes/cnpja/token', controller.showCnpjaToken);
 router.get('/integracoes/cnpja/cnpj/:cnpj', controller.lookupCnpj);
 router.get('/integracoes/cnpja/cep/:cep', controller.lookupCep);
 

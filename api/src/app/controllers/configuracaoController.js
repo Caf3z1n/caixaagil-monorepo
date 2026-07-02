@@ -107,6 +107,26 @@ module.exports = {
     }
   },
 
+  async showCnpjaToken(req, res) {
+    try {
+      const token = await configuracaoSistemaService.getCnpjaToken(req.user.id);
+
+      if (!token) {
+        return res.status(404).json({
+          code: 'CNPJA_TOKEN_NOT_CONFIGURED',
+          message: 'Token da CNPJá não configurado.',
+        });
+      }
+
+      return res.json({
+        token,
+        token_configurado: true,
+      });
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao carregar token da CNPJá.');
+    }
+  },
+
   async lookupCnpj(req, res) {
     try {
       const resultado = await cnpjaIntegrationService.lookupCnpj(req.user.id, req.params.cnpj);

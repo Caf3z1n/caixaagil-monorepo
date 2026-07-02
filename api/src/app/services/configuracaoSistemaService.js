@@ -950,6 +950,17 @@ async function getCnpjaApiKey(usuarioId) {
   return decryptSecret(integracoes.cnpja.token_criptografado);
 }
 
+async function getCnpjaToken(usuarioId) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const integracoes = normalizeIntegrationSettings(configuracao.integracoes);
+
+  if (!integracoes.cnpja.token_criptografado) {
+    return '';
+  }
+
+  return decryptSecret(integracoes.cnpja.token_criptografado);
+}
+
 module.exports = {
   defaultCommandSettings,
   defaultEmployeeControlSettings,
@@ -960,6 +971,7 @@ module.exports = {
   defaultShiftSummarySettings,
   decryptSecret,
   getCnpjaApiKey,
+  getCnpjaToken,
   getCommandSettings,
   getConfiguracaoSnapshot,
   normalizeCommandSettings,
