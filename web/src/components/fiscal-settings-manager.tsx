@@ -918,7 +918,7 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
             />
           </label>
 
-          <label className="fiscal-field-span-2">
+          <label className="fiscal-field-span-4">
             <span>IE</span>
             <input
               disabled={isSaving}
@@ -926,18 +926,6 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
               maxLength={20}
               value={draft.emitente.inscricao_estadual}
               onChange={event => updateEmitente({ inscricao_estadual: digitsOnly(event.currentTarget.value, 20) })}
-            />
-          </label>
-
-          <label className="fiscal-field-span-2">
-            <span>Regime</span>
-            <PlatformSelect
-              ariaLabel="Regime tributário do emitente"
-              disabled={isSaving}
-              options={crtOptions}
-              placeholder="CRT"
-              value={draft.emitente.crt}
-              onChange={crt => updateEmitente({ crt })}
             />
           </label>
 
@@ -1072,6 +1060,18 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
               maxLength={80}
               value={draft.emitente.endereco.complemento}
               onChange={event => updateEndereco({ complemento: event.currentTarget.value })}
+            />
+          </label>
+
+          <label className="fiscal-field-span-4">
+            <span>Regime</span>
+            <PlatformSelect
+              ariaLabel="Regime tributário do emitente"
+              disabled={isSaving}
+              options={crtOptions}
+              placeholder="CRT"
+              value={draft.emitente.crt}
+              onChange={crt => updateEmitente({ crt })}
             />
           </label>
         </div>
