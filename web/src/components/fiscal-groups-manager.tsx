@@ -30,7 +30,6 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
-import { PlatformSelect } from "@/components/platform-select";
 import { getStoredPlatformAuthToken } from "@/lib/platform-session";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
@@ -38,6 +37,7 @@ import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 
 type RegimeTributario = "simples_nacional" | "regime_normal";
+type FiscalCrt = "" | "1" | "2" | "3" | "4";
 type FiscalFlowStep = "choice" | "create" | "list" | "edit";
 type FiscalFlowMotion = "forward" | "backward";
 
@@ -80,6 +80,14 @@ type ActivateFiscalGroupResponse = {
   message?: string;
 };
 
+type FiscalConfigurationSnapshot = {
+  fiscal?: {
+    emitente?: {
+      crt?: string | null;
+    } | null;
+  } | null;
+};
+
 type FiscalGroupDraft = {
   nome: string;
   icone: string;
@@ -104,11 +112,6 @@ type FiscalGroupDraft = {
   aliquota_cbs: string;
 };
 
-const regimeOptions = [
-  { value: "simples_nacional", label: "Simples Nacional" },
-  { value: "regime_normal", label: "Regime normal" }
-] satisfies Array<{ value: RegimeTributario; label: string }>;
-
 const cstReductionCodes = new Set(["20", "70", "90"]);
 const cstIcmsStCodes = new Set(["10", "30", "70", "90"]);
 const csosnIcmsStCodes = new Set(["500"]);
@@ -116,6 +119,7 @@ const nfceCommonSaleCfops = new Set(["5101", "5102", "5103", "5104", "5115"]);
 const nfceStSaleCfops = new Set(["5405", "5656", "5667"]);
 const nfceCommonSaleCsts = new Set(["00", "20", "40", "41", "90"]);
 const nfceCommonSaleCsosns = new Set(["101", "102", "103", "300", "400"]);
+const nfceMeiSaleCsosns = new Set(["102", "300"]);
 
 const fiscalFlowMotionOrder: FiscalFlowStep[] = ["choice", "create", "list", "edit"];
 
@@ -147,10 +151,54 @@ function normalizeSearchValue(value: string) {
   return value.trim().toLowerCase();
 }
 
+function normalizeFiscalCrt(value: unknown): FiscalCrt {
+  const crt = digitsOnly(String(value ?? ""), 1);
+
+  return crt === "1" || crt === "2" || crt === "3" || crt === "4" ? crt : "";
+}
+
+function getTaxRegimeFromCrt(crt: FiscalCrt): RegimeTributario | null {
+  if (crt === "1" || crt === "4") {
+    return "simples_nacional";
+  }
+
+  if (crt === "2" || crt === "3") {
+    return "regime_normal";
+  }
+
+  return null;
+}
+
 function formatTaxRegimeLabel(profile: GrupoFiscal) {
   return profile.regime_tributario === "simples_nacional"
     ? "Simples Nacional"
     : "Regime normal";
+}
+
+function formatCrtLabel(crt: FiscalCrt) {
+  if (crt === "1") {
+    return "Simples Nacional (CRT 1)";
+  }
+
+  if (crt === "2") {
+    return "Simples com excesso de sublimite (CRT 2)";
+  }
+
+  if (crt === "3") {
+    return "Regime normal (CRT 3)";
+  }
+
+  if (crt === "4") {
+    return "MEI (CRT 4)";
+  }
+
+  return "Regime não informado";
+}
+
+function formatTaxCodeLabel(profile: GrupoFiscal) {
+  return profile.regime_tributario === "simples_nacional"
+    ? `CSOSN ${profile.csosn || "--"}`
+    : `CST ${profile.cst_icms || "--"}`;
 }
 
 function formatLinkedProductCount(total: number) {
@@ -173,7 +221,7 @@ function shouldShowIcmsSt(regime: RegimeTributario, taxCode: string) {
     : cstIcmsStCodes.has(taxCode);
 }
 
-function getCfopTaxCodeRuleMessage(draft: FiscalGroupDraft) {
+function getCfopTaxCodeRuleMessage(draft: FiscalGroupDraft, issuerCrt: FiscalCrt = "") {
   const cfop = draft.cfop.trim();
   const taxCode = getFiscalTaxCode(draft);
 
@@ -182,6 +230,18 @@ function getCfopTaxCodeRuleMessage(draft: FiscalGroupDraft) {
   }
 
   if (draft.regime_tributario === "simples_nacional") {
+    if (issuerCrt === "4") {
+      if (!nfceMeiSaleCsosns.has(taxCode)) {
+        return "MEI deve usar CSOSN 102 ou 300 para venda no PDV/NFC-e.";
+      }
+
+      if (cfop !== "5102") {
+        return "MEI deve usar CFOP 5102 para venda interna no PDV/NFC-e.";
+      }
+
+      return "";
+    }
+
     if (taxCode === "500" && !nfceStSaleCfops.has(cfop)) {
       return "CSOSN 500 deve usar CFOP de ST: 5405, 5656 ou 5667.";
     }
@@ -226,11 +286,11 @@ function normalizeAdvancedIcmsFields(draft: FiscalGroupDraft) {
   };
 }
 
-function buildEmptyFiscalGroupDraft(): FiscalGroupDraft {
+function buildEmptyFiscalGroupDraft(regime: RegimeTributario = "simples_nacional"): FiscalGroupDraft {
   return {
     nome: "",
     icone: "package",
-    regime_tributario: "simples_nacional",
+    regime_tributario: regime,
     ativo: true,
     ncm: "",
     cfop: "",
@@ -252,11 +312,13 @@ function buildEmptyFiscalGroupDraft(): FiscalGroupDraft {
   };
 }
 
-function buildFiscalGroupDraft(profile: GrupoFiscal): FiscalGroupDraft {
+function buildFiscalGroupDraft(profile: GrupoFiscal, regimeOverride?: RegimeTributario | null): FiscalGroupDraft {
+  const regime = regimeOverride ?? profile.regime_tributario;
+
   return {
     nome: capitalizeFirstTextLetter(profile.nome),
     icone: profile.icone || "package",
-    regime_tributario: profile.regime_tributario,
+    regime_tributario: regime,
     ativo: true,
     ncm: profile.ncm ?? "",
     cfop: profile.cfop ?? "",
@@ -278,7 +340,7 @@ function buildFiscalGroupDraft(profile: GrupoFiscal): FiscalGroupDraft {
   };
 }
 
-function canSaveFiscalGroupDraft(draft: FiscalGroupDraft) {
+function canSaveFiscalGroupDraft(draft: FiscalGroupDraft, issuerCrt: FiscalCrt = "") {
   return (
     draft.nome.trim().length > 0 &&
     draft.cfop.trim().length > 0 &&
@@ -289,7 +351,7 @@ function canSaveFiscalGroupDraft(draft: FiscalGroupDraft) {
     draft.aliquota_pis.trim().length > 0 &&
     draft.cst_cofins.trim().length > 0 &&
     draft.aliquota_cofins.trim().length > 0 &&
-    !getCfopTaxCodeRuleMessage(draft) &&
+    !getCfopTaxCodeRuleMessage(draft, issuerCrt) &&
     (!draft.ibs_ativo ||
       (draft.cst_ibs.trim().length > 0 &&
         draft.classificacao_ibs.trim().length > 0))
@@ -354,7 +416,7 @@ function FiscalGroupListItem({
           <strong>{profile.nome}</strong>
         </span>
         <small>
-          CFOP {profile.cfop || "--"} · {formatTaxRegimeLabel(profile)} ·{" "}
+          CFOP {profile.cfop || "--"} · {formatTaxCodeLabel(profile)} ·{" "}
           {formatLinkedProductCount(profile.produtos_vinculados ?? 0)}
           {!profile.ativo ? " · Desativado" : ""}
         </small>
@@ -371,6 +433,8 @@ function FiscalGroupListItem({
 function FiscalGroupEditor({
   editingGroupId,
   linkedProductsCount,
+  issuerCrt,
+  taxRegime,
   draft,
   errorMessage,
   onDraftChange,
@@ -378,6 +442,8 @@ function FiscalGroupEditor({
 }: {
   editingGroupId: number | null;
   linkedProductsCount: number;
+  issuerCrt: FiscalCrt;
+  taxRegime: RegimeTributario;
   draft: FiscalGroupDraft;
   errorMessage: string | null;
   onDraftChange: (updater: (currentDraft: FiscalGroupDraft) => FiscalGroupDraft) => void;
@@ -385,7 +451,12 @@ function FiscalGroupEditor({
 }) {
   const taxCodeLabel = draft.regime_tributario === "simples_nacional" ? "CSOSN" : "CST ICMS";
   const taxCodeHelpLines =
-    draft.regime_tributario === "simples_nacional"
+    issuerCrt === "4"
+      ? [
+          "MEI usa CRT 4.",
+          "Para venda no PDV/NFC-e, use CSOSN 102 ou 300 com CFOP 5102."
+        ]
+      : draft.regime_tributario === "simples_nacional"
       ? [
           "Use CSOSN para empresas do Simples Nacional.",
           "Venda comum usa 101, 102, 103, 300 ou 400 com CFOP 5101, 5102, 5103, 5104 ou 5115.",
@@ -401,7 +472,7 @@ function FiscalGroupEditor({
   const showIcmsReduction = shouldShowIcmsReduction(draft.regime_tributario, taxCode);
   const showIcmsSt = shouldShowIcmsSt(draft.regime_tributario, taxCode);
   const showAdvancedIcms = showIcmsReduction || showIcmsSt;
-  const cfopRuleMessage = getCfopTaxCodeRuleMessage(draft);
+  const cfopRuleMessage = getCfopTaxCodeRuleMessage(draft, issuerCrt);
 
   return (
     <section className="fiscal-group-editor">
@@ -436,29 +507,10 @@ function FiscalGroupEditor({
                 />
               </label>
 
-              <div className="fiscal-form-field">
-                <span>Regime</span>
-                <PlatformSelect
-                  ariaLabel="Selecionar regime do grupo fiscal"
-                  options={regimeOptions}
-                  value={draft.regime_tributario}
-                  onChange={nextRegime =>
-                    onDraftChange(currentDraft =>
-                      normalizeAdvancedIcmsFields({
-                        ...currentDraft,
-                        regime_tributario: nextRegime,
-                        cst_icms:
-                          nextRegime === "regime_normal"
-                            ? currentDraft.cst_icms
-                            : "",
-                        csosn:
-                          nextRegime === "simples_nacional"
-                            ? currentDraft.csosn
-                            : ""
-                      })
-                    )
-                  }
-                />
+              <div className="fiscal-form-field fiscal-regime-context">
+                <span>Regime da empresa</span>
+                <strong>{formatCrtLabel(issuerCrt)}</strong>
+                <small>{taxRegime === "simples_nacional" ? "Grupo usa CSOSN." : "Grupo usa CST ICMS."}</small>
               </div>
             </div>
 
@@ -739,6 +791,7 @@ export function FiscalGroupsManager() {
   const [fiscalGroups, setFiscalGroups] = useState<GrupoFiscal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [issuerCrt, setIssuerCrt] = useState<FiscalCrt>("");
   const [searchValue, setSearchValue] = useState("");
   const deferredSearchValue = useDeferredValue(searchValue);
   const [flowStep, setFlowStep] = useState<FiscalFlowStep>("choice");
@@ -760,7 +813,9 @@ export function FiscalGroupsManager() {
     : null;
   const editGroupPresence = useModalPresence(isEditModalOpen ? editingFiscalGroup : null);
   const visibleEditingFiscalGroup = editGroupPresence.presentValue;
-  const canSave = canSaveFiscalGroupDraft(fiscalGroupDraft);
+  const currentTaxRegime = getTaxRegimeFromCrt(issuerCrt);
+  const hasFiscalCrt = Boolean(currentTaxRegime);
+  const canSave = Boolean(currentTaxRegime) && canSaveFiscalGroupDraft(fiscalGroupDraft, issuerCrt);
   const normalizedSearchValue = normalizeSearchValue(deferredSearchValue);
   const filteredFiscalGroups = useMemo(() => {
     return fiscalGroups
@@ -815,9 +870,20 @@ export function FiscalGroupsManager() {
     }
 
     try {
-      const result = await apiGet<GrupoFiscal[]>("/grupos-fiscais", { cacheTtlMs: 60_000, token });
+      const [result, configuracao] = await Promise.all([
+        apiGet<GrupoFiscal[]>("/grupos-fiscais", { cacheTtlMs: 60_000, token }),
+        apiGet<FiscalConfigurationSnapshot>("/configuracoes", { cacheTtlMs: 60_000, token })
+      ]);
 
-      setFiscalGroups(result);
+      const nextIssuerCrt = normalizeFiscalCrt(configuracao.fiscal?.emitente?.crt);
+      const nextTaxRegime = getTaxRegimeFromCrt(nextIssuerCrt);
+
+      setIssuerCrt(nextIssuerCrt);
+      setFiscalGroups(
+        nextTaxRegime
+          ? result.map(group => ({ ...group, regime_tributario: nextTaxRegime }))
+          : result
+      );
       setLoadError(null);
     } catch (error) {
       setLoadError(getErrorMessage(error, "Não foi possível carregar os grupos fiscais."));
@@ -829,6 +895,21 @@ export function FiscalGroupsManager() {
   useEffect(() => {
     void loadFiscalGroups();
   }, [loadFiscalGroups]);
+
+  useEffect(() => {
+    if (!currentTaxRegime) {
+      return;
+    }
+
+    setFiscalGroupDraft(currentDraft =>
+      normalizeAdvancedIcmsFields({
+        ...currentDraft,
+        regime_tributario: currentTaxRegime,
+        cst_icms: currentTaxRegime === "regime_normal" ? currentDraft.cst_icms : "",
+        csosn: currentTaxRegime === "simples_nacional" ? currentDraft.csosn : ""
+      })
+    );
+  }, [currentTaxRegime]);
 
   function moveToFlowStep(nextStep: FiscalFlowStep) {
     if (nextStep === flowStep) {
@@ -870,11 +951,16 @@ export function FiscalGroupsManager() {
   }
 
   function openNewFiscalGroupFlow() {
+    if (!currentTaxRegime) {
+      setLoadError("Informe o regime tributário no cadastro fiscal da empresa antes de criar grupos fiscais.");
+      return;
+    }
+
     setSubmitError(null);
     setEditingFiscalGroupId(null);
     setGroupPendingDelete(null);
     setIsEditModalOpen(false);
-    setFiscalGroupDraft(buildEmptyFiscalGroupDraft());
+    setFiscalGroupDraft(buildEmptyFiscalGroupDraft(currentTaxRegime));
     moveToFlowStep("create");
   }
 
@@ -887,6 +973,11 @@ export function FiscalGroupsManager() {
   }
 
   function openEditFiscalGroupFlow(groupId: number) {
+    if (!currentTaxRegime) {
+      setLoadError("Informe o regime tributário no cadastro fiscal da empresa antes de editar grupos fiscais.");
+      return;
+    }
+
     const group = fiscalGroups.find(profile => profile.id === groupId);
 
     if (!group) {
@@ -895,7 +986,7 @@ export function FiscalGroupsManager() {
 
     setSubmitError(null);
     setEditingFiscalGroupId(groupId);
-    setFiscalGroupDraft(buildFiscalGroupDraft(group));
+    setFiscalGroupDraft(buildFiscalGroupDraft(group, currentTaxRegime));
     setIsEditModalOpen(true);
   }
 
@@ -908,7 +999,7 @@ export function FiscalGroupsManager() {
     setIsEditModalOpen(false);
     setEditingFiscalGroupId(null);
     setGroupPendingDelete(null);
-    setFiscalGroupDraft(buildEmptyFiscalGroupDraft());
+    setFiscalGroupDraft(buildEmptyFiscalGroupDraft(currentTaxRegime ?? undefined));
     setSubmitError(null);
   }
 
@@ -929,25 +1020,28 @@ export function FiscalGroupsManager() {
         const savedGroup = editingFiscalGroupId
           ? await apiPut<GrupoFiscal>(`/grupos-fiscais/${editingFiscalGroupId}`, payload, { token })
           : await apiPost<GrupoFiscal>("/grupos-fiscais", payload, { token });
+        const normalizedSavedGroup = currentTaxRegime
+          ? { ...savedGroup, regime_tributario: currentTaxRegime }
+          : savedGroup;
 
         setFiscalGroups(currentGroups => {
           if (editingFiscalGroupId) {
             return currentGroups.map(group =>
-              group.id === savedGroup.id ? savedGroup : group
+              group.id === normalizedSavedGroup.id ? normalizedSavedGroup : group
             );
           }
 
-          return [...currentGroups, savedGroup];
+          return [...currentGroups, normalizedSavedGroup];
         });
         if (editingFiscalGroupId) {
           setIsEditModalOpen(false);
           setEditingFiscalGroupId(null);
-          setFiscalGroupDraft(buildEmptyFiscalGroupDraft());
+          setFiscalGroupDraft(buildEmptyFiscalGroupDraft(currentTaxRegime ?? undefined));
           return;
         }
 
         setEditingFiscalGroupId(null);
-        setFiscalGroupDraft(buildEmptyFiscalGroupDraft());
+        setFiscalGroupDraft(buildEmptyFiscalGroupDraft(currentTaxRegime ?? undefined));
         moveToFlowStep("list");
       } catch (error) {
         setSubmitError(getErrorMessage(error, "Não foi possível salvar o grupo fiscal."));
@@ -977,8 +1071,12 @@ export function FiscalGroupsManager() {
         const result = await apiDelete<DeleteFiscalGroupResponse>(`/grupos-fiscais/${targetGroup.id}`, { token });
 
         if (result?.action === "deactivated") {
+          const deactivatedGroup = currentTaxRegime
+            ? { ...result.grupo_fiscal, regime_tributario: currentTaxRegime }
+            : result.grupo_fiscal;
+
           setFiscalGroups(currentGroups =>
-            currentGroups.map(group => (group.id === result.grupo_fiscal.id ? result.grupo_fiscal : group))
+            currentGroups.map(group => (group.id === deactivatedGroup.id ? deactivatedGroup : group))
           );
         } else {
           setFiscalGroups(currentGroups =>
@@ -988,7 +1086,7 @@ export function FiscalGroupsManager() {
         setGroupPendingDelete(null);
         setIsEditModalOpen(false);
         setEditingFiscalGroupId(null);
-        setFiscalGroupDraft(buildEmptyFiscalGroupDraft());
+        setFiscalGroupDraft(buildEmptyFiscalGroupDraft(currentTaxRegime ?? undefined));
         moveToFlowStep("list");
       } catch (error) {
         setGroupPendingDelete(null);
@@ -1009,11 +1107,14 @@ export function FiscalGroupsManager() {
       try {
         setSubmitError(null);
         const result = await apiPost<ActivateFiscalGroupResponse>(`/grupos-fiscais/${targetGroup.id}/ativar`, {}, { token });
+        const activatedGroup = currentTaxRegime
+          ? { ...result.grupo_fiscal, regime_tributario: currentTaxRegime }
+          : result.grupo_fiscal;
 
         setFiscalGroups(currentGroups =>
-          currentGroups.map(group => (group.id === result.grupo_fiscal.id ? result.grupo_fiscal : group))
+          currentGroups.map(group => (group.id === activatedGroup.id ? activatedGroup : group))
         );
-        setFiscalGroupDraft(buildFiscalGroupDraft(result.grupo_fiscal));
+        setFiscalGroupDraft(buildFiscalGroupDraft(activatedGroup, currentTaxRegime));
       } catch (error) {
         setSubmitError(getErrorMessage(error, "Não foi possível ativar o grupo fiscal."));
       }
@@ -1063,8 +1164,26 @@ export function FiscalGroupsManager() {
               </div>
             ) : null}
 
+            {!isLoading && !hasFiscalCrt ? (
+              <div className="fiscal-regime-required" role="alert">
+                <Info aria-hidden="true" size={18} />
+                <span>
+                  <strong>Regime tributário pendente</strong>
+                  <small>Preencha o regime no cadastro fiscal da empresa antes de criar grupos fiscais.</small>
+                </span>
+                <Link href="/meu-sistema/configuracoes" className="platform-secondary-button">
+                  Abrir cadastro
+                </Link>
+              </div>
+            ) : !isLoading ? (
+              <div className="fiscal-regime-summary">
+                <Info aria-hidden="true" size={17} />
+                <span>{formatCrtLabel(issuerCrt)}</span>
+              </div>
+            ) : null}
+
             <div className="platform-flow-action-list">
-              <button type="button" className="platform-flow-action" onClick={openNewFiscalGroupFlow}>
+              <button type="button" className="platform-flow-action" disabled={!hasFiscalCrt} onClick={openNewFiscalGroupFlow}>
                 <span className="platform-flow-action-icon" aria-hidden="true">
                   <Plus size={21} />
                 </span>
@@ -1098,6 +1217,8 @@ export function FiscalGroupsManager() {
             <FiscalGroupEditor
               editingGroupId={null}
               linkedProductsCount={0}
+              issuerCrt={issuerCrt}
+              taxRegime={currentTaxRegime ?? "simples_nacional"}
               draft={fiscalGroupDraft}
               errorMessage={submitError}
               onDraftChange={setFiscalGroupDraft}
@@ -1240,6 +1361,8 @@ export function FiscalGroupsManager() {
             <FiscalGroupEditor
               editingGroupId={editingFiscalGroupId ?? visibleEditingFiscalGroup.id}
               linkedProductsCount={visibleEditingFiscalGroup.produtos_vinculados ?? 0}
+              issuerCrt={issuerCrt}
+              taxRegime={currentTaxRegime ?? visibleEditingFiscalGroup.regime_tributario}
               draft={fiscalGroupDraft}
               errorMessage={submitError}
               onDraftChange={setFiscalGroupDraft}

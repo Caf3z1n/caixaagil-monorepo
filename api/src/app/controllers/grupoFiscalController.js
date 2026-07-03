@@ -1,12 +1,14 @@
 const { GrupoFiscal, Produto } = require('../models');
 const sequelize = require('../../database');
 const { ensureFeature } = require('../services/assinaturaEntitlementsService');
+const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 
 const regimesPermitidos = new Set(['simples_nacional', 'regime_normal']);
 const cfopsVendaComumNfce = new Set(['5101', '5102', '5103', '5104', '5115']);
 const cfopsVendaStNfce = new Set(['5405', '5656', '5667']);
 const cstsVendaComumNfce = new Set(['00', '20', '40', '41', '90']);
 const csosnsVendaComumNfce = new Set(['101', '102', '103', '300', '400']);
+const csosnsVendaMeiNfce = new Set(['102', '300']);
 const iconesPermitidos = new Set([
   'package',
   'shopping_basket',
@@ -62,12 +64,22 @@ function formatDecimal(value) {
   return Number(value);
 }
 
-function sanitizeGrupoFiscal(grupoFiscal) {
+function getFiscalTaxRegimeOrError(fiscalTaxRegime) {
+  if (fiscalTaxRegime?.regime_tributario) {
+    return null;
+  }
+
+  return 'Informe o regime tributário no cadastro fiscal da empresa antes de criar grupos fiscais.';
+}
+
+function sanitizeGrupoFiscal(grupoFiscal, fiscalTaxRegime = null) {
   const data = grupoFiscal.get ? grupoFiscal.get({ plain: true }) : { ...grupoFiscal };
   const produtosVinculados = Number(data.produtos_vinculados ?? 0);
+  const regimeTributario = fiscalTaxRegime?.regime_tributario || data.regime_tributario;
 
   return {
     ...data,
+    regime_tributario: regimeTributario,
     aliquota_icms: formatDecimal(data.aliquota_icms),
     reducao_icms: formatDecimal(data.reducao_icms),
     base_icms_st: formatDecimal(data.base_icms_st),
@@ -82,9 +94,9 @@ function sanitizeGrupoFiscal(grupoFiscal) {
   };
 }
 
-function buildGrupoFiscalPayload(body) {
-  const regimeTributario = regimesPermitidos.has(body?.regime_tributario)
-    ? body.regime_tributario
+function buildGrupoFiscalPayload(body, fiscalTaxRegime) {
+  const regimeTributario = regimesPermitidos.has(fiscalTaxRegime?.regime_tributario)
+    ? fiscalTaxRegime.regime_tributario
     : 'simples_nacional';
   const icone = iconesPermitidos.has(body?.icone) ? body.icone : 'package';
   const ibsAtivo = Boolean(body?.ibs_ativo);
@@ -114,7 +126,7 @@ function buildGrupoFiscalPayload(body) {
   };
 }
 
-function validatePayload(payload) {
+function validatePayload(payload, fiscalTaxRegime = null) {
   if (payload.nome.length < 2) {
     return 'Informe um nome para o grupo fiscal.';
   }
@@ -131,7 +143,7 @@ function validatePayload(payload) {
     return 'Informe o CST ICMS do grupo fiscal.';
   }
 
-  const cfopTaxCodeValidationError = getCfopTaxCodeValidationError(payload);
+  const cfopTaxCodeValidationError = getCfopTaxCodeValidationError(payload, fiscalTaxRegime);
 
   if (cfopTaxCodeValidationError) {
     return cfopTaxCodeValidationError;
@@ -152,8 +164,20 @@ function validatePayload(payload) {
   return null;
 }
 
-function getCfopTaxCodeValidationError(payload) {
+function getCfopTaxCodeValidationError(payload, fiscalTaxRegime = null) {
   if (payload.regime_tributario === 'simples_nacional') {
+    if (fiscalTaxRegime?.crt === '4') {
+      if (!csosnsVendaMeiNfce.has(payload.csosn)) {
+        return 'MEI deve usar CSOSN 102 ou 300 para venda no PDV/NFC-e.';
+      }
+
+      if (payload.cfop !== '5102') {
+        return 'MEI deve usar CFOP 5102 para venda interna no PDV/NFC-e.';
+      }
+
+      return null;
+    }
+
     if (payload.csosn === '500' && !cfopsVendaStNfce.has(payload.cfop)) {
       return 'CSOSN 500 deve usar CFOP de substituição tributária para NFC-e: 5405, 5656 ou 5667.';
     }
@@ -235,7 +259,7 @@ module.exports = {
     try {
       await ensureFeature(req.user.id, 'emissao_fiscal');
 
-      const [grupos, produtosPorGrupo] = await Promise.all([
+      const [grupos, produtosPorGrupo, fiscalTaxRegime] = await Promise.all([
         GrupoFiscal.findAll({
           where: {
             usuario_id: req.user.id,
@@ -256,6 +280,7 @@ module.exports = {
           group: ['grupo_fiscal_id'],
           raw: true,
         }),
+        configuracaoSistemaService.getFiscalTaxRegime(req.user.id),
       ]);
       const countByGrupoId = new Map(
         produtosPorGrupo
@@ -265,7 +290,7 @@ module.exports = {
 
       return res.json(
         grupos.map(grupo => ({
-          ...sanitizeGrupoFiscal(grupo),
+          ...sanitizeGrupoFiscal(grupo, fiscalTaxRegime),
           produtos_vinculados: countByGrupoId.get(grupo.id) ?? 0,
         }))
       );
@@ -278,8 +303,15 @@ module.exports = {
     try {
       await ensureFeature(req.user.id, 'emissao_fiscal');
 
-      const payload = buildGrupoFiscalPayload(req.body);
-      const validationError = validatePayload(payload);
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
+      const fiscalTaxRegimeError = getFiscalTaxRegimeOrError(fiscalTaxRegime);
+
+      if (fiscalTaxRegimeError) {
+        return res.status(400).json({ message: fiscalTaxRegimeError });
+      }
+
+      const payload = buildGrupoFiscalPayload(req.body, fiscalTaxRegime);
+      const validationError = validatePayload(payload, fiscalTaxRegime);
 
       if (validationError) {
         return res.status(400).json({ message: validationError });
@@ -290,7 +322,7 @@ module.exports = {
         ...payload,
       });
 
-      return res.status(201).json(sanitizeGrupoFiscal(grupoFiscal));
+      return res.status(201).json(sanitizeGrupoFiscal(grupoFiscal, fiscalTaxRegime));
     } catch (error) {
       return handleGrupoFiscalError(res, error, 'Erro ao criar grupo fiscal.');
     }
@@ -306,8 +338,15 @@ module.exports = {
         return res.status(404).json({ message: 'Grupo fiscal não encontrado.' });
       }
 
-      const payload = buildGrupoFiscalPayload(req.body);
-      const validationError = validatePayload(payload);
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
+      const fiscalTaxRegimeError = getFiscalTaxRegimeOrError(fiscalTaxRegime);
+
+      if (fiscalTaxRegimeError) {
+        return res.status(400).json({ message: fiscalTaxRegimeError });
+      }
+
+      const payload = buildGrupoFiscalPayload(req.body, fiscalTaxRegime);
+      const validationError = validatePayload(payload, fiscalTaxRegime);
 
       if (validationError) {
         return res.status(400).json({ message: validationError });
@@ -328,7 +367,7 @@ module.exports = {
       return res.json(sanitizeGrupoFiscal({
         ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
         produtos_vinculados: produtosVinculados,
-      }));
+      }, fiscalTaxRegime));
     } catch (error) {
       return handleGrupoFiscalError(res, error, 'Erro ao atualizar grupo fiscal.');
     }
@@ -350,6 +389,7 @@ module.exports = {
           grupo_fiscal_id: grupoFiscal.id,
         },
       });
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
 
       if (getProdutosVinculados(grupoFiscal) > 0 || produtosVinculados > 0) {
         await grupoFiscal.update({ ativo: false });
@@ -360,7 +400,7 @@ module.exports = {
             ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
             ativo: false,
             produtos_vinculados: produtosVinculados,
-          }),
+          }, fiscalTaxRegime),
           message: 'Grupo fiscal desativado para preservar os produtos vinculados.',
         });
       }
@@ -393,6 +433,7 @@ module.exports = {
           grupo_fiscal_id: grupoFiscal.id,
         },
       });
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
 
       if (!grupoFiscal.ativo) {
         await grupoFiscal.update({ ativo: true });
@@ -404,7 +445,7 @@ module.exports = {
           ...(grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal),
           ativo: true,
           produtos_vinculados: produtosVinculados,
-        }),
+        }, fiscalTaxRegime),
         message: 'Grupo fiscal ativado.',
       });
     } catch (error) {

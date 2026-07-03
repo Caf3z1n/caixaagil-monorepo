@@ -30,6 +30,9 @@ const defaultShiftSummarySettings = {
 };
 
 const fiscalEnvironmentKeys = ['homologacao', 'producao'];
+const fiscalCrtPermitidos = new Set(['1', '2', '3', '4']);
+const fiscalCrtCsosn = new Set(['1', '4']);
+const fiscalCrtCst = new Set(['2', '3']);
 
 const defaultFiscalEnvironmentSettings = {
   ativo: false,
@@ -125,6 +128,44 @@ function normalizeText(value, maxLength = 255) {
 
 function normalizeDigits(value, maxLength = 20) {
   return normalizeText(value, maxLength).replace(/\D/g, '').slice(0, maxLength);
+}
+
+function normalizeFiscalCrt(value, fallback = '') {
+  const normalized = normalizeDigits(value, 1);
+
+  if (fiscalCrtPermitidos.has(normalized)) {
+    return normalized;
+  }
+
+  const fallbackNormalized = normalizeDigits(fallback, 1);
+
+  return fiscalCrtPermitidos.has(fallbackNormalized) ? fallbackNormalized : '';
+}
+
+function getFiscalRegimeFromCrt(crt) {
+  const normalized = normalizeFiscalCrt(crt);
+
+  if (fiscalCrtCsosn.has(normalized)) {
+    return 'simples_nacional';
+  }
+
+  if (fiscalCrtCst.has(normalized)) {
+    return 'regime_normal';
+  }
+
+  return null;
+}
+
+function buildFiscalTaxRegimeFromSettings(settings = {}) {
+  const fiscal = normalizeFiscalSettings(settings);
+  const crt = normalizeFiscalCrt(fiscal.emitente.crt);
+
+  return {
+    crt,
+    regime_tributario: getFiscalRegimeFromCrt(crt),
+    usa_csosn: fiscalCrtCsosn.has(crt),
+    usa_cst_icms: fiscalCrtCst.has(crt),
+  };
 }
 
 function normalizeInteger(value, fallback, { min = 0, max = 999999999 } = {}) {
@@ -430,7 +471,7 @@ function normalizeFiscalSettings(value = {}, previousValue = {}) {
         pickFirstDefined(emitente.inscricao_municipal, emitente.inscricaoMunicipal, previousEmitente.inscricao_municipal),
         20
       ),
-      crt: normalizeText(pickFirstDefined(emitente.crt, previousEmitente.crt), 4),
+      crt: normalizeFiscalCrt(pickFirstDefined(emitente.crt, previousEmitente.crt)),
       cnae: normalizeDigits(pickFirstDefined(emitente.cnae, previousEmitente.cnae), 7),
       email: normalizeText(pickFirstDefined(emitente.email, previousEmitente.email), 160).toLowerCase(),
       telefone: normalizeDigits(pickFirstDefined(emitente.telefone, previousEmitente.telefone), 14),
@@ -970,6 +1011,12 @@ async function getCommandSettings(usuarioId) {
   return normalizeCommandSettings(configuracao.comandas);
 }
 
+async function getFiscalTaxRegime(usuarioId, options = {}) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId, options);
+
+  return buildFiscalTaxRegimeFromSettings(configuracao.fiscal);
+}
+
 async function updateIntegrationSettings(usuarioId, integrationSettings) {
   const configuracao = await getOrCreateConfiguracao(usuarioId);
   const nextIntegrationSettings = normalizeIntegrationSettings(integrationSettings, configuracao.integracoes);
@@ -1017,10 +1064,13 @@ module.exports = {
   getCnpjaToken,
   getCommandSettings,
   getConfiguracaoSnapshot,
+  getFiscalRegimeFromCrt,
+  getFiscalTaxRegime,
   normalizeCommandSettings,
   normalizeEmployeeControlSettings,
   normalizeExpenseSettings,
   normalizeIntegrationSettings,
+  normalizeFiscalCrt,
   normalizeFiscalSettings,
   normalizePaymentMethods,
   normalizeShiftSummarySettings,

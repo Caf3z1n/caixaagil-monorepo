@@ -221,8 +221,21 @@ const ufOptions: ReadonlyArray<PlatformSelectOption<string>> = [
   "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
 ].map(uf => ({ value: uf, label: uf }));
 
+const crtOptions: ReadonlyArray<PlatformSelectOption<string>> = [
+  { value: "1", label: "Simples Nacional" },
+  { value: "2", label: "Simples, excesso sublimite" },
+  { value: "3", label: "Regime normal" },
+  { value: "4", label: "MEI" }
+];
+
 function digitsOnly(value: string, maxLength: number) {
   return value.replace(/\D/g, "").slice(0, maxLength);
+}
+
+function normalizeFiscalCrt(value: string) {
+  const crt = digitsOnly(value, 1);
+
+  return crt === "1" || crt === "2" || crt === "3" || crt === "4" ? crt : "";
 }
 
 function formatCnpj(value: string) {
@@ -346,6 +359,7 @@ export function normalizeFiscalSettings(value?: Partial<FiscalSettings> | null):
       cnpj_cpf: digitsOnly(String(emitente.cnpj_cpf ?? ""), 14),
       inscricao_estadual: digitsOnly(String(emitente.inscricao_estadual ?? ""), 20),
       inscricao_municipal: digitsOnly(String(emitente.inscricao_municipal ?? ""), 20),
+      crt: normalizeFiscalCrt(String(emitente.crt ?? "")),
       cnae: digitsOnly(String(emitente.cnae ?? ""), 7),
       telefone: digitsOnly(String(emitente.telefone ?? ""), 14),
       endereco: {
@@ -894,7 +908,7 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
             )}
           </label>
 
-          <label className="fiscal-field-span-5">
+          <label className="fiscal-field-span-4">
             <span>Nome fantasia</span>
             <input
               disabled={isSaving}
@@ -904,7 +918,7 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
             />
           </label>
 
-          <label className="fiscal-field-span-3">
+          <label className="fiscal-field-span-2">
             <span>IE</span>
             <input
               disabled={isSaving}
@@ -912,6 +926,18 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
               maxLength={20}
               value={draft.emitente.inscricao_estadual}
               onChange={event => updateEmitente({ inscricao_estadual: digitsOnly(event.currentTarget.value, 20) })}
+            />
+          </label>
+
+          <label className="fiscal-field-span-2">
+            <span>Regime</span>
+            <PlatformSelect
+              ariaLabel="Regime tributário do emitente"
+              disabled={isSaving}
+              options={crtOptions}
+              placeholder="CRT"
+              value={draft.emitente.crt}
+              onChange={crt => updateEmitente({ crt })}
             />
           </label>
 

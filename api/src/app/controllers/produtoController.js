@@ -10,6 +10,7 @@ const {
   SaldoEstoqueProduto,
 } = require('../models');
 const { ensureFeature } = require('../services/assinaturaEntitlementsService');
+const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 
 const iconesPermitidos = new Set([
   'package',
@@ -156,18 +157,19 @@ function sanitizeArquivoResumo(arquivo) {
   };
 }
 
-function sanitizeGrupoFiscalResumo(grupoFiscal) {
+function sanitizeGrupoFiscalResumo(grupoFiscal, fiscalTaxRegime = null) {
   if (!grupoFiscal) {
     return null;
   }
 
   const data = grupoFiscal.get ? grupoFiscal.get({ plain: true }) : grupoFiscal;
+  const regimeTributario = fiscalTaxRegime?.regime_tributario || data.regime_tributario;
 
   return {
     id: data.id,
     nome: data.nome,
     ativo: Boolean(data.ativo),
-    regime_tributario: data.regime_tributario,
+    regime_tributario: regimeTributario,
     cfop: data.cfop,
     ncm: data.ncm,
     cst_icms: data.cst_icms,
@@ -213,7 +215,7 @@ function sanitizeProduto(produto, extra = {}) {
     pode_excluir: registrosVinculados <= 0,
     acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
     categoria: data.categoria ? sanitizeCategoria(data.categoria) : null,
-    grupo_fiscal: sanitizeGrupoFiscalResumo(data.grupo_fiscal),
+    grupo_fiscal: sanitizeGrupoFiscalResumo(data.grupo_fiscal, extra.fiscalTaxRegime),
     imagem: sanitizeArquivoResumo(data.imagem),
   };
 }
@@ -532,7 +534,7 @@ async function loadSnapshot(usuarioId, options = {}) {
     ...(onlyActive ? { ativo: true } : {}),
   };
 
-  const [categorias, produtos, gruposFiscais, estoques] = await Promise.all([
+  const [categorias, produtos, gruposFiscais, estoques, fiscalTaxRegime] = await Promise.all([
     CategoriaProduto.findAll({
       where: activeScopedWhere,
       order: [
@@ -590,6 +592,7 @@ async function loadSnapshot(usuarioId, options = {}) {
         ['id', 'ASC'],
       ],
     }),
+    configuracaoSistemaService.getFiscalTaxRegime(usuarioId),
   ]);
 
   const countByCategoria = new Map();
@@ -608,10 +611,11 @@ async function loadSnapshot(usuarioId, options = {}) {
       produtos.map(async produto =>
         sanitizeProduto(produto, {
           registros_vinculados: await getProdutoRegistrosVinculados(usuarioId, produto.id),
+          fiscalTaxRegime,
         })
       )
     ),
-    grupos_fiscais: gruposFiscais.map(sanitizeGrupoFiscalResumo),
+    grupos_fiscais: gruposFiscais.map(grupoFiscal => sanitizeGrupoFiscalResumo(grupoFiscal, fiscalTaxRegime)),
     estoques: estoques.map(sanitizeEstoque),
   };
 }
@@ -889,8 +893,9 @@ module.exports = {
           },
         ],
       });
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
 
-      return res.status(201).json(sanitizeProduto(savedProduto));
+      return res.status(201).json(sanitizeProduto(savedProduto, { fiscalTaxRegime }));
     } catch (error) {
       if (!committed) {
         await transaction.rollback();
@@ -962,9 +967,12 @@ module.exports = {
         ],
       });
 
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
+
       return res.json(
         sanitizeProduto(savedProduto, {
           registros_vinculados: await getProdutoRegistrosVinculados(req.user.id, produto.id),
+          fiscalTaxRegime,
         })
       );
     } catch (error) {
@@ -1007,9 +1015,11 @@ module.exports = {
           ],
         });
 
+        const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
+
         return res.json({
           action: 'deactivated',
-          produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados }),
+          produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados, fiscalTaxRegime }),
           message: 'Produto desativado para preservar os registros vinculados.',
         });
       }
@@ -1091,10 +1101,11 @@ module.exports = {
         ],
       });
       const registrosVinculados = await getProdutoRegistrosVinculados(req.user.id, produto.id);
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
 
       return res.json({
         action: 'activated',
-        produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados }),
+        produto: sanitizeProduto(savedProduto, { registros_vinculados: registrosVinculados, fiscalTaxRegime }),
         message: 'Produto ativado.',
       });
     } catch (error) {
