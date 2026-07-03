@@ -12237,6 +12237,25 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   line-height: 1;
 }
 
+.fiscal-cfop-rule-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid oklch(0.88 0.06 35);
+  border-radius: 8px;
+  background: oklch(0.982 0.018 45);
+  color: var(--orange-strong);
+  font-size: 0.78rem;
+  font-weight: 850;
+  line-height: 1.32;
+}
+
+.fiscal-cfop-rule-message svg {
+  flex: none;
+  margin-top: 1px;
+}
+
 .fiscal-group-form label,
 .fiscal-form-field {
   display: grid;

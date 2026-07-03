@@ -3073,7 +3073,7 @@ internal static class Program
     private static string NormalizeCsosn(string? csosn)
     {
         var normalized = OnlyDigits(csosn).PadLeft(3, '0');
-        return normalized is "101" or "102" or "103" or "300" or "400" ? normalized : "102";
+        return normalized is "101" or "102" or "103" or "300" or "400" or "500" ? normalized : "102";
     }
 
     private static string NormalizeCst(string? cst, string fallback)

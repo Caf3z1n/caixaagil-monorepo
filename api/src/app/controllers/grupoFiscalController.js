@@ -3,6 +3,10 @@ const sequelize = require('../../database');
 const { ensureFeature } = require('../services/assinaturaEntitlementsService');
 
 const regimesPermitidos = new Set(['simples_nacional', 'regime_normal']);
+const cfopsVendaComumNfce = new Set(['5101', '5102', '5103', '5104', '5115']);
+const cfopsVendaStNfce = new Set(['5405', '5656', '5667']);
+const cstsVendaComumNfce = new Set(['00', '20', '40', '41', '90']);
+const csosnsVendaComumNfce = new Set(['101', '102', '103', '300', '400']);
 const iconesPermitidos = new Set([
   'package',
   'shopping_basket',
@@ -127,6 +131,12 @@ function validatePayload(payload) {
     return 'Informe o CST ICMS do grupo fiscal.';
   }
 
+  const cfopTaxCodeValidationError = getCfopTaxCodeValidationError(payload);
+
+  if (cfopTaxCodeValidationError) {
+    return cfopTaxCodeValidationError;
+  }
+
   if (!payload.cst_pis) {
     return 'Informe o CST PIS.';
   }
@@ -137,6 +147,38 @@ function validatePayload(payload) {
 
   if (payload.ibs_ativo && (!payload.cst_ibs || !payload.classificacao_ibs)) {
     return 'Informe CST e classificação IBS/CBS.';
+  }
+
+  return null;
+}
+
+function getCfopTaxCodeValidationError(payload) {
+  if (payload.regime_tributario === 'simples_nacional') {
+    if (payload.csosn === '500' && !cfopsVendaStNfce.has(payload.cfop)) {
+      return 'CSOSN 500 deve usar CFOP de substituição tributária para NFC-e: 5405, 5656 ou 5667.';
+    }
+
+    if (cfopsVendaStNfce.has(payload.cfop) && payload.csosn !== '500') {
+      return 'CFOP de substituição tributária exige CSOSN 500 no Simples Nacional.';
+    }
+
+    if (csosnsVendaComumNfce.has(payload.csosn) && !cfopsVendaComumNfce.has(payload.cfop)) {
+      return 'Este CSOSN deve usar CFOP de venda comum para NFC-e: 5101, 5102, 5103, 5104 ou 5115.';
+    }
+
+    return null;
+  }
+
+  if (payload.cst_icms === '60' && !cfopsVendaStNfce.has(payload.cfop)) {
+    return 'CST ICMS 60 deve usar CFOP de substituição tributária para NFC-e: 5405, 5656 ou 5667.';
+  }
+
+  if (cfopsVendaStNfce.has(payload.cfop) && payload.cst_icms !== '60') {
+    return 'CFOP de substituição tributária exige CST ICMS 60 no regime normal.';
+  }
+
+  if (cstsVendaComumNfce.has(payload.cst_icms) && !cfopsVendaComumNfce.has(payload.cfop)) {
+    return 'Este CST ICMS deve usar CFOP de venda comum para NFC-e: 5101, 5102, 5103, 5104 ou 5115.';
   }
 
   return null;

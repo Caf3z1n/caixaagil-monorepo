@@ -555,6 +555,10 @@ function buildFiscalReadiness(settings) {
     basePendencias.push('Informe a inscrição estadual.');
   }
 
+  if (!fiscal.emitente.crt) {
+    basePendencias.push('Informe o CRT do emitente.');
+  }
+
   if (!fiscal.emitente.endereco.codigo_municipio) {
     basePendencias.push('Informe o código IBGE do município.');
   }

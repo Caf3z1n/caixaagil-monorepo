@@ -111,7 +111,11 @@ const regimeOptions = [
 
 const cstReductionCodes = new Set(["20", "70", "90"]);
 const cstIcmsStCodes = new Set(["10", "30", "70", "90"]);
-const csosnIcmsStCodes = new Set(["201", "202", "203", "900"]);
+const csosnIcmsStCodes = new Set(["500"]);
+const nfceCommonSaleCfops = new Set(["5101", "5102", "5103", "5104", "5115"]);
+const nfceStSaleCfops = new Set(["5405", "5656", "5667"]);
+const nfceCommonSaleCsts = new Set(["00", "20", "40", "41", "90"]);
+const nfceCommonSaleCsosns = new Set(["101", "102", "103", "300", "400"]);
 
 const fiscalFlowMotionOrder: FiscalFlowStep[] = ["choice", "create", "list", "edit"];
 
@@ -167,6 +171,45 @@ function shouldShowIcmsSt(regime: RegimeTributario, taxCode: string) {
   return regime === "simples_nacional"
     ? csosnIcmsStCodes.has(taxCode)
     : cstIcmsStCodes.has(taxCode);
+}
+
+function getCfopTaxCodeRuleMessage(draft: FiscalGroupDraft) {
+  const cfop = draft.cfop.trim();
+  const taxCode = getFiscalTaxCode(draft);
+
+  if (cfop.length !== 4 || taxCode.length === 0) {
+    return "";
+  }
+
+  if (draft.regime_tributario === "simples_nacional") {
+    if (taxCode === "500" && !nfceStSaleCfops.has(cfop)) {
+      return "CSOSN 500 deve usar CFOP de ST: 5405, 5656 ou 5667.";
+    }
+
+    if (nfceStSaleCfops.has(cfop) && taxCode !== "500") {
+      return "CFOP de ST exige CSOSN 500 no Simples Nacional.";
+    }
+
+    if (nfceCommonSaleCsosns.has(taxCode) && !nfceCommonSaleCfops.has(cfop)) {
+      return "Este CSOSN deve usar CFOP de venda comum: 5101, 5102, 5103, 5104 ou 5115.";
+    }
+
+    return "";
+  }
+
+  if (taxCode === "60" && !nfceStSaleCfops.has(cfop)) {
+    return "CST 60 deve usar CFOP de ST: 5405, 5656 ou 5667.";
+  }
+
+  if (nfceStSaleCfops.has(cfop) && taxCode !== "60") {
+    return "CFOP de ST exige CST ICMS 60 no regime normal.";
+  }
+
+  if (nfceCommonSaleCsts.has(taxCode) && !nfceCommonSaleCfops.has(cfop)) {
+    return "Este CST deve usar CFOP de venda comum: 5101, 5102, 5103, 5104 ou 5115.";
+  }
+
+  return "";
 }
 
 function normalizeAdvancedIcmsFields(draft: FiscalGroupDraft) {
@@ -246,6 +289,7 @@ function canSaveFiscalGroupDraft(draft: FiscalGroupDraft) {
     draft.aliquota_pis.trim().length > 0 &&
     draft.cst_cofins.trim().length > 0 &&
     draft.aliquota_cofins.trim().length > 0 &&
+    !getCfopTaxCodeRuleMessage(draft) &&
     (!draft.ibs_ativo ||
       (draft.cst_ibs.trim().length > 0 &&
         draft.classificacao_ibs.trim().length > 0))
@@ -344,18 +388,20 @@ function FiscalGroupEditor({
     draft.regime_tributario === "simples_nacional"
       ? [
           "Use CSOSN para empresas do Simples Nacional.",
-          "201, 202, 203 e 900 exibem campos de ICMS-ST."
+          "Venda comum usa 101, 102, 103, 300 ou 400 com CFOP 5101, 5102, 5103, 5104 ou 5115.",
+          "Substituição tributária usa CSOSN 500 com CFOP 5405, 5656 ou 5667."
         ]
       : [
           "Use CST ICMS para empresas no regime normal.",
-          "20, 70 e 90 exibem redução de base.",
-          "10, 30, 70 e 90 exibem ICMS-ST."
+          "CST 00, 20, 40, 41 ou 90 usa CFOP 5101, 5102, 5103, 5104 ou 5115.",
+          "CST 60 usa CFOP 5405, 5656 ou 5667."
         ];
   const taxCodeHelpText = taxCodeHelpLines.join(" ");
   const taxCode = getFiscalTaxCode(draft);
   const showIcmsReduction = shouldShowIcmsReduction(draft.regime_tributario, taxCode);
   const showIcmsSt = shouldShowIcmsSt(draft.regime_tributario, taxCode);
   const showAdvancedIcms = showIcmsReduction || showIcmsSt;
+  const cfopRuleMessage = getCfopTaxCodeRuleMessage(draft);
 
   return (
     <section className="fiscal-group-editor">
@@ -548,6 +594,13 @@ function FiscalGroupEditor({
                     </label>
                   ) : null}
                 </div>
+              </div>
+            ) : null}
+
+            {cfopRuleMessage ? (
+              <div className="fiscal-cfop-rule-message" role="alert">
+                <Info aria-hidden="true" size={15} />
+                <span>{cfopRuleMessage}</span>
               </div>
             ) : null}
 
