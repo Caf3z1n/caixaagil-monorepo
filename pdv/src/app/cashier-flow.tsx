@@ -1925,6 +1925,58 @@ function asJsonRecord(value: unknown): Record<string, unknown> | null {
   }
 }
 
+function hasFilledFiscalValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+
+  return true;
+}
+
+function mergeFiscalRecordWithFallback(
+  primary: Record<string, unknown> | null,
+  fallback: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (!primary) {
+    return fallback;
+  }
+
+  if (!fallback) {
+    return primary;
+  }
+
+  const merged: Record<string, unknown> = { ...fallback, ...primary };
+  const primaryAddress = asRecord(primary.endereco ?? primary.address);
+  const fallbackAddress = asRecord(fallback.endereco ?? fallback.address);
+
+  if (primaryAddress || fallbackAddress) {
+    const nextAddress: Record<string, unknown> = {
+      ...(fallbackAddress ?? {}),
+      ...(primaryAddress ?? {})
+    };
+
+    for (const [key, value] of Object.entries(fallbackAddress ?? {})) {
+      if (!hasFilledFiscalValue(nextAddress[key])) {
+        nextAddress[key] = value;
+      }
+    }
+
+    merged.endereco = nextAddress;
+  }
+
+  for (const [key, value] of Object.entries(fallback)) {
+    if (!hasFilledFiscalValue(merged[key])) {
+      merged[key] = value;
+    }
+  }
+
+  return merged;
+}
+
 function getFirstKnownValue(
   sources: Array<Record<string, unknown> | null | undefined>,
   keys: string[]
@@ -4289,7 +4341,10 @@ export function DesktopCashierFlow({
       ? activeAgreementClients.find((client) => client.id === sale.clienteConvenioId) ?? null
       : null;
     const clientPersonType = sale.clienteConvenioTipoPessoa ?? agreementClient?.personType ?? "fisica";
-    const clientFiscalData = asRecord(sale.clienteConvenioDadosFiscais) ?? asRecord(agreementClient?.fiscalData) ?? null;
+    const clientFiscalData = mergeFiscalRecordWithFallback(
+      asRecord(sale.clienteConvenioDadosFiscais),
+      asRecord(agreementClient?.fiscalData)
+    );
     const fiscalModel: FiscalModel = sale.paymentMethod === "convenio" && clientPersonType === "juridica" ? "55" : "65";
     const modelConfig = getFiscalModelConfig(config, fiscalModel);
     const serieFiscal = Number(modelConfig.serie) || getPdvFiscalSeriesValue(config) || null;
@@ -6854,6 +6909,7 @@ export function DesktopCashierFlow({
                   ? "Cancelada"
                   : "Concluída";
               const saleTone = isFiscalEmissionEnabled ? fiscalSummary.tone : canceled ? "neutral" : "success";
+              const saleClientName = compactReceiptText(sale.clientName);
 
               return (
                 <button
@@ -6874,6 +6930,7 @@ export function DesktopCashierFlow({
                     <em className="pdv-sale-item-meta">
                       <span>{formatDateTime(sale.createdAt)}</span>
                       <span>{getPaymentLabel(sale.paymentMethod)}</span>
+                      {saleClientName ? <span>{saleClientName}</span> : null}
                       {commandSaleTitle ? <span>{commandSaleTitle}</span> : null}
                     </em>
                   </span>
@@ -10227,6 +10284,8 @@ function SaleDetailsModal({
   const canceled = isSaleCanceled(sale);
   const fiscalSummary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading, sale);
   const fiscalTitle = isFiscalEmissionEnabled ? getHistoryFiscalTitle(fiscalSummary.title) : saleDisplayTitle;
+  const saleClientName = compactReceiptText(sale.clientName);
+  const saleClientPersonType = sale.clienteConvenioTipoPessoa ?? "fisica";
 
   return (
     <>
@@ -10257,7 +10316,10 @@ function SaleDetailsModal({
             </div>
           ) : null}
 
-          <div className="pdv-sale-details-strip" aria-label="Resumo da venda">
+          <div
+            className={saleClientName ? "pdv-sale-details-strip pdv-sale-details-strip-with-client" : "pdv-sale-details-strip"}
+            aria-label="Resumo da venda"
+          >
             <span className="pdv-sale-detail-token">
               <span className="pdv-sale-detail-token-icon">
                 <PaymentIcon aria-hidden="true" size={18} />
@@ -10267,6 +10329,17 @@ function SaleDetailsModal({
                 <strong>{paymentOption.label}</strong>
               </span>
             </span>
+            {saleClientName ? (
+              <span className="pdv-sale-detail-token">
+                <span className="pdv-sale-detail-token-icon">
+                  <AgreementClientIcon client={{ personType: saleClientPersonType }} />
+                </span>
+                <span>
+                  <em>Cliente</em>
+                  <strong>{saleClientName}</strong>
+                </span>
+              </span>
+            ) : null}
             <span className="pdv-sale-detail-token">
               <span className="pdv-sale-detail-token-icon">
                 <OriginIcon aria-hidden="true" size={18} />

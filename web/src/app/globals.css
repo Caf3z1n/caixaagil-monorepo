@@ -5336,6 +5336,7 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 }
 
 .platform-flow-actions {
+  order: -1;
   display: flex;
   align-items: center;
   justify-content: flex-end;

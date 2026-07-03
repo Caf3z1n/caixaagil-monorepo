@@ -3501,6 +3501,10 @@ button {
   background: transparent;
 }
 
+.pdv-sale-details-strip-with-client {
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 0.95fr) minmax(0, 0.85fr) minmax(240px, 1.1fr);
+}
+
 .pdv-sale-detail-token {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);

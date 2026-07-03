@@ -121,10 +121,6 @@ function getLegalClientFiscalValidationError(dadosFiscais) {
     missing.push('razão social');
   }
 
-  if (!dadosFiscais?.nome_fantasia || dadosFiscais.nome_fantasia.length < 2) {
-    missing.push('nome fantasia');
-  }
-
   if (!endereco.cep || endereco.cep.length !== 8) {
     missing.push('CEP');
   }
