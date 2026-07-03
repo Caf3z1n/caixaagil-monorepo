@@ -1779,6 +1779,9 @@ export function ProductCatalogManager() {
                   <span>Grupo fiscal</span>
                   <PlatformSelect
                     ariaLabel="Selecionar grupo fiscal do produto"
+                    emptySearchLabel="Nenhum grupo fiscal encontrado"
+                    searchPlaceholder="Buscar grupo fiscal"
+                    searchable
                     value={productDraft.grupo_fiscal_id || "none"}
                     options={[
                       { value: "none", label: "Sem grupo fiscal", description: "Pode operar sem emissão fiscal" },

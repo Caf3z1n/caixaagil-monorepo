@@ -249,6 +249,81 @@ select:not([multiple]):disabled {
     0 8px 18px -16px oklch(0.43 0.12 42 / 0.3);
 }
 
+.platform-select-menu[data-searchable="true"] {
+  max-height: 286px;
+  overflow: hidden;
+  padding: 6px;
+}
+
+.platform-select-list {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.platform-select-menu[data-searchable="true"] .platform-select-list {
+  max-height: 228px;
+  overflow-y: auto;
+  padding-right: 1px;
+}
+
+.platform-select-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-bottom: 4px;
+}
+
+.platform-select-search svg {
+  position: absolute;
+  left: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.platform-select-search input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-deep);
+  font-size: 0.86rem;
+  font-weight: 750;
+  padding: 0 10px 0 32px;
+  transition:
+    border-color 160ms ease-out,
+    box-shadow 160ms ease-out,
+    background-color 160ms ease-out;
+}
+
+.platform-select-menu .platform-select-search input {
+  height: 38px;
+  padding: 0 10px 0 34px;
+  border-radius: 8px;
+}
+
+.platform-select-search input::placeholder {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.platform-select-search input:focus {
+  border-color: oklch(0.72 0.19 45 / 0.7);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px oklch(0.72 0.19 45 / 0.1);
+}
+
+.platform-select-empty {
+  display: block;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 750;
+  line-height: 1.25;
+}
+
 .platform-select-option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18px;
@@ -968,9 +1043,14 @@ html[data-auth-step-fallback="true"][data-auth-step-motion="backward"] .auth-ste
   width: 7px;
   height: 7px;
   margin-top: 0.45em;
+  overflow: hidden;
   border-radius: 999px;
   background: var(--feedback-accent);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--feedback-accent) 14%, transparent);
+}
+
+.auth-feedback-marker svg {
+  display: none;
 }
 
 .auth-feedback-copy {

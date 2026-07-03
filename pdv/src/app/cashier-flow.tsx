@@ -8397,8 +8397,13 @@ function ProductPickerModal({
   onSelect: (product: Product) => void;
   onClose: () => void;
 }) {
+  type ProductPickerInteractionMode = "pointer" | "keyboard";
+
   const pickerSearchRef = useRef<HTMLInputElement | null>(null);
   const productPickerListRef = useRef<HTMLDivElement | null>(null);
+  const productPickerRowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingProductFocusIdRef = useRef("");
+  const shouldFocusFirstProductAfterFilterRef = useRef(false);
   const searchQueryRef = useRef(searchQuery);
   const productPickerFilterKey = `${selectedCategoryId}::${searchQuery}`;
   const [activeProductId, setActiveProductId] = useState("");
@@ -8406,6 +8411,8 @@ function ProductPickerModal({
     filterKey: productPickerFilterKey,
     limit: PRODUCT_PICKER_BATCH_SIZE
   });
+  const [productPickerInteractionMode, setProductPickerInteractionMode] =
+    useState<ProductPickerInteractionMode>("pointer");
   const visibleProductLimit = productPickerWindow.filterKey === productPickerFilterKey
     ? productPickerWindow.limit
     : PRODUCT_PICKER_BATCH_SIZE;
@@ -8456,11 +8463,162 @@ function ProductPickerModal({
   }, [categories, categoryProductTotals, renderedProducts]);
   const selectableProducts = useMemo(
     () => isFiscalEmissionEnabled
-      ? renderedProducts.filter((product) => getProductFiscalIssues(product).length === 0)
-      : renderedProducts,
-    [isFiscalEmissionEnabled, renderedProducts]
+      ? products.filter((product) => getProductFiscalIssues(product).length === 0)
+      : products,
+    [isFiscalEmissionEnabled, products]
   );
   const hasMoreProducts = visibleProductLimit < products.length;
+
+  const scrollProductRowIntoView = useCallback((row: HTMLButtonElement) => {
+    const list = productPickerListRef.current;
+
+    if (!list) {
+      return;
+    }
+
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const scrollPadding = 10;
+
+    if (rowRect.top < listRect.top + scrollPadding) {
+      list.scrollTop -= listRect.top + scrollPadding - rowRect.top;
+      return;
+    }
+
+    if (rowRect.bottom > listRect.bottom - scrollPadding) {
+      list.scrollTop += rowRect.bottom - (listRect.bottom - scrollPadding);
+    }
+  }, []);
+
+  const ensureProductRowRendered = useCallback((productId: string) => {
+    const productIndex = products.findIndex((product) => product.id === productId);
+
+    if (productIndex < 0) {
+      return;
+    }
+
+    setProductPickerWindow((currentWindow) => {
+      const currentLimit = currentWindow.filterKey === productPickerFilterKey
+        ? currentWindow.limit
+        : PRODUCT_PICKER_BATCH_SIZE;
+      const nextLimit = Math.min(products.length, Math.max(currentLimit, productIndex + 1));
+
+      if (currentWindow.filterKey === productPickerFilterKey && nextLimit === currentLimit) {
+        return currentWindow;
+      }
+
+      return {
+        filterKey: productPickerFilterKey,
+        limit: nextLimit
+      };
+    });
+  }, [productPickerFilterKey, products]);
+
+  const focusProductRow = useCallback((productId: string, interactionMode: ProductPickerInteractionMode = "keyboard") => {
+    if (!productId) {
+      return;
+    }
+
+    setProductPickerInteractionMode(interactionMode);
+    pendingProductFocusIdRef.current = productId;
+    ensureProductRowRendered(productId);
+    setActiveProductId(productId);
+
+    const row = productPickerRowRefs.current.get(productId);
+
+    if (row) {
+      row.focus({ preventScroll: true });
+      scrollProductRowIntoView(row);
+      pendingProductFocusIdRef.current = "";
+    }
+  }, [ensureProductRowRendered, scrollProductRowIntoView]);
+
+  const focusFirstSelectableProduct = useCallback(() => {
+    const firstProductId = selectableProducts[0]?.id ?? "";
+
+    if (!firstProductId) {
+      return false;
+    }
+
+    focusProductRow(firstProductId);
+    return true;
+  }, [focusProductRow, selectableProducts]);
+
+  const moveProductFocus = useCallback((direction: 1 | -1, referenceProductId?: string | null) => {
+    if (selectableProducts.length === 0) {
+      return;
+    }
+
+    const referenceIndex = referenceProductId
+      ? selectableProducts.findIndex((product) => product.id === referenceProductId)
+      : -1;
+    const activeIndex = !referenceProductId
+      ? selectableProducts.findIndex((product) => product.id === activeProductId)
+      : referenceIndex;
+    const currentIndex = activeIndex >= 0 ? activeIndex : (direction > 0 ? -1 : selectableProducts.length);
+    const nextIndex = Math.max(0, Math.min(selectableProducts.length - 1, currentIndex + direction));
+    const nextProduct = selectableProducts[nextIndex];
+
+    if (nextProduct) {
+      focusProductRow(nextProduct.id);
+    }
+  }, [activeProductId, focusProductRow, selectableProducts]);
+
+  const handleProductPickerNavigationKeyDown = useCallback((event: ReactKeyboardEvent<HTMLElement>) => {
+    if (
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      (event.key !== "ArrowDown" && event.key !== "ArrowUp")
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const target = event.target instanceof Element ? event.target : null;
+    const focusedProductRow = target?.closest<HTMLButtonElement>("[data-product-picker-row='true']") ?? null;
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+
+    if (focusedProductRow) {
+      moveProductFocus(direction, focusedProductRow.dataset.productId ?? activeProductId);
+      return;
+    }
+
+    const edgeProduct = direction > 0 ? selectableProducts[0] : selectableProducts[selectableProducts.length - 1];
+
+    if (edgeProduct) {
+      focusProductRow(edgeProduct.id);
+    }
+  }, [activeProductId, focusProductRow, moveProductFocus, selectableProducts]);
+
+  const handleCategoryFilterChange = useCallback((categoryId: string) => {
+    productPickerListRef.current?.scrollTo({ top: 0 });
+
+    if (categoryId === selectedCategoryId) {
+      focusFirstSelectableProduct();
+      return;
+    }
+
+    shouldFocusFirstProductAfterFilterRef.current = true;
+    pendingProductFocusIdRef.current = "";
+    setProductPickerInteractionMode("keyboard");
+    setActiveProductId("");
+    setProductPickerWindow({
+      filterKey: `${categoryId}::${searchQueryRef.current}`,
+      limit: PRODUCT_PICKER_BATCH_SIZE
+    });
+    onCategoryChange(categoryId);
+  }, [focusFirstSelectableProduct, onCategoryChange, selectedCategoryId]);
+
+  const handleProductRowPointerMove = useCallback((productId: string) => {
+    if (productPickerInteractionMode === "pointer" && activeProductId === productId) {
+      return;
+    }
+
+    focusProductRow(productId, "pointer");
+  }, [activeProductId, focusProductRow, productPickerInteractionMode]);
 
   useEffect(() => {
     searchQueryRef.current = searchQuery;
@@ -8511,12 +8669,44 @@ function ProductPickerModal({
   }, [productPickerFilterKey]);
 
   useEffect(() => {
-    setActiveProductId((currentProductId) => (
-      selectableProducts.some((product) => product.id === currentProductId)
+    const firstProductId = selectableProducts[0]?.id ?? "";
+    const shouldFocusFirstProduct = shouldFocusFirstProductAfterFilterRef.current && firstProductId;
+
+    setActiveProductId((currentProductId) => {
+      if (shouldFocusFirstProduct) {
+        return firstProductId;
+      }
+
+      return selectableProducts.some((product) => product.id === currentProductId)
         ? currentProductId
-        : selectableProducts[0]?.id ?? ""
-    ));
-  }, [selectableProducts]);
+        : firstProductId;
+    });
+
+    if (shouldFocusFirstProduct) {
+      pendingProductFocusIdRef.current = firstProductId;
+      shouldFocusFirstProductAfterFilterRef.current = false;
+    } else if (!isLoading && selectableProducts.length === 0) {
+      shouldFocusFirstProductAfterFilterRef.current = false;
+    }
+  }, [isLoading, selectableProducts]);
+
+  useEffect(() => {
+    const pendingProductId = pendingProductFocusIdRef.current;
+
+    if (!pendingProductId || pendingProductId !== activeProductId) {
+      return;
+    }
+
+    const row = productPickerRowRefs.current.get(pendingProductId);
+
+    if (!row) {
+      return;
+    }
+
+    row.focus({ preventScroll: true });
+    scrollProductRowIntoView(row);
+    pendingProductFocusIdRef.current = "";
+  }, [activeProductId, renderedProducts.length, scrollProductRowIntoView]);
 
   const activeProduct = selectableProducts.find((product) => product.id === activeProductId) ?? selectableProducts[0] ?? null;
 
@@ -8559,6 +8749,12 @@ function ProductPickerModal({
       loadMoreProducts();
     }
   }, [hasMoreProducts, loadMoreProducts]);
+  const productPickerShellClassName = [
+    "pdv-product-picker-shell",
+    productPickerInteractionMode === "keyboard"
+      ? "pdv-product-picker-shell-keyboard"
+      : "pdv-product-picker-shell-pointer"
+  ].join(" ");
 
   return (
     <CashierModal
@@ -8582,135 +8778,150 @@ function ProductPickerModal({
 
             if (event.key === "ArrowDown" && selectableProducts.length > 0) {
               event.preventDefault();
-              const currentIndex = Math.max(0, selectableProducts.findIndex((product) => product.id === activeProductId));
-              const nextProduct = selectableProducts[Math.min(selectableProducts.length - 1, currentIndex + 1)];
-              setActiveProductId(nextProduct.id);
+              focusProductRow(selectableProducts[0].id);
               return;
             }
 
             if (event.key === "ArrowUp" && selectableProducts.length > 0) {
               event.preventDefault();
-              const currentIndex = Math.max(0, selectableProducts.findIndex((product) => product.id === activeProductId));
-              const nextProduct = selectableProducts[Math.max(0, currentIndex - 1)];
-              setActiveProductId(nextProduct.id);
+              focusProductRow(selectableProducts[selectableProducts.length - 1].id);
             }
           }}
           placeholder="Buscar por produto, código ou categoria"
         />
       </label>
 
-      <div className="pdv-product-picker-filters" aria-label="Filtrar produtos por categoria">
-        <button
-          className={selectedCategoryId === "all" ? "pdv-filter-chip pdv-filter-chip-active" : "pdv-filter-chip"}
-          type="button"
-          onClick={() => onCategoryChange("all")}
-        >
-          Todos
-        </button>
-        {visibleCategories.map((category) => (
+      <div className={productPickerShellClassName} onKeyDown={handleProductPickerNavigationKeyDown}>
+        <div className="pdv-product-picker-filters" aria-label="Filtrar produtos por categoria">
           <button
-            className={selectedCategoryId === category.id ? "pdv-filter-chip pdv-filter-chip-active" : "pdv-filter-chip"}
-            key={category.id}
+            className={selectedCategoryId === "all" ? "pdv-filter-chip pdv-filter-chip-active" : "pdv-filter-chip"}
             type="button"
-            onClick={() => onCategoryChange(category.id)}
+            onClick={() => handleCategoryFilterChange("all")}
           >
-            {category.name}
+            Todos
           </button>
-        ))}
-      </div>
+          {visibleCategories.map((category) => (
+            <button
+              className={selectedCategoryId === category.id ? "pdv-filter-chip pdv-filter-chip-active" : "pdv-filter-chip"}
+              key={category.id}
+              type="button"
+              onClick={() => handleCategoryFilterChange(category.id)}
+            >
+              {category.name}
+            </button>
+          ))}
+        </div>
 
-      <div
-        ref={productPickerListRef}
-        className="pdv-product-picker-list"
-        onScroll={handleProductListScroll}
-      >
-        {isLoading ? (
-          <>
-            <span className="pdv-product-picker-skeleton" />
-            <span className="pdv-product-picker-skeleton" />
-            <span className="pdv-product-picker-skeleton" />
-          </>
-        ) : null}
+        <div
+          ref={productPickerListRef}
+          className="pdv-product-picker-list"
+          onScroll={handleProductListScroll}
+        >
+          {isLoading ? (
+            <>
+              <span className="pdv-product-picker-skeleton" />
+              <span className="pdv-product-picker-skeleton" />
+              <span className="pdv-product-picker-skeleton" />
+            </>
+          ) : null}
 
-        {!isLoading && groupedProducts.map(({ category, products: categoryProducts, totalProducts }) => (
-          <section
-            className="pdv-product-picker-category"
-            key={category.id}
-            style={{ "--pdv-category-accent": category.accent } as CSSProperties}
-          >
-            <div className="pdv-list-title">
-              <CategoryBadge category={category} />
-              <strong>{category.name}</strong>
-              <em>{totalProducts} {totalProducts === 1 ? "produto" : "produtos"}</em>
-            </div>
+          {!isLoading && groupedProducts.map(({ category, products: categoryProducts, totalProducts }) => (
+            <section
+              className="pdv-product-picker-category"
+              key={category.id}
+              style={{ "--pdv-category-accent": category.accent } as CSSProperties}
+            >
+              <div className="pdv-list-title">
+                <CategoryBadge category={category} />
+                <strong>{category.name}</strong>
+                <em>{totalProducts} {totalProducts === 1 ? "produto" : "produtos"}</em>
+              </div>
 
-            <div className="pdv-product-picker-category-items">
-              {categoryProducts.map((product) => {
-                const fiscalIssues = isFiscalEmissionEnabled ? getProductFiscalIssues(product) : [];
-                const fiscalWarning = formatProductFiscalIssues(fiscalIssues);
-                const isFiscalBlocked = fiscalIssues.length > 0;
-                const isActive = !isFiscalBlocked && product.id === activeProductId;
-                const rowClassName = [
-                  "pdv-product-row",
-                  "pdv-product-picker-row",
-                  isActive ? "pdv-product-picker-row-active" : "",
-                  isFiscalBlocked ? "pdv-product-picker-row-disabled" : ""
-                ].filter(Boolean).join(" ");
+              <div className="pdv-product-picker-category-items">
+                {categoryProducts.map((product) => {
+                  const fiscalIssues = isFiscalEmissionEnabled ? getProductFiscalIssues(product) : [];
+                  const fiscalWarning = formatProductFiscalIssues(fiscalIssues);
+                  const isFiscalBlocked = fiscalIssues.length > 0;
+                  const isActive = !isFiscalBlocked && product.id === activeProductId;
+                  const rowClassName = [
+                    "pdv-product-row",
+                    "pdv-product-picker-row",
+                    isActive ? "pdv-product-picker-row-active" : "",
+                    isFiscalBlocked ? "pdv-product-picker-row-disabled" : ""
+                  ].filter(Boolean).join(" ");
 
-                return (
-                  <button
-                    className={rowClassName}
-                    key={product.id}
-                    type="button"
-                    aria-disabled={isFiscalBlocked}
-                    aria-selected={isActive}
-                    disabled={isFiscalBlocked}
-                    onPointerEnter={() => {
-                      if (isFiscalBlocked) {
-                        return;
-                      }
+                  return (
+                    <button
+                      className={rowClassName}
+                      key={product.id}
+                      type="button"
+                      aria-disabled={isFiscalBlocked}
+                      aria-selected={isActive}
+                      data-product-id={product.id}
+                      data-product-picker-row="true"
+                      disabled={isFiscalBlocked}
+                      ref={(node) => {
+                        if (node) {
+                          productPickerRowRefs.current.set(product.id, node);
+                          return;
+                        }
 
-                      setActiveProductId(product.id);
-                    }}
-                    onClick={() => onSelect(product)}
-                  >
-                    <ProductThumbnail
-                      backgroundColor={product.categoryColor}
-                      color={product.categoryAccent}
-                      icon={product.categoryIcon}
-                      imageUrl={product.imageUrl}
-                      label={product.category}
-                    />
-                    <span className="pdv-product-copy">
-                      <strong>{product.name}</strong>
-                      <em className="pdv-product-detail-line">
-                        <span>{product.barcode ? `Código ${product.barcode}` : "Sem código de barras"}</span>
-                        <span>Estoque {formatStockQuantity(product.stockQuantity)}</span>
-                      </em>
-                      {fiscalWarning ? <span className="pdv-product-fiscal-warning">{fiscalWarning}</span> : null}
-                    </span>
-                    <span className="pdv-product-picker-meta">
-                      <span>
-                        <em>Preço</em>
-                        <strong>{formatCurrency(product.priceCents)}</strong>
+                        productPickerRowRefs.current.delete(product.id);
+                      }}
+                      onFocus={() => {
+                        if (isFiscalBlocked) {
+                          return;
+                        }
+
+                        setActiveProductId(product.id);
+                      }}
+                      onPointerMove={() => {
+                        if (isFiscalBlocked) {
+                          return;
+                        }
+
+                        handleProductRowPointerMove(product.id);
+                      }}
+                      onClick={() => onSelect(product)}
+                    >
+                      <ProductThumbnail
+                        backgroundColor={product.categoryColor}
+                        color={product.categoryAccent}
+                        icon={product.categoryIcon}
+                        imageUrl={product.imageUrl}
+                        label={product.category}
+                      />
+                      <span className="pdv-product-copy">
+                        <strong>{product.name}</strong>
+                        <em className="pdv-product-detail-line">
+                          <span>{product.barcode ? `Código ${product.barcode}` : "Sem código de barras"}</span>
+                          <span>Estoque {formatStockQuantity(product.stockQuantity)}</span>
+                        </em>
+                        {fiscalWarning ? <span className="pdv-product-fiscal-warning">{fiscalWarning}</span> : null}
                       </span>
-                    </span>
-                    {isFiscalBlocked ? <AlertTriangle aria-hidden="true" size={18} /> : <Plus aria-hidden="true" size={18} />}
-                  </button>
-                );
-              })}
+                      <span className="pdv-product-picker-meta">
+                        <span>
+                          <em>Preço</em>
+                          <strong>{formatCurrency(product.priceCents)}</strong>
+                        </span>
+                      </span>
+                      {isFiscalBlocked ? <AlertTriangle aria-hidden="true" size={18} /> : <Plus aria-hidden="true" size={18} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+
+          {!isLoading && products.length === 0 ? (
+            <div className="pdv-empty-state">
+              <Search aria-hidden="true" size={22} />
+              <strong>{loadError ? "Catálogo indisponível" : "Nenhum produto encontrado"}</strong>
+              {loadError ? <span>{loadError}</span> : null}
             </div>
-          </section>
-        ))}
+          ) : null}
 
-        {!isLoading && products.length === 0 ? (
-          <div className="pdv-empty-state">
-            <Search aria-hidden="true" size={22} />
-            <strong>{loadError ? "Catálogo indisponível" : "Nenhum produto encontrado"}</strong>
-            {loadError ? <span>{loadError}</span> : null}
-          </div>
-        ) : null}
-
+        </div>
       </div>
     </CashierModal>
   );

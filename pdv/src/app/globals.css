@@ -2269,6 +2269,12 @@ button {
   scrollbar-gutter: stable;
 }
 
+.pdv-product-picker-shell {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+}
+
 .pdv-product-picker-filters {
   display: flex;
   flex-wrap: wrap;
@@ -2357,8 +2363,8 @@ button {
   z-index: 1;
 }
 
-.pdv-product-picker-row:hover::before,
-.pdv-product-picker-row:focus-visible::before,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover::before,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible::before,
 .pdv-product-picker-row-active::before {
   opacity: 1;
   transform: scale(1);
@@ -2373,15 +2379,15 @@ button {
     color 160ms ease-out;
 }
 
-.pdv-product-picker-row:hover .pdv-product-avatar,
-.pdv-product-picker-row:focus-visible .pdv-product-avatar,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-avatar,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-avatar,
 .pdv-product-picker-row-active .pdv-product-avatar {
   background: color-mix(in srgb, var(--pdv-category-accent) 12%, var(--surface)) !important;
   color: var(--pdv-category-accent) !important;
 }
 
-.pdv-product-picker-row:hover .pdv-product-avatar-image,
-.pdv-product-picker-row:focus-visible .pdv-product-avatar-image,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-avatar-image,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-avatar-image,
 .pdv-product-picker-row-active .pdv-product-avatar-image {
   background: var(--surface) !important;
 }
@@ -2421,26 +2427,26 @@ button {
     opacity 150ms ease-out;
 }
 
-.pdv-product-picker-row:hover .pdv-product-copy strong,
-.pdv-product-picker-row:focus-visible .pdv-product-copy strong,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-copy strong,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-copy strong,
 .pdv-product-picker-row-active .pdv-product-copy strong,
-.pdv-product-picker-row:hover .pdv-product-copy em,
-.pdv-product-picker-row:focus-visible .pdv-product-copy em,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-copy em,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-copy em,
 .pdv-product-picker-row-active .pdv-product-copy em,
-.pdv-product-picker-row:hover .pdv-product-picker-meta em,
-.pdv-product-picker-row:focus-visible .pdv-product-picker-meta em,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-picker-meta em,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-picker-meta em,
 .pdv-product-picker-row-active .pdv-product-picker-meta em,
-.pdv-product-picker-row:hover .pdv-product-picker-meta strong,
-.pdv-product-picker-row:focus-visible .pdv-product-picker-meta strong,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-picker-meta strong,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-picker-meta strong,
 .pdv-product-picker-row-active .pdv-product-picker-meta strong {
   color: var(--ink-deep);
 }
 
-.pdv-product-picker-row:hover .pdv-product-copy em,
-.pdv-product-picker-row:focus-visible .pdv-product-copy em,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-copy em,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-copy em,
 .pdv-product-picker-row-active .pdv-product-copy em,
-.pdv-product-picker-row:hover .pdv-product-picker-meta em,
-.pdv-product-picker-row:focus-visible .pdv-product-picker-meta em,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-picker-meta em,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-picker-meta em,
 .pdv-product-picker-row-active .pdv-product-picker-meta em {
   opacity: 0.82;
   color: var(--muted);
@@ -2534,11 +2540,18 @@ button {
     color 150ms ease-out;
 }
 
-.pdv-product-row.pdv-product-picker-row:hover,
-.pdv-product-row.pdv-product-picker-row:focus-visible,
+.pdv-product-picker-shell-pointer .pdv-product-row.pdv-product-picker-row:hover,
+.pdv-product-picker-shell-keyboard .pdv-product-row.pdv-product-picker-row:focus-visible,
 .pdv-product-row.pdv-product-picker-row-active {
   border-color: color-mix(in srgb, var(--pdv-category-accent) 72%, var(--line-cool));
   background: color-mix(in srgb, var(--pdv-category-accent) 5%, var(--surface));
+  box-shadow: none;
+  transform: none;
+}
+
+.pdv-product-picker-shell-keyboard .pdv-product-row.pdv-product-picker-row:not(.pdv-product-picker-row-active):hover {
+  border-color: var(--line-cool);
+  background: var(--surface);
   box-shadow: none;
   transform: none;
 }
@@ -2558,8 +2571,8 @@ button {
   will-change: transform;
 }
 
-.pdv-product-picker-row:hover > svg,
-.pdv-product-picker-row:focus-visible > svg,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover > svg,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible > svg,
 .pdv-product-picker-row-active > svg {
   color: var(--pdv-category-accent);
   opacity: 1;
@@ -2643,8 +2656,8 @@ button {
   content: "•";
 }
 
-.pdv-product-picker-row:hover .pdv-product-detail-line span + span::before,
-.pdv-product-picker-row:focus-visible .pdv-product-detail-line span + span::before,
+.pdv-product-picker-shell-pointer .pdv-product-picker-row:hover .pdv-product-detail-line span + span::before,
+.pdv-product-picker-shell-keyboard .pdv-product-picker-row:focus-visible .pdv-product-detail-line span + span::before,
 .pdv-product-picker-row-active .pdv-product-detail-line span + span::before {
   color: color-mix(in srgb, var(--pdv-category-accent) 52%, var(--muted));
 }
