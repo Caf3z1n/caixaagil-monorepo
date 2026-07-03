@@ -1,7 +1,11 @@
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Printing;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -12,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
+using QRCoder;
 using Unimake.Business.DFe.Security;
 using Unimake.Business.DFe.Servicos;
 using Unimake.Business.DFe.Utility;
@@ -31,6 +36,10 @@ namespace CaixaAgil.FiscalWorker;
 
 internal static class Program
 {
+    private const decimal HomologationIbsUfRate = 0.1m;
+    private const decimal HomologationIbsMunRate = 0m;
+    private const decimal HomologationCbsRate = 0.9m;
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -504,14 +513,14 @@ internal static class Program
                 return FiscalResponse.Fail(
                     request.Command,
                     "contingencia_modelo_invalido",
-                    $"O XML informado nÃ£o Ã© uma {GetFiscalModelLabel(expectedModelo)} em contingÃªncia.",
+                    $"O XML informado não é uma {GetFiscalModelLabel(expectedModelo)} em contingência.",
                     $"Modelo encontrado: {emission.Modelo}",
                     new
                     {
                         modelo = emission.Modelo,
                         modeloEsperado = expectedModelo,
                         xmlPath,
-                        mensagemOperador = $"O XML informado nÃ£o Ã© uma {GetFiscalModelLabel(expectedModelo)} em contingÃªncia."
+                        mensagemOperador = $"O XML informado não é uma {GetFiscalModelLabel(expectedModelo)} em contingência."
                     });
             }
 
@@ -1555,7 +1564,7 @@ internal static class Program
 
         if (document.GetElementsByTagName("Signature", "http://www.w3.org/2000/09/xmldsig#").Count == 0)
         {
-            throw new InvalidOperationException("XML de contingÃªncia nÃ£o foi assinado.");
+            throw new InvalidOperationException("XML de contingência não foi assinado.");
         }
 
         var namespaceManager = new XmlNamespaceManager(document.NameTable);
@@ -1568,7 +1577,7 @@ internal static class Program
 
         if (signedTpEmis != emission.TipoEmissao || signedChave != emission.Chave)
         {
-            throw new InvalidOperationException("XML de contingÃªncia assinado diverge da chave ou do tipo de emissÃ£o.");
+            throw new InvalidOperationException("XML de contingência assinado diverge da chave ou do tipo de emissão.");
         }
 
         if (emission.Modelo == "65")
@@ -1999,7 +2008,7 @@ internal static class Program
             BuildEmitterXml(emission.Emitter, emission.Uf) +
             (emission.Modelo == "55" ? BuildRecipientXml(emission) : "") +
             details +
-            BuildTotalXml(totalProducts, emission.Lines, emission.Emitter.Crt) +
+            BuildTotalXml(totalProducts, emission.Lines, emission.Emitter.Crt, emission.Ambiente) +
             Wrap("transp", Tag("modFrete", "9")) +
             BuildPaymentXml(emission.PaymentMethod, totalProducts) +
             Wrap("infAdic", Tag("infCpl", "Documento emitido pelo Caixa Agil PDV.")),
@@ -2219,8 +2228,38 @@ internal static class Program
                 Tag("vTotTrib", "0.00") +
                 icmsXml +
                 Wrap("PIS", BuildPisXml(line)) +
-                Wrap("COFINS", BuildCofinsXml(line))),
+                Wrap("COFINS", BuildCofinsXml(line)) +
+                BuildHomologationIbsCbsXml(line, ambiente)),
             new Dictionary<string, string> { ["nItem"] = (index + 1).ToString(CultureInfo.InvariantCulture) });
+    }
+
+    private static string BuildHomologationIbsCbsXml(NfceLine line, string ambiente)
+    {
+        if (!ShouldIncludeHomologationIbsCbs(ambiente))
+        {
+            return string.Empty;
+        }
+
+        var ibsUfValue = CalculateIbsCbsValue(line.TotalPrice, HomologationIbsUfRate);
+        var ibsMunValue = CalculateIbsCbsValue(line.TotalPrice, HomologationIbsMunRate);
+        var ibsValue = ibsUfValue + ibsMunValue;
+        var cbsValue = CalculateIbsCbsValue(line.TotalPrice, HomologationCbsRate);
+
+        return Wrap("IBSCBS",
+            Tag("CST", "000") +
+            Tag("cClassTrib", "000001") +
+            Wrap("gIBSCBS",
+                Tag("vBC", FormatDecimal(line.TotalPrice, 2)) +
+                Wrap("gIBSUF",
+                    Tag("pIBSUF", FormatDecimal(HomologationIbsUfRate, 4)) +
+                    Tag("vIBSUF", FormatDecimal(ibsUfValue, 2))) +
+                Wrap("gIBSMun",
+                    Tag("pIBSMun", FormatDecimal(HomologationIbsMunRate, 4)) +
+                    Tag("vIBSMun", FormatDecimal(ibsMunValue, 2))) +
+                Tag("vIBS", FormatDecimal(ibsValue, 2)) +
+                Wrap("gCBS",
+                    Tag("pCBS", FormatDecimal(HomologationCbsRate, 4)) +
+                    Tag("vCBS", FormatDecimal(cbsValue, 2)))));
     }
 
     private static string BuildPisXml(NfceLine line)
@@ -2297,7 +2336,7 @@ internal static class Program
             Tag("vICMS", FormatDecimal(icmsValue, 2)));
     }
 
-    private static string BuildTotalXml(decimal totalProducts, List<NfceLine> lines, string? crt)
+    private static string BuildTotalXml(decimal totalProducts, List<NfceLine> lines, string? crt, string ambiente)
     {
         var icmsBase = 0m;
         var icmsValue = 0m;
@@ -2339,7 +2378,52 @@ internal static class Program
             Tag("vCOFINS", "0.00") +
             Tag("vOutro", "0.00") +
             Tag("vNF", FormatDecimal(totalProducts, 2)) +
-            Tag("vTotTrib", "0.00")));
+            Tag("vTotTrib", "0.00")) +
+            BuildHomologationIbsCbsTotalXml(totalProducts, ambiente));
+    }
+
+    private static string BuildHomologationIbsCbsTotalXml(decimal totalProducts, string ambiente)
+    {
+        if (!ShouldIncludeHomologationIbsCbs(ambiente))
+        {
+            return string.Empty;
+        }
+
+        var ibsUfValue = CalculateIbsCbsValue(totalProducts, HomologationIbsUfRate);
+        var ibsMunValue = CalculateIbsCbsValue(totalProducts, HomologationIbsMunRate);
+        var ibsValue = ibsUfValue + ibsMunValue;
+        var cbsValue = CalculateIbsCbsValue(totalProducts, HomologationCbsRate);
+
+        return Wrap("IBSCBSTot",
+            Tag("vBCIBSCBS", FormatDecimal(totalProducts, 2)) +
+            Wrap("gIBS",
+                Wrap("gIBSUF",
+                    Tag("vDif", "0.00") +
+                    Tag("vDevTrib", "0.00") +
+                    Tag("vIBSUF", FormatDecimal(ibsUfValue, 2))) +
+                Wrap("gIBSMun",
+                    Tag("vDif", "0.00") +
+                    Tag("vDevTrib", "0.00") +
+                    Tag("vIBSMun", FormatDecimal(ibsMunValue, 2))) +
+                Tag("vIBS", FormatDecimal(ibsValue, 2)) +
+                Tag("vCredPres", "0.00") +
+                Tag("vCredPresCondSus", "0.00")) +
+            Wrap("gCBS",
+                Tag("vDif", "0.00") +
+                Tag("vDevTrib", "0.00") +
+                Tag("vCBS", FormatDecimal(cbsValue, 2)) +
+                Tag("vCredPres", "0.00") +
+                Tag("vCredPresCondSus", "0.00")));
+    }
+
+    private static decimal CalculateIbsCbsValue(decimal baseValue, decimal rate)
+    {
+        return Math.Round(baseValue * rate / 100m, 2, MidpointRounding.AwayFromZero);
+    }
+
+    private static bool ShouldIncludeHomologationIbsCbs(string ambiente)
+    {
+        return string.Equals(ambiente, "homologacao", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildPaymentXml(string paymentMethod, decimal total)
@@ -3112,12 +3196,14 @@ internal static class Program
         }
 
         var printerInfo = ValidateConfiguredPrinter(config.Impressao, issues, technical);
+        var dryRun = GetBool(request.Payload, "dryRun", false) || GetBool(request.Payload, "dry_run", false);
         var data = new Dictionary<string, object?>
         {
             ["xmlPath"] = xmlPath,
             ["printer"] = printerInfo,
             ["adapter"] = "Unimake.Unidanfe.NET6",
-            ["contingencia"] = isContingencyPrint
+            ["contingencia"] = isContingencyPrint,
+            ["dryRun"] = dryRun
         };
 
         if (issues.Count > 0)
@@ -3132,29 +3218,76 @@ internal static class Program
 
         try
         {
-            var selectedPrinter = ResolveConfiguredPrinterName(config.Impressao);
+            var selectedPrinter = ResolveConfiguredPrinterName(config.Impressao) ?? string.Empty;
             var danfe = ReadNfceDanfe(xmlPath!);
             var modelo = GetString(request.Payload, "modelo") == "55" ? "55" : ReadFiscalModelFromXml(xmlPath!) ?? "65";
-            var unidanfeResult = PrintWithIntegratedUniDanfe(xmlPath!, config, request.Payload, selectedPrinter);
+            object? unidanfeResult = null;
+            object? nativeResult = null;
+            var forceNativeNfceDanfe = GetBool(request.Payload, "forceNativeDanfe", false);
+            var externalUniDanfePath = ResolveExternalUniDanfeExecutable(config, request.Payload);
+            var adapter = "Unimake.Unidanfe.NET6";
 
-            data["adapter"] = "Unimake.Unidanfe.NET6";
-            data["unidanfe"] = unidanfeResult;
             data["modelo"] = modelo;
             data["serie"] = danfe.Serie;
             data["numero"] = danfe.Numero;
             data["chave"] = danfe.Chave;
             data["printerName"] = selectedPrinter;
+            data["nativeFallbackEnabled"] = false;
+            data["externalUniDanfePath"] = externalUniDanfePath;
+
+            if (dryRun)
+            {
+                data["adapter"] = forceNativeNfceDanfe
+                    ? "CaixaAgil.NativeNfceDanfe"
+                    : externalUniDanfePath is not null
+                        ? "UniNFe.UniDANFE.External"
+                        : "Unimake.Unidanfe.NET6";
+                data["unidanfe"] = forceNativeNfceDanfe
+                    ? null
+                    : externalUniDanfePath is not null
+                        ? new { executablePath = externalUniDanfePath, adapter = "UniNFe.UniDANFE.External" }
+                        : PrepareIntegratedUniDanfeRuntime(ResolveUniDanfeRuntimeDir(ResolveUniDanfeConfigurationDir(config, xmlPath!)));
+
+                return FiscalResponse.Ok(
+                    request.Command,
+                    "danfe_dry_run_validado",
+                    $"DANFE {GetFiscalModelLabel(modelo)} validado sem enviar para a impressora.",
+                    null,
+                    data);
+            }
+
+            if (forceNativeNfceDanfe)
+            {
+                nativeResult = PrintNativeNfceDanfe(danfe, selectedPrinter, config.Impressao.BobinaMm ?? 80, request.Payload);
+                adapter = "CaixaAgil.NativeNfceDanfe";
+            }
+            else
+            {
+                if (externalUniDanfePath is not null)
+                {
+                    unidanfeResult = PrintWithExternalUniDanfe(externalUniDanfePath, xmlPath!, config, request.Payload, selectedPrinter);
+                    adapter = "UniNFe.UniDANFE.External";
+                }
+                else
+                {
+                    unidanfeResult = PrintWithIntegratedUniDanfe(xmlPath!, config, request.Payload, selectedPrinter);
+                }
+            }
+
+            data["adapter"] = adapter;
+            data["unidanfe"] = unidanfeResult;
+            data["nativeDanfe"] = nativeResult;
 
             return FiscalResponse.Ok(
                 request.Command,
                 "danfe_impresso",
-                $"DANFE {GetFiscalModelLabel(modelo)} enviado pela UniDANFE integrada.",
+                BuildDanfePrintSuccessMessage(modelo, adapter),
                 null,
                 data);
         }
         catch (Exception error)
         {
-            data["fallbackDisabled"] = "dll-only";
+            data["fallbackDisabled"] = "native";
 
             return FiscalResponse.Fail(
                 request.Command,
@@ -3206,6 +3339,274 @@ internal static class Program
         }
     }
 
+    private static object PrintWithExternalUniDanfe(string executablePath, string xmlPath, FiscalConfig config, JsonObject? payload, string? selectedPrinter)
+    {
+        var modelo = GetString(payload, "modelo") == "55" ? "55" : ReadFiscalModelFromXml(xmlPath) ?? "65";
+        var payloadConfigName = GetString(payload, "configName") ?? GetString(payload, "configuracao");
+        var configName = payloadConfigName ?? (modelo == "55" ? config.Danfe.ConfigName ?? "DANFE_SIMPL" : null);
+        var configurationDir = ResolveUniDanfeConfigurationDir(config, xmlPath);
+        var runtimeDir = configurationDir;
+        var printXmlPath = PrepareUniDanfePrintXml(xmlPath, runtimeDir);
+        var printerName = string.IsNullOrWhiteSpace(selectedPrinter) ? null : selectedPrinter.Trim();
+        var printJobName = BuildDanfePrintJobName(payload);
+        var args = new List<string>
+        {
+            $"a={printXmlPath}",
+            "v=0",
+            "m=1"
+        };
+
+        if (!string.IsNullOrWhiteSpace(configName))
+        {
+            args.Add($"c={configName}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(printerName))
+        {
+            args.Add($"i={printerName}");
+        }
+
+        using var printMonitor = StartDuplicatePrintJobMonitor(printJobName, printerName ?? "padrao", maxJobsToKeep: 1);
+        var execution = ExecuteExternalUniDanfe(executablePath, args, modelo == "65" ? TimeSpan.FromSeconds(30) : TimeSpan.FromSeconds(45));
+        var duplicatePrintJobs = printMonitor.StopAndGetResult(TimeSpan.FromSeconds(8));
+
+        return new
+        {
+            executablePath,
+            sourceXmlPath = xmlPath,
+            printXmlPath,
+            runtimeDir,
+            printerName = printerName ?? "padrao",
+            printJobName,
+            configName,
+            args,
+            execution,
+            duplicatePrintJobs,
+            adapter = "UniNFe.UniDANFE.External"
+        };
+    }
+
+    private static object ExecuteExternalUniDanfe(string executablePath, IReadOnlyList<string> args, TimeSpan timeout)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+        {
+            throw new FileNotFoundException("Executável da UniDANFE não encontrado.", executablePath);
+        }
+
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = Path.GetDirectoryName(executablePath) ?? Environment.CurrentDirectory
+        };
+
+        foreach (var arg in args)
+        {
+            process.StartInfo.ArgumentList.Add(arg);
+        }
+
+        var startedAt = DateTime.Now;
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("Não foi possível iniciar o executável da UniDANFE.");
+        }
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+
+        if (!process.WaitForExit((int)Math.Ceiling(timeout.TotalMilliseconds)))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // O processo pode encerrar entre o timeout e a tentativa de kill.
+            }
+
+            throw new TimeoutException($"A UniDANFE externa não respondeu em até {timeout.TotalSeconds:0} segundos.");
+        }
+
+        var stdout = stdoutTask.GetAwaiter().GetResult();
+        var stderr = stderrTask.GetAwaiter().GetResult();
+        var elapsedMs = (int)Math.Round((DateTime.Now - startedAt).TotalMilliseconds);
+
+        if (process.ExitCode != 0)
+        {
+            var output = Regex.Replace($"{stdout} {stderr}", "\\s+", " ").Trim();
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(output)
+                    ? $"A UniDANFE externa finalizou com código {process.ExitCode}."
+                    : $"A UniDANFE externa finalizou com código {process.ExitCode}: {output}");
+        }
+
+        return new
+        {
+            exitCode = process.ExitCode,
+            elapsedMs,
+            stdout = string.IsNullOrWhiteSpace(stdout) ? null : stdout.Trim(),
+            stderr = string.IsNullOrWhiteSpace(stderr) ? null : stderr.Trim()
+        };
+    }
+
+    private static string? ResolveExternalUniDanfeExecutable(FiscalConfig config, JsonObject? payload)
+    {
+        if (!config.Danfe.PreferExternal && string.IsNullOrWhiteSpace(config.Danfe.ExecutablePath))
+        {
+            return null;
+        }
+
+        var explicitCandidates = new[]
+        {
+            GetString(payload, "danfeExePath"),
+            GetString(payload, "danfe_exe_path"),
+            GetString(payload, "unidanfeExePath"),
+            GetString(payload, "unidanfe_exe_path"),
+            GetString(payload, "executavelDanfe"),
+            config.Danfe.ExecutablePath,
+            Environment.GetEnvironmentVariable("UNINFE_DANFE_EXE"),
+            Environment.GetEnvironmentVariable("UNIDANFE_EXE")
+        };
+
+        foreach (var candidate in explicitCandidates)
+        {
+            var resolved = ResolveExecutableCandidate(candidate);
+
+            if (resolved is not null)
+            {
+                return resolved;
+            }
+        }
+
+        foreach (var candidate in EnumerateKnownExternalUniDanfeCandidates())
+        {
+            var resolved = ResolveExecutableCandidate(candidate);
+
+            if (resolved is not null)
+            {
+                return resolved;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ResolveExecutableCandidate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var candidate = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+
+        try
+        {
+            if (Directory.Exists(candidate))
+            {
+                candidate = Path.Combine(candidate, "unidanfe.exe");
+            }
+
+            if (File.Exists(candidate) &&
+                string.Equals(Path.GetFileName(candidate), "unidanfe.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+        catch
+        {
+            // Caminhos vindos de ambiente/configuração podem estar inválidos.
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> EnumerateKnownExternalUniDanfeCandidates()
+    {
+        var candidates = new List<string>();
+        var appExe = Environment.GetEnvironmentVariable("UNINFE_APP_EXE");
+
+        if (!string.IsNullOrWhiteSpace(appExe))
+        {
+            try
+            {
+                var appDir = Path.GetDirectoryName(Environment.ExpandEnvironmentVariables(appExe.Trim().Trim('"')));
+
+                if (!string.IsNullOrWhiteSpace(appDir))
+                {
+                    candidates.Add(Path.Combine(appDir, "unidanfe.exe"));
+                }
+            }
+            catch
+            {
+                // Variável opcional, ignoramos quando inválida.
+            }
+        }
+
+        candidates.Add(@"C:\Unimake\UniNFe\unidanfe.exe");
+        candidates.Add(@"C:\UniNFe\unidanfe.exe");
+        candidates.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Unimake",
+            "UniNFe",
+            "unidanfe.exe"));
+        candidates.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "Unimake",
+            "UniNFe",
+            "unidanfe.exe"));
+        candidates.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "UniNFe",
+            "unidanfe.exe"));
+        candidates.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "UniNFe",
+            "unidanfe.exe"));
+        candidates.Add(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs",
+            "UniNFe",
+            "unidanfe.exe"));
+
+        foreach (var candidate in candidates)
+        {
+            yield return candidate;
+        }
+
+        foreach (var root in new[] { @"C:\Unimake", @"C:\UniNFe" })
+        {
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+
+            IEnumerable<string> matches;
+
+            try
+            {
+                matches = Directory.EnumerateFiles(root, "unidanfe.exe", SearchOption.AllDirectories)
+                    .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}tmp{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var match in matches)
+            {
+                yield return match;
+            }
+        }
+    }
+
     private static object PrintWithIntegratedUniDanfe(string xmlPath, FiscalConfig config, JsonObject? payload, string? selectedPrinter)
     {
         var modelo = GetString(payload, "modelo") == "55" ? "55" : "65";
@@ -3221,7 +3622,10 @@ internal static class Program
         var bobinaMm = Math.Clamp(config.Impressao.BobinaMm ?? 80, 58, 210);
         var printerName = string.IsNullOrWhiteSpace(selectedPrinter) ? "padrao" : selectedPrinter.Trim();
         var printJobName = BuildDanfePrintJobName(payload);
-        var auxiliaryPath = WriteUniDanfeAuxiliaryXml(xmlPath, configurationDir, copies: 1);
+        KillUniDanfeProcessesInDirectory(configurationDir, TimeSpan.FromMinutes(2));
+        var runtimeDir = configurationDir;
+        var printXmlPath = PrepareUniDanfePrintXml(xmlPath, runtimeDir);
+        var auxiliaryPath = WriteUniDanfeAuxiliaryXml(printXmlPath, runtimeDir, printJobName, copies: 1);
 
         Directory.CreateDirectory(configurationDir);
         Directory.CreateDirectory(pdfDir);
@@ -3230,16 +3634,17 @@ internal static class Program
         var unidanfeConfig = new UnidanfeConfiguration
         {
             AcaoDLL = Unimake.Unidanfe.Enumerations.AcoesDLL.Dfe,
-            Arquivo = xmlPath,
+            Arquivo = printXmlPath,
             ArquivoAuxiliar = auxiliaryPath,
             ArquivoErros = errorPath,
             Configuracao = string.IsNullOrWhiteSpace(configName) ? null : configName,
             Copias = 1,
+            GravaLogProcesso = true,
             Impressora = printerName,
             Imprimir = true,
             LarguraBobina = bobinaMm,
             NomeImpressao = printJobName,
-            PastaConfiguracao = configurationDir,
+            PastaConfiguracao = runtimeDir,
             PastaPDF = pdfDir,
             PreencherIdentificacaoEmitente = true,
             PublicidadeUnidanfe = false,
@@ -3248,14 +3653,22 @@ internal static class Program
             WaitProcess = true
         };
 
-        UnidanfeServices.ConfigureService(configurationDir);
-        UnidanfeServices.Execute(unidanfeConfig);
-        var duplicatePrintJobs = printMonitor.StopAndGetResult();
+        var runtime = PrepareIntegratedUniDanfeRuntime(runtimeDir);
+        DuplicatePrintJobMonitor.DuplicatePrintJobMonitorResult? duplicatePrintJobs = null;
+
+        var execution = ExecuteEmbeddedUniDanfeConsole(
+            unidanfeConfig,
+            runtimeDir,
+            modelo == "65" ? TimeSpan.FromSeconds(30) : TimeSpan.FromSeconds(45));
+        duplicatePrintJobs = printMonitor.StopAndGetResult(TimeSpan.FromMilliseconds(500));
 
         return new
         {
             configurationDir,
+            runtimeDir,
             pdfDir,
+            sourceXmlPath = xmlPath,
+            printXmlPath,
             errorPath,
             auxiliaryPath,
             printerName = unidanfeConfig.Impressora,
@@ -3263,11 +3676,420 @@ internal static class Program
             configName = unidanfeConfig.Configuracao,
             widthMm = unidanfeConfig.LarguraBobina,
             copies = unidanfeConfig.Copias,
+            execution,
             duplicatePrintJobs,
+            runtime,
             printerForcedByParameter = true,
             copiesForcedByParameter = true,
             adapter = "Unimake.Unidanfe.NET6"
         };
+    }
+
+    private static object PrepareIntegratedUniDanfeRuntime(string configurationDir)
+    {
+        CleanUniDanfeRuntimeFiles(configurationDir);
+        ExtractUniDanfeEmbeddedRuntime(configurationDir);
+        UnidanfeServices.ConfigureService(configurationDir);
+
+        return new
+        {
+            configurationDir,
+            runtimePrepared = true
+        };
+    }
+
+    private static object ExecuteEmbeddedUniDanfeConsole(UnidanfeConfiguration config, string runtimeDir, TimeSpan timeout)
+    {
+        var consolePath = Path.Combine(runtimeDir, "Unimake.Unidanfe.Console.exe");
+
+        if (!File.Exists(consolePath))
+        {
+            throw new FileNotFoundException("Console da UniDANFE embutida não encontrado.", consolePath);
+        }
+
+        var tempDir = Path.Combine(runtimeDir, "tmp", "unimake.unidanfe");
+        Directory.CreateDirectory(tempDir);
+
+        var configPath = Path.Combine(tempDir, $"CaixaAgil.Unidanfe.{Guid.NewGuid():N}.json");
+        var configJson = JsonSerializer.Serialize(config);
+        File.WriteAllText(configPath, configJson, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = consolePath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = runtimeDir
+        };
+        process.StartInfo.ArgumentList.Add(configPath);
+        process.StartInfo.ArgumentList.Add(config.AcaoDLL.ToString());
+
+        var startedAt = DateTime.Now;
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("Não foi possível iniciar o console embutido da UniDANFE.");
+        }
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+
+        if (!process.WaitForExit((int)Math.Ceiling(timeout.TotalMilliseconds)))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // O processo pode encerrar entre o timeout e a tentativa de kill.
+            }
+
+            throw new TimeoutException($"A UniDANFE embutida não respondeu em até {timeout.TotalSeconds:0} segundos.");
+        }
+
+        var stdout = stdoutTask.GetAwaiter().GetResult();
+        var stderr = stderrTask.GetAwaiter().GetResult();
+        var elapsedMs = (int)Math.Round((DateTime.Now - startedAt).TotalMilliseconds);
+
+        if (process.ExitCode != 0)
+        {
+            var output = Regex.Replace($"{stdout} {stderr}", "\\s+", " ").Trim();
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(output)
+                    ? $"A UniDANFE embutida finalizou com código {process.ExitCode}."
+                    : $"A UniDANFE embutida finalizou com código {process.ExitCode}: {output}");
+        }
+
+        return new
+        {
+            consolePath,
+            configPath,
+            exitCode = process.ExitCode,
+            elapsedMs,
+            stdout = TrimExecutionOutput(stdout),
+            stderr = TrimExecutionOutput(stderr)
+        };
+    }
+
+    private static string? TrimExecutionOutput(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = Regex.Replace(value, "\\s+", " ").Trim();
+        return normalized.Length <= 700 ? normalized : normalized[^700..];
+    }
+
+    private static void ExecuteUniDanfeWithTimeout(UnidanfeConfiguration config, string runtimeDir, TimeSpan timeout)
+    {
+        var task = Task.Run(() => UnidanfeServices.Execute(config));
+
+        try
+        {
+            if (!task.Wait(timeout))
+            {
+                KillUniDanfeProcessesInDirectory(runtimeDir, TimeSpan.Zero);
+                throw new TimeoutException($"A UniDANFE não respondeu em até {timeout.TotalSeconds:0} segundos.");
+            }
+        }
+        catch (AggregateException error)
+        {
+            throw error.GetBaseException();
+        }
+
+        if (task.IsFaulted)
+        {
+            throw task.Exception?.GetBaseException() ?? new InvalidOperationException("Falha ao executar a UniDANFE.");
+        }
+    }
+
+    private static int KillUniDanfeProcessesInDirectory(string directoryPath, TimeSpan minimumAge)
+    {
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            return 0;
+        }
+
+        var normalizedDirectory = Path.GetFullPath(directoryPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        var killed = 0;
+
+        foreach (var process in Process.GetProcessesByName("Unimake.Unidanfe.Console"))
+        {
+            try
+            {
+                var executablePath = process.MainModule?.FileName;
+
+                if (string.IsNullOrWhiteSpace(executablePath))
+                {
+                    continue;
+                }
+
+                var normalizedExecutable = Path.GetFullPath(executablePath);
+
+                if (!normalizedExecutable.StartsWith(normalizedDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (minimumAge > TimeSpan.Zero && DateTime.Now - process.StartTime < minimumAge)
+                {
+                    continue;
+                }
+
+                process.Kill(entireProcessTree: true);
+                killed++;
+            }
+            catch
+            {
+                // Processos da UniDANFE podem encerrar entre a enumeração e o kill.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        return killed;
+    }
+
+    private static string PrepareUniDanfePrintXml(string xmlPath, string runtimeDir)
+    {
+        var document = XDocument.Load(xmlPath, LoadOptions.PreserveWhitespace);
+        var removed = RemoveElementsByLocalName(document, "IBSCBS", "IBSCBSTot");
+
+        if (removed <= 0)
+        {
+            return xmlPath;
+        }
+
+        Directory.CreateDirectory(runtimeDir);
+
+        var printXmlPath = Path.Combine(
+            runtimeDir,
+            $"print-{SanitizeFileName(Path.GetFileNameWithoutExtension(xmlPath))}.xml");
+
+        document.Save(printXmlPath, SaveOptions.DisableFormatting);
+
+        return printXmlPath;
+    }
+
+    private static int RemoveElementsByLocalName(XDocument document, params string[] localNames)
+    {
+        var targets = new HashSet<string>(localNames, StringComparer.Ordinal);
+        var elements = document
+            .Descendants()
+            .Where(element => targets.Contains(element.Name.LocalName))
+            .ToList();
+
+        foreach (var element in elements)
+        {
+            element.Remove();
+        }
+
+        return elements.Count;
+    }
+
+    private static object PrintNativeNfceDanfe(DanfeNfceData danfe, string printerName, int bobinaMm, JsonObject? payload)
+    {
+        var documentName = BuildDanfePrintJobName(payload) + " native";
+        var paperWidth = Math.Max(220, (int)Math.Round(Math.Clamp(bobinaMm, 58, 80) / 25.4m * 100m));
+
+        using var document = new PrintDocument
+        {
+            DocumentName = documentName,
+            PrintController = new StandardPrintController()
+        };
+
+        document.PrinterSettings.PrinterName = printerName;
+        document.DefaultPageSettings.PaperSize = new PaperSize("NFC-e Caixa Agil", paperWidth, 1800);
+        document.DefaultPageSettings.Margins = new Margins(6, 6, 6, 6);
+
+        document.PrintPage += (_, e) =>
+        {
+            var graphics = e.Graphics ?? throw new InvalidOperationException("Contexto grafico da impressora indisponivel.");
+            graphics.SmoothingMode = SmoothingMode.HighQuality;
+            graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            var bounds = e.MarginBounds;
+            float y = bounds.Top;
+            float width = bounds.Width;
+            using var titleFont = new Font("Arial", 9.5f, FontStyle.Bold);
+            using var boldFont = new Font("Arial", 7.5f, FontStyle.Bold);
+            using var regularFont = new Font("Arial", 7.2f, FontStyle.Regular);
+            using var smallFont = new Font("Arial", 6.5f, FontStyle.Regular);
+            using var linePen = new Pen(Color.Black, 1f);
+
+            y = DrawCentered(graphics, danfe.EmitenteNome, titleFont, bounds.Left, y, width);
+            if (!string.IsNullOrWhiteSpace(danfe.EmitenteFantasia))
+            {
+                y = DrawCentered(graphics, danfe.EmitenteFantasia, regularFont, bounds.Left, y, width);
+            }
+
+            y = DrawCentered(graphics, $"CNPJ: {FormatCnpj(danfe.Cnpj)} IE: {danfe.Ie}", smallFont, bounds.Left, y, width);
+            y = DrawCentered(graphics, $"{danfe.Endereco} - {danfe.Municipio}/{danfe.Uf}", smallFont, bounds.Left, y, width);
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+            y = DrawCentered(graphics, "DANFE NFC-e - Documento Auxiliar da Nota Fiscal de Consumidor Eletronica", boldFont, bounds.Left, y + 3, width);
+            y = DrawCentered(graphics, "Nao permite aproveitamento de credito de ICMS", smallFont, bounds.Left, y, width);
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+
+            y = DrawText(graphics, "COD  DESCRICAO", boldFont, bounds.Left, y + 3, width);
+            y = DrawText(graphics, "QTD UN VL.UNIT VL.TOTAL", boldFont, bounds.Left, y, width);
+
+            foreach (var item in danfe.Items)
+            {
+                y = DrawText(graphics, $"{item.Codigo}  {item.Descricao}", regularFont, bounds.Left, y + 2, width);
+                y = DrawText(
+                    graphics,
+                    $"{FormatQuantity(item.Quantidade)} {item.Unidade} x {FormatMoney(item.ValorUnitario)} = {FormatMoney(item.Total)}",
+                    regularFont,
+                    bounds.Left,
+                    y,
+                    width);
+            }
+
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+            y = DrawKeyValue(graphics, "TOTAL R$", FormatMoney(danfe.Total), boldFont, bounds.Left, y + 3, width);
+            y = DrawKeyValue(graphics, "PAGO R$", FormatMoney(danfe.Pago), regularFont, bounds.Left, y, width);
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+
+            y = DrawCentered(graphics, $"NFC-e serie {danfe.Serie} numero {danfe.Numero}", regularFont, bounds.Left, y + 3, width);
+            y = DrawCentered(graphics, $"Emissao: {FormatFiscalDate(danfe.DhEmi)}", smallFont, bounds.Left, y, width);
+            if (!string.IsNullOrWhiteSpace(danfe.Protocolo))
+            {
+                y = DrawCentered(graphics, $"Protocolo: {danfe.Protocolo}", smallFont, bounds.Left, y, width);
+            }
+
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+            y = DrawCentered(graphics, "Chave de acesso", boldFont, bounds.Left, y + 3, width);
+            y = DrawCentered(graphics, FormatAccessKey(danfe.Chave), smallFont, bounds.Left, y, width);
+
+            if (!string.IsNullOrWhiteSpace(danfe.QrCode))
+            {
+                using var generator = new QRCodeGenerator();
+                using var qrData = generator.CreateQrCode(danfe.QrCode, QRCodeGenerator.ECCLevel.Q);
+                using var qrCode = new QRCode(qrData);
+                using var qrImage = qrCode.GetGraphic(5, Color.Black, Color.White, drawQuietZones: true);
+                var qrSize = Math.Min(160, width - 20);
+                var qrX = bounds.Left + (width - qrSize) / 2f;
+                y += 6;
+                graphics.DrawImage(qrImage, qrX, y, qrSize, qrSize);
+                y += qrSize + 4;
+                y = DrawCentered(graphics, "Consulte pela chave de acesso ou QR Code", smallFont, bounds.Left, y, width);
+            }
+
+            y = DrawSeparator(graphics, linePen, bounds.Left, y + 3, width);
+            _ = DrawCentered(graphics, "Caixa Agil PDV", smallFont, bounds.Left, y + 3, width);
+            e.HasMorePages = false;
+        };
+
+        document.Print();
+
+        return new
+        {
+            adapter = "CaixaAgil.NativeNfceDanfe",
+            printerName,
+            documentName,
+            widthMm = Math.Clamp(bobinaMm, 58, 80),
+            items = danfe.Items.Count
+        };
+    }
+
+    private static float DrawCentered(Graphics graphics, string text, Font font, float x, float y, float width)
+    {
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Near
+        };
+
+        return DrawWrapped(graphics, text, font, Brushes.Black, new RectangleF(x, y, width, 500), format) + 1;
+    }
+
+    private static float DrawText(Graphics graphics, string text, Font font, float x, float y, float width)
+    {
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Near,
+            LineAlignment = StringAlignment.Near
+        };
+
+        return DrawWrapped(graphics, text, font, Brushes.Black, new RectangleF(x, y, width, 500), format) + 1;
+    }
+
+    private static float DrawKeyValue(Graphics graphics, string label, string value, Font font, float x, float y, float width)
+    {
+        var labelSize = graphics.MeasureString(label, font, (int)(width * 0.55f));
+        var valueSize = graphics.MeasureString(value, font, (int)(width * 0.45f));
+        graphics.DrawString(label, font, Brushes.Black, new RectangleF(x, y, width * 0.55f, labelSize.Height));
+
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Far,
+            LineAlignment = StringAlignment.Near
+        };
+        graphics.DrawString(value, font, Brushes.Black, new RectangleF(x + width * 0.55f, y, width * 0.45f, valueSize.Height), format);
+
+        return y + Math.Max(labelSize.Height, valueSize.Height) + 1;
+    }
+
+    private static float DrawWrapped(Graphics graphics, string text, Font font, Brush brush, RectangleF bounds, StringFormat format)
+    {
+        var normalized = Regex.Replace(text ?? string.Empty, "\\s+", " ").Trim();
+        var size = graphics.MeasureString(normalized, font, (int)bounds.Width, format);
+        var drawBounds = new RectangleF(bounds.X, bounds.Y, bounds.Width, size.Height + 2);
+        graphics.DrawString(normalized, font, brush, drawBounds, format);
+        return bounds.Y + size.Height;
+    }
+
+    private static float DrawSeparator(Graphics graphics, Pen pen, float x, float y, float width)
+    {
+        graphics.DrawLine(pen, x, y, x + width, y);
+        return y + 4;
+    }
+
+    private static string FormatMoney(decimal value)
+    {
+        return value.ToString("N2", CultureInfo.GetCultureInfo("pt-BR"));
+    }
+
+    private static string FormatQuantity(decimal value)
+    {
+        return value.ToString("0.####", CultureInfo.GetCultureInfo("pt-BR"));
+    }
+
+    private static string FormatCnpj(string value)
+    {
+        var digits = OnlyDigits(value);
+        return digits.Length == 14
+            ? $"{digits[..2]}.{digits.Substring(2, 3)}.{digits.Substring(5, 3)}/{digits.Substring(8, 4)}-{digits.Substring(12, 2)}"
+            : value;
+    }
+
+    private static string FormatAccessKey(string value)
+    {
+        var digits = OnlyDigits(value);
+        if (digits.Length != 44)
+        {
+            return value;
+        }
+
+        return string.Join(" ", Enumerable.Range(0, 11).Select(index => digits.Substring(index * 4, 4)));
+    }
+
+    private static string FormatFiscalDate(string value)
+    {
+        return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var date)
+            ? date.ToString("dd/MM/yyyy HH:mm:ss", CultureInfo.GetCultureInfo("pt-BR"))
+            : value;
     }
 
     private static string BuildDanfePrintJobName(JsonObject? payload)
@@ -3287,12 +4109,12 @@ internal static class Program
         return monitor;
     }
 
-    private static string WriteUniDanfeAuxiliaryXml(string xmlPath, string fallbackDir, int copies)
+    private static string WriteUniDanfeAuxiliaryXml(string xmlPath, string fallbackDir, string printJobName, int copies)
     {
         var xmlDir = Path.GetDirectoryName(xmlPath);
         var targetDir = string.IsNullOrWhiteSpace(xmlDir) ? fallbackDir : xmlDir;
         var xmlFileName = Path.GetFileName(xmlPath);
-        var auxiliaryFileName = $"aux-{(string.IsNullOrWhiteSpace(xmlFileName) ? "danfe.xml" : xmlFileName)}";
+        var auxiliaryFileName = $"aux-{SanitizeFileName(printJobName)}-{(string.IsNullOrWhiteSpace(xmlFileName) ? "danfe.xml" : xmlFileName)}";
         var auxiliaryPath = Path.Combine(targetDir!, auxiliaryFileName);
 
         Directory.CreateDirectory(targetDir!);
@@ -3305,6 +4127,54 @@ internal static class Program
         document.Save(auxiliaryPath);
 
         return auxiliaryPath;
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var sanitized = Regex.Replace(value ?? string.Empty, "[<>:\"/\\\\|?*\\x00-\\x1F]+", "-");
+        sanitized = Regex.Replace(sanitized, "\\s+", "-").Trim('-');
+
+        return string.IsNullOrWhiteSpace(sanitized) ? Guid.NewGuid().ToString("N") : sanitized;
+    }
+
+    private static string ResolveUniDanfeRuntimeDir(string configurationDir)
+    {
+        var runtimeBaseDir = Path.Combine(configurationDir, "runtime");
+
+        Directory.CreateDirectory(runtimeBaseDir);
+        CleanOldUniDanfeRuntimeDirs(runtimeBaseDir);
+
+        var runtimeDir = Path.Combine(runtimeBaseDir, $"worker-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(runtimeDir);
+
+        return runtimeDir;
+    }
+
+    private static void CleanOldUniDanfeRuntimeDirs(string runtimeBaseDir)
+    {
+        try
+        {
+            var threshold = DateTime.UtcNow.AddDays(-2);
+
+            foreach (var directory in Directory.EnumerateDirectories(runtimeBaseDir))
+            {
+                try
+                {
+                    if (Directory.GetCreationTimeUtc(directory) < threshold)
+                    {
+                        Directory.Delete(directory, recursive: true);
+                    }
+                }
+                catch
+                {
+                    // Runtime antigo ainda pode estar bloqueado por um processo de impressão. A próxima execução tenta novamente.
+                }
+            }
+        }
+        catch
+        {
+            // Limpeza é oportunista; não deve bloquear a impressão.
+        }
     }
 
     private static string ResolveUniDanfeConfigurationDir(FiscalConfig config, string xmlPath)
@@ -3322,6 +4192,138 @@ internal static class Program
         }
 
         return Path.GetFullPath(baseDir);
+    }
+
+    private static void CleanUniDanfeRuntimeFiles(string configurationDir)
+    {
+        Directory.CreateDirectory(configurationDir);
+
+        var tempDir = Path.Combine(configurationDir, "tmp", "unimake.unidanfe");
+        TryDeleteDirectory(tempDir);
+    }
+
+    private static void ExtractUniDanfeEmbeddedRuntime(string configurationDir)
+    {
+        Directory.CreateDirectory(configurationDir);
+
+        const string resourcePrefix = "Unimake.Unidanfe.Unidanfe_EXE.";
+        var assembly = typeof(UnidanfeServices).Assembly;
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith(resourcePrefix, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        foreach (var resourceName in resourceNames)
+        {
+            var fileName = resourceName[resourcePrefix.Length..];
+            var destinationPath = Path.Combine(configurationDir, fileName);
+
+            using var input = assembly.GetManifestResourceStream(resourceName);
+            if (input is null)
+            {
+                continue;
+            }
+
+            ExtractRuntimeResource(input, destinationPath);
+        }
+
+        ExtractUniDanFeNativeRuntime(configurationDir);
+    }
+
+    private static void ExtractUniDanFeNativeRuntime(string configurationDir)
+    {
+        var unidanfeDllPath = Path.Combine(configurationDir, "Unimake.Unidanfe.dll");
+
+        if (!File.Exists(unidanfeDllPath))
+        {
+            return;
+        }
+
+        const string nativeResourcePrefix = "Unimake.Unidanfe.DLL_Unidanfe.dll.";
+        var assembly = Assembly.LoadFile(unidanfeDllPath);
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith(nativeResourcePrefix, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        foreach (var resourceName in resourceNames)
+        {
+            var fileName = resourceName[nativeResourcePrefix.Length..];
+            var destinationPath = Path.Combine(configurationDir, fileName);
+
+            using var input = assembly.GetManifestResourceStream(resourceName);
+            if (input is null)
+            {
+                continue;
+            }
+
+            ExtractRuntimeResource(input, destinationPath);
+        }
+    }
+
+    private static void ExtractRuntimeResource(Stream input, string destinationPath)
+    {
+        if (File.Exists(destinationPath) && new FileInfo(destinationPath).Length > 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var output = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            input.CopyTo(output);
+        }
+        catch (IOException) when (File.Exists(destinationPath) && new FileInfo(destinationPath).Length > 0)
+        {
+            // Outro processo preparou a DLL no mesmo instante. Reutilizar o runtime existente é seguro.
+        }
+    }
+
+    private static bool IsUniDanfeRuntimeFile(string fileName)
+    {
+        if (fileName.StartsWith("Unimake.Unidanfe.Console", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "Unimake.Unidanfe.dll", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(fileName, "Newtonsoft.Json.dll", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("unidanfe_", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("uninfe_", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("QRGenerator", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("pxc", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("LSP", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("ssleay32", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("libeay32", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("msvcr", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("midas", StringComparison.OrdinalIgnoreCase) ||
+            fileName.StartsWith("borlndmm", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void TryDeleteFile(string filePath)
+    {
+        try
+        {
+            File.Delete(filePath);
+        }
+        catch
+        {
+            // If a runtime file is locked by a concurrent UniDANFE process, the next run will retry.
+        }
+    }
+
+    private static void TryDeleteDirectory(string directoryPath)
+    {
+        try
+        {
+            if (Directory.Exists(directoryPath))
+            {
+                Directory.Delete(directoryPath, recursive: true);
+            }
+        }
+        catch
+        {
+            // If the temp directory is locked by a concurrent UniDANFE process, the next run will retry.
+        }
     }
 
     private sealed class DuplicatePrintJobMonitor : IDisposable
@@ -3351,14 +4353,28 @@ internal static class Program
             monitorTask = Task.Run(() => Monitor(cancellation.Token));
         }
 
-        public object StopAndGetResult()
+        public DuplicatePrintJobMonitorResult StopAndGetResult(TimeSpan? waitForFirstJob = null)
         {
             if (cancellation is null || monitorTask is null)
             {
                 return BuildResult("not_started");
             }
 
-            Thread.Sleep(1500);
+            var deadline = DateTime.UtcNow.Add(waitForFirstJob ?? TimeSpan.FromSeconds(8));
+
+            while (DateTime.UtcNow < deadline)
+            {
+                lock (syncRoot)
+                {
+                    if (observedJobs.Count > 0)
+                    {
+                        break;
+                    }
+                }
+
+                Thread.Sleep(120);
+            }
+
             cancellation.Cancel();
 
             try
@@ -3373,7 +4389,7 @@ internal static class Program
                 }
             }
 
-            return BuildResult("completed");
+            return BuildResult(observedJobs.Count > 0 ? "completed" : "timeout");
         }
 
         public void Dispose()
@@ -3476,28 +4492,39 @@ internal static class Program
             }
         }
 
-        private object BuildResult(string status)
+        private DuplicatePrintJobMonitorResult BuildResult(string status)
         {
             lock (syncRoot)
             {
-                return new
-                {
+                return new DuplicatePrintJobMonitorResult(
                     status,
                     printJobName,
-                    requestedPrinter = printerName,
+                    printerName,
+                    observedJobs.Count,
                     maxJobsToKeep,
-                    observedCount = observedJobs.Count,
-                    keptCount = keptJobs.Count,
-                    canceledCount = canceledJobs.Count,
-                    observedJobs = observedJobs.ToArray(),
-                    keptJobs = keptJobs.ToArray(),
-                    canceledJobs = canceledJobs.ToArray(),
-                    errors = errors.Distinct().Take(5).ToArray()
-                };
+                    keptJobs.Count,
+                    canceledJobs.Count,
+                    observedJobs.ToArray(),
+                    keptJobs.ToArray(),
+                    canceledJobs.ToArray(),
+                    errors.Distinct().Take(5).ToArray());
             }
         }
 
-        private sealed record PrintJobInfo(
+        public sealed record DuplicatePrintJobMonitorResult(
+            string status,
+            string printJobName,
+            string requestedPrinter,
+            int observedCount,
+            int maxJobsToKeep,
+            int keptCount,
+            int canceledCount,
+            PrintJobInfo[] observedJobs,
+            PrintJobInfo[] keptJobs,
+            PrintJobInfo[] canceledJobs,
+            string[] errors);
+
+        public sealed record PrintJobInfo(
             string QueueName,
             int JobId,
             string DocumentName,
@@ -3514,7 +4541,7 @@ internal static class Program
 
         if (string.IsNullOrWhiteSpace(message))
         {
-            return "Não foi possível imprimir o DANFE pela UniDANFE integrada.";
+            return "Não foi possível imprimir o DANFE pela UniDANFE.";
         }
 
         if (message.Length > 220)
@@ -3522,7 +4549,17 @@ internal static class Program
             message = message[..220].TrimEnd('.', ' ', ';', ':') + ".";
         }
 
-        return $"Falha na UniDANFE integrada: {message}";
+        return $"Falha na UniDANFE: {message}";
+    }
+
+    private static string BuildDanfePrintSuccessMessage(string modelo, string adapter)
+    {
+        return adapter switch
+        {
+            "CaixaAgil.NativeNfceDanfe" => $"DANFE {GetFiscalModelLabel(modelo)} enviado pela impressao nativa do Caixa Agil.",
+            "UniNFe.UniDANFE.External" => $"DANFE {GetFiscalModelLabel(modelo)} enviado pela UniDANFE.",
+            _ => $"DANFE {GetFiscalModelLabel(modelo)} enviado pela UniDANFE integrada."
+        };
     }
 
     private static DanfeNfceData ReadNfceDanfe(string xmlPath)
@@ -4114,7 +5151,18 @@ internal static class Program
                     UltimoNumero: GetInt(nfe, "ultimoNumero") ?? GetInt(nfe, "ultimo_numero") ?? GetInt(nfe, "proximoNumero") ?? GetInt(nfe, "proximo_numero")),
                 Impressao: BuildPrintConfig(impressao, printing),
                 Danfe: new DanfeConfig(
-                    ConfigName: GetString(danfe, "configName") ?? GetString(danfe, "configuracao")),
+                    ConfigName: GetString(danfe, "configName") ?? GetString(danfe, "configuracao"),
+                    ExecutablePath: GetString(danfe, "danfeExePath") ??
+                        GetString(danfe, "danfe_exe_path") ??
+                        GetString(danfe, "unidanfeExePath") ??
+                        GetString(danfe, "unidanfe_exe_path") ??
+                        GetString(danfe, "executavelDanfe"),
+                    PreferExternal: GetOptionalBool(danfe, "preferExternal") ??
+                        GetOptionalBool(danfe, "preferirExterno") ??
+                        false,
+                    UseNativeFallback: GetOptionalBool(danfe, "useNativeFallback") ??
+                        GetOptionalBool(danfe, "usarFallbackNativo") ??
+                        false),
                 Diretorios: new DirectoryConfig(
                     Xml: GetString(diretorios, "xml") ?? GetString(diretorios, "xmlDir"),
                     Logs: GetString(diretorios, "logs") ?? GetString(diretorios, "logsDir"),
@@ -4145,7 +5193,7 @@ internal static class Program
 
     private sealed record PrintConfig(string? PrinterName, bool UseDefaultPrinter, int? BobinaMm);
 
-    private sealed record DanfeConfig(string? ConfigName);
+    private sealed record DanfeConfig(string? ConfigName, string? ExecutablePath, bool PreferExternal, bool UseNativeFallback);
 
     private sealed record DirectoryConfig(string? Xml, string? Logs, string? Pdf);
 

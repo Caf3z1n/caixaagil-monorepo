@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <PackageReference Include="Unimake.DFe" Version="20260615.1001.15" />
-    <PackageReference Include="Unimake.Unidanfe.NET6" Version="20260520.1723.3" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="Unimake.Unidanfe.NET6" Version="20260615.1704.43" />
   </ItemGroup>
 </Project>

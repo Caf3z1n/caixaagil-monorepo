@@ -91,6 +91,11 @@ import {
 } from "@/lib/pdv-app-scale";
 import { CashierModal } from "./cashier-modal";
 import { PdvScaleSurface } from "./pdv-scale-surface";
+import {
+  buildPromissoryNoteReceiptPayload,
+  type AgreementSaleAdditionalData,
+  type PromissoryFiscalDocument
+} from "./promissory-note";
 
 type ConnectivityState = "online" | "offline";
 type CashierView = "menu" | "sale" | "commands" | "command-editor" | "agreement" | "expenses" | "history";
@@ -134,6 +139,7 @@ type ApiCatalogCategory = {
 };
 
 const PRODUCT_PICKER_BATCH_SIZE = 20;
+const PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS = 2200;
 
 type ApiCatalogProduct = {
   id: number;
@@ -217,6 +223,8 @@ type ApiAgreementReceipt = {
   cliente_convenio_id?: number | null;
   cliente_nome?: string | null;
   cliente_tipo_pessoa?: "fisica" | "juridica" | string | null;
+  nome_consumidor?: string | null;
+  observacao?: string | null;
   itens_count?: number;
   itens?: unknown[];
   total_centavos?: number;
@@ -243,8 +251,13 @@ type SyncFiscalResponse = {
   sincronizado_em: string;
   processados: number;
   erros: number;
+  erro_fiscal?: {
+    code?: string | null;
+    message?: string | null;
+  } | null;
   documentos: Array<{
     id: string;
+    code?: string | null;
     api_nf_id?: string | null;
     status: "processado" | "atualizado" | "duplicado" | "erro" | string;
     message?: string;
@@ -285,13 +298,15 @@ type SaleRecord = {
   clienteConvenioTipoPessoa?: "fisica" | "juridica" | null;
   clienteConvenioDadosFiscais?: Record<string, unknown> | null;
   clientName?: string | null;
+  consumerName?: string | null;
+  consumerObservation?: string | null;
   status?: "completed" | "canceled";
   canceledAt?: string | null;
 };
 
 type FiscalModel = "55" | "65";
 type FiscalEmissionModalTone = "pending" | "queued" | "success" | "error";
-type FiscalPrintMode = "initial" | "reprint";
+type FiscalPrintMode = "initial" | "promissory" | "reprint";
 
 type FiscalEmissionModalState = {
   tone: FiscalEmissionModalTone;
@@ -325,6 +340,8 @@ type AgreementReceiptRecord = {
   clientId: number | null;
   clientName: string;
   clientPersonType: "fisica" | "juridica";
+  consumerName?: string | null;
+  consumerObservation?: string | null;
   itemsCount: number;
   items: CartItem[];
   totalCents: number;
@@ -937,28 +954,11 @@ function getShiftSummaryCompanyName(fiscalSettings: Record<string, unknown> | nu
 
 function getShiftSummaryCompanyLines(fiscalSettings: Record<string, unknown> | null, pdvIdentity: string) {
   const emitente = asRecord(fiscalSettings?.emitente);
-  const endereco = asRecord(emitente?.endereco);
   const document = formatCompanyDocument(emitente?.cnpj_cpf ?? emitente?.cnpjCpf ?? emitente?.cnpj);
-  const stateRegistration = compactReceiptText(emitente?.inscricao_estadual ?? emitente?.inscricaoEstadual);
-  const documentLine = [
-    document ? `CNPJ ${document}` : null,
-    stateRegistration ? `IE ${stateRegistration}` : null
-  ].filter(Boolean).join(" | ");
-  const addressLine = [
-    compactReceiptText(endereco?.logradouro),
-    compactReceiptText(endereco?.numero),
-    compactReceiptText(endereco?.bairro)
-  ].filter(Boolean).join(", ");
-  const cityLine = [
-    compactReceiptText(endereco?.municipio),
-    compactReceiptText(endereco?.uf)
-  ].filter(Boolean).join(" - ");
 
   return [
-    documentLine,
-    addressLine,
-    cityLine,
-    compactReceiptText(pdvIdentity) ? `PDV ${compactReceiptText(pdvIdentity)}` : ""
+    document ? `CNPJ ${document}` : "",
+    compactReceiptText(pdvIdentity)
   ].filter((line) => line.trim().length > 0);
 }
 
@@ -1271,12 +1271,10 @@ function normalizeProductNcm(value: unknown) {
   return String(value ?? "").replace(/\D/g, "").slice(0, 8);
 }
 
-function getControlledStockLimit(product: Pick<Product, "stockQuantity">) {
-  if (product.stockQuantity === null) {
-    return null;
-  }
-
-  return Math.max(0, Math.floor(product.stockQuantity));
+function getControlledStockLimit(product: Pick<Product, "stockQuantity">): number | null {
+  // O estoque no PDV é informativo: venda/comanda deve continuar mesmo que o saldo fique negativo.
+  void product;
+  return null;
 }
 
 function clampCartQuantity(quantity: number, product: Pick<Product, "stockQuantity">) {
@@ -1287,7 +1285,7 @@ function clampCartQuantity(quantity: number, product: Pick<Product, "stockQuanti
 }
 
 function getStockLimitMessage(product: Pick<Product, "name" | "stockQuantity">) {
-  return `Estoque disponível para ${product.name}: ${formatStockQuantity(getControlledStockLimit(product))}.`;
+  return `Estoque disponível para ${product.name}: ${formatStockQuantity(product.stockQuantity)}.`;
 }
 
 function mapCatalogCategory(category: ApiCatalogCategory): ProductCategory {
@@ -1521,6 +1519,8 @@ function mapAgreementReceipt(receipt: ApiAgreementReceipt): AgreementReceiptReco
     clientId: receipt.cliente_convenio_id ?? null,
     clientName: receipt.cliente_nome || "Cliente",
     clientPersonType: receipt.cliente_tipo_pessoa === "juridica" ? "juridica" : "fisica",
+    consumerName: receipt.nome_consumidor ?? null,
+    consumerObservation: receipt.observacao ?? null,
     itemsCount,
     items,
     totalCents: normalizeNumber(receipt.total_centavos),
@@ -1654,6 +1654,12 @@ function getCartQuantity(items: CartItem[]) {
   return items.reduce((total, item) => total + item.quantity, 0);
 }
 
+function waitForPdvDelay(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function buildAgreementReceiptFromSale(sale: SaleRecord, client: AgreementClient): AgreementReceiptRecord {
   return {
     id: sale.id,
@@ -1662,6 +1668,8 @@ function buildAgreementReceiptFromSale(sale: SaleRecord, client: AgreementClient
     clientId: client.id,
     clientName: client.name,
     clientPersonType: client.personType,
+    consumerName: sale.consumerName ?? null,
+    consumerObservation: sale.consumerObservation ?? null,
     itemsCount: getCartQuantity(sale.items),
     items: sale.items,
     totalCents: sale.totalCents,
@@ -1783,7 +1791,8 @@ function buildPdvFiscalPrintConfig(settings: PdvFiscalPrintSettings) {
       largura_bobina_mm: settings.bobinaMm
     },
     danfe: {
-      useNativeFallback: false
+      useNativeFallback: false,
+      preferExternal: false
     }
   };
 }
@@ -1898,6 +1907,187 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+
+  if (record) {
+    return record;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function getFirstKnownValue(
+  sources: Array<Record<string, unknown> | null | undefined>,
+  keys: string[]
+) {
+  for (const source of sources) {
+    if (!source) {
+      continue;
+    }
+
+    for (const key of keys) {
+      if (source[key] !== undefined && source[key] !== null) {
+        return source[key];
+      }
+    }
+  }
+
+  return null;
+}
+
+function getFirstKnownText(
+  sources: Array<Record<string, unknown> | null | undefined>,
+  keys: string[]
+) {
+  const value = getFirstKnownValue(sources, keys);
+  const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+
+  return text || null;
+}
+
+function getFirstKnownNumber(
+  sources: Array<Record<string, unknown> | null | undefined>,
+  keys: string[]
+) {
+  const value = getFirstKnownValue(sources, keys);
+
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizePaymentMethodFromDocument(value: unknown): PaymentMethod | null {
+  return value === "dinheiro" || value === "pix" || value === "cartao" || value === "convenio"
+    ? value
+    : null;
+}
+
+function normalizeAgreementPersonType(value: unknown): "fisica" | "juridica" | null {
+  const text = String(value ?? "").trim().toLowerCase();
+
+  if (text === "juridica" || text === "pj") {
+    return "juridica";
+  }
+
+  if (text === "fisica" || text === "pf") {
+    return "fisica";
+  }
+
+  return null;
+}
+
+function getFiscalDocumentSaleSnapshot(document: FiscalDocumentRecord) {
+  const rawResult = asJsonRecord(document.raw_result);
+  const payload = asJsonRecord(rawResult?.payload);
+  const sale = asJsonRecord(payload?.sale);
+
+  if (!payload && !sale) {
+    return null;
+  }
+
+  return {
+    payload,
+    sale: sale ?? payload
+  };
+}
+
+function mapFiscalDocumentSaleItem(item: unknown, fallbackIndex: number): CartItem {
+  const mappedItem = mapReceiptItem(item, fallbackIndex);
+  const data = asRecord(item);
+  const totalPriceCents = normalizeNumber(data?.totalPriceCents ?? data?.total_price_cents);
+  const quantity = mappedItem.quantity || normalizeNumber(data?.quantity ?? data?.quantidade ?? 1) || 1;
+  const priceCents = mappedItem.priceCents || (totalPriceCents > 0 ? Math.round(totalPriceCents / quantity) : 0);
+
+  return {
+    ...mappedItem,
+    quantity,
+    priceCents
+  };
+}
+
+function mergeSaleWithFiscalDocumentSnapshot(sale: SaleRecord, document: FiscalDocumentRecord): SaleRecord {
+  const snapshot = getFiscalDocumentSaleSnapshot(document);
+
+  if (!snapshot) {
+    return sale;
+  }
+
+  const sources = [snapshot.sale, snapshot.payload];
+  const documentPaymentMethod = normalizePaymentMethodFromDocument(
+    getFirstKnownValue(sources, ["paymentMethod", "metodo_pagamento", "metodoPagamento"])
+  );
+  const rawItems = Array.isArray(snapshot.sale?.items)
+    ? snapshot.sale.items
+    : Array.isArray(snapshot.sale?.itens)
+      ? snapshot.sale.itens
+      : Array.isArray(snapshot.payload?.itens)
+        ? snapshot.payload.itens
+        : [];
+  const documentItems = rawItems.map(mapFiscalDocumentSaleItem);
+  const fiscalData = asJsonRecord(
+    getFirstKnownValue(sources, [
+      "clienteConvenioDadosFiscais",
+      "cliente_convenio_dados_fiscais",
+      "dados_fiscais",
+      "fiscalData",
+      "destinatario"
+    ])
+  );
+  const clientName = getFirstKnownText(sources, [
+    "clientName",
+    "clienteConvenioNome",
+    "cliente_convenio_nome",
+    "cliente_nome",
+    "nome_cliente"
+  ]);
+  const consumerName = getFirstKnownText(sources, ["consumerName", "nome_consumidor"]);
+  const consumerObservation = getFirstKnownText(sources, ["consumerObservation", "observacao"]);
+  const totalCents = getFirstKnownNumber(sources, ["totalCents", "total_centavos"]);
+  const createdAt = getFirstKnownText(sources, ["createdAt", "created_at", "issuedAt", "emittedAt"]);
+
+  return {
+    ...sale,
+    paymentMethod: documentPaymentMethod ?? sale.paymentMethod,
+    totalCents: sale.totalCents || totalCents || (documentItems.length > 0 ? getCartTotal(documentItems) : sale.totalCents),
+    createdAt: sale.createdAt || createdAt || new Date().toISOString(),
+    items: sale.items.length > 0 ? sale.items : documentItems,
+    clienteConvenioId: getFirstKnownNumber(sources, ["clienteConvenioId", "cliente_convenio_id"]) ?? sale.clienteConvenioId ?? null,
+    clienteConvenioTipoPessoa: normalizeAgreementPersonType(
+      getFirstKnownValue(sources, ["clienteConvenioTipoPessoa", "cliente_convenio_tipo_pessoa", "clientPersonType", "tipo_pessoa"])
+    ) ?? sale.clienteConvenioTipoPessoa ?? null,
+    clienteConvenioDadosFiscais: fiscalData ?? sale.clienteConvenioDadosFiscais ?? null,
+    clientName: sale.clientName || clientName,
+    consumerName: sale.consumerName || consumerName,
+    consumerObservation: sale.consumerObservation || consumerObservation,
+    originCommandTitle: sale.originCommandTitle || getFirstKnownText(sources, ["originCommandTitle", "origemComandaNome"])
+  };
+}
+
+function isFiscalDocumentAgreementSale(document: FiscalDocumentRecord) {
+  const snapshot = getFiscalDocumentSaleSnapshot(document);
+
+  if (!snapshot) {
+    return false;
+  }
+
+  return normalizePaymentMethodFromDocument(
+    getFirstKnownValue([snapshot.sale, snapshot.payload], ["paymentMethod", "metodo_pagamento", "metodoPagamento"])
+  ) === "convenio";
+}
+
 function getActiveRemoteFiscalEnvironment(fiscal: Record<string, unknown>) {
   const ambiente = fiscal.ambiente === "producao" ? "producao" : "homologacao";
   const ambientes = asRecord(fiscal.ambientes);
@@ -1923,6 +2113,24 @@ function isFiscalEmissionActiveConfig(config?: Record<string, unknown> | null) {
   }
 
   return fiscal.ativo === true;
+}
+
+function deactivateLocalFiscalConfig(config?: Record<string, unknown> | null) {
+  const fiscal = asRecord(config) ?? {};
+  const { ambiente, activeEnvironment } = getActiveRemoteFiscalEnvironment(fiscal);
+  const ambientes = asRecord(fiscal.ambientes) ?? {};
+
+  return {
+    ...fiscal,
+    ativo: false,
+    ambientes: {
+      ...ambientes,
+      [ambiente]: {
+        ...activeEnvironment,
+        ativo: false
+      }
+    }
+  };
 }
 
 function buildLocalFiscalConfigFromRemote(
@@ -2302,6 +2510,7 @@ export function DesktopCashierFlow({
   const [isFiscalPrinting, setIsFiscalPrinting] = useState(false);
   const [fiscalPrintMode, setFiscalPrintMode] = useState<FiscalPrintMode | null>(null);
   const fiscalPrintingLockRef = useRef(false);
+  const automaticPromissoryPrintsRef = useRef(new Set<string>());
   const [shiftSummaryPrintModal, setShiftSummaryPrintModal] = useState<ShiftSummaryPrintModalState | null>(null);
   const [isShiftSummaryPrinting, setIsShiftSummaryPrinting] = useState(false);
   const shiftSummaryPrintingLockRef = useRef(false);
@@ -2879,6 +3088,21 @@ export function DesktopCashierFlow({
         documentos: readyDocuments
       });
       onConnectivityChange("online");
+
+      if (response.erro_fiscal?.code === "PLAN_FEATURE_REQUIRED" || response.erro_fiscal?.code === "SUBSCRIPTION_BLOCKED") {
+        const savedConfig = await store.getFiscalConfig?.({ scope: localStoreScope });
+
+        if (store.saveFiscalConfig) {
+          await store.saveFiscalConfig({
+            scope: localStoreScope,
+            config: deactivateLocalFiscalConfig(asRecord(savedConfig))
+          });
+        }
+
+        setIsFiscalEmissionEnabled(false);
+        setAccountFiscalSettings((currentSettings) => deactivateLocalFiscalConfig(currentSettings));
+      }
+
       const syncedDocuments = response.documentos
         .filter((document) => ["processado", "atualizado", "duplicado"].includes(document.status))
         .map((document) => ({
@@ -4033,6 +4257,7 @@ export function DesktopCashierFlow({
     const config = await getActiveLocalFiscalConfig();
 
     if (!config) {
+      void printAutomaticPromissoryNoteForSale(sale);
       return;
     }
 
@@ -4051,6 +4276,7 @@ export function DesktopCashierFlow({
         fiscalModel: getSaleStoredFiscalModel(sale)
       });
       onSystemMessage(message);
+      void printAutomaticPromissoryNoteForSale(sale, { fiscalSettings: config });
       return;
     }
 
@@ -4272,7 +4498,9 @@ export function DesktopCashierFlow({
     }
 
     const fiscalConfig = config ?? asRecord(await store.getFiscalConfig({ scope: localStoreScope })) ?? {};
-    const fiscalModel: FiscalModel = payload?.modelo === "55" ? "55" : getSaleStoredFiscalModel(sale);
+    const requestedModel = payload?.modelo === "55" || payload?.modelo === "65" ? payload.modelo : null;
+    const fiscalModel: FiscalModel = requestedModel ?? getSaleStoredFiscalModel(sale);
+
     const printPayload = {
       vendaId: sale.id,
       xmlPath,
@@ -4310,10 +4538,21 @@ export function DesktopCashierFlow({
     const xmlPath = getFiscalResponseXmlPath(response);
 
     if (!xmlPath || fiscalPrintingLockRef.current) {
+      await printAutomaticPromissoryNoteForSale(sale, {
+        fiscalSettings: config,
+        showMessage: false
+      });
       return;
     }
 
     const documentId = typeof data.documentId === "string" ? data.documentId : null;
+    const fiscalDocument: PromissoryFiscalDocument = {
+      modelo: String(data.modelo || getSaleStoredFiscalModel(sale)),
+      serie: data.serie as string | number | null | undefined,
+      numero: data.numero as string | number | null | undefined,
+      chave: typeof data.chave === "string" ? data.chave : null
+    };
+    const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(sale);
 
     fiscalPrintingLockRef.current = true;
     setFiscalPrintMode("initial");
@@ -4336,20 +4575,49 @@ export function DesktopCashierFlow({
           contingencia: data.contingencia === true
         }
       });
+      const danfeDetail = printResponse?.success
+        ? "DANFE enviada para impressão."
+        : printResponse?.friendlyMessage || "Documento fiscal emitido, mas a impressão automática da DANFE não foi concluída.";
 
-      if (!printResponse?.success) {
-        setFiscalEmissionModal(current => current?.sale.id === sale.id
-          ? {
-              ...current,
-              detail: printResponse?.friendlyMessage || "Documento fiscal emitido, mas a impressão automática não foi concluída."
-            }
-          : current);
+      setFiscalEmissionModal(current => current?.sale.id === sale.id
+        ? {
+            ...current,
+            detail: shouldPrintPromissory && printResponse?.success
+              ? `${danfeDetail} Imprimindo promissória.`
+              : shouldPrintPromissory
+                ? `${danfeDetail} Promissória não enviada porque a impressão fiscal não foi confirmada.`
+                : danfeDetail
+          }
+        : current);
+
+      if (!shouldPrintPromissory || !printResponse?.success) {
+        return;
       }
+
+      setFiscalPrintMode("promissory");
+      const promissoryPrinted = await printAutomaticPromissoryNoteForSale(sale, {
+        documentKey: fiscalDocument.chave || documentId || sale.id,
+        fiscalDocument,
+        fiscalSettings: config,
+        delayBeforePrintMs: printResponse?.success ? PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS : 0,
+        showMessage: false
+      });
+
+      setFiscalEmissionModal(current => current?.sale.id === sale.id
+        ? {
+            ...current,
+            detail: promissoryPrinted
+              ? `${danfeDetail} Promissória enviada para impressão.`
+              : `${danfeDetail} Não foi possível imprimir a promissória.`
+          }
+        : current);
     } catch (error) {
       setFiscalEmissionModal(current => current?.sale.id === sale.id
         ? {
             ...current,
-            detail: "Documento fiscal emitido, mas a impressão automática não foi concluída."
+            detail: shouldPrintPromissory
+              ? "Documento fiscal emitido, mas a impressão automática da DANFE não foi confirmada. Promissória não enviada para não bagunçar a fila."
+              : "Documento fiscal emitido, mas a impressão automática da DANFE não foi concluída."
           }
         : current);
     } finally {
@@ -4430,9 +4698,13 @@ export function DesktopCashierFlow({
 
       showFiscalEmissionResult(sale, emissionResponse);
       void printFiscalDocumentAfterEmission(sale, emissionResponse, config);
+      if (!getFiscalResponseXmlPath(emissionResponse)) {
+        void printAutomaticPromissoryNoteForSale(sale, { fiscalSettings: config });
+      }
       setFiscalDocumentsRefreshToken((current) => current + 1);
       void syncPendingOutboundQueues({ showMessage: false });
     } catch (error) {
+      void printAutomaticPromissoryNoteForSale(sale);
       setFiscalEmissionModal({
         tone: "error",
         title: "Falha na emissão fiscal",
@@ -4547,12 +4819,28 @@ export function DesktopCashierFlow({
           modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale)
         }
       });
+      const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(state.sale);
+      const promissoryPrinted = response?.success && shouldPrintPromissory
+        ? await printPromissoryNoteForSale(state.sale, {
+            documentKey: state.fiscalKey || state.documentId || state.sale.id,
+            fiscalDocument: {
+              modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale),
+              serie: null,
+              numero: state.fiscalNumber ?? null,
+              chave: state.fiscalKey ?? null
+            },
+            delayBeforePrintMs: PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS,
+            showMessage: false
+          })
+        : false;
 
       setFiscalEmissionModal(current => current
         ? {
             ...current,
             detail: response?.success
-              ? "DANFE reenviado para impressão."
+              ? shouldPrintPromissory && promissoryPrinted
+                ? "DANFE e promissória reenviados para impressão."
+                : "DANFE reenviado para impressão."
               : response?.friendlyMessage || current.detail || "Não foi possível reimprimir o DANFE."
           }
         : current);
@@ -4573,6 +4861,7 @@ export function DesktopCashierFlow({
   async function reprintFiscalDocumentFromDetails(sale: SaleRecord, document: FiscalDocumentRecord) {
     const store = getLocalPdvStore();
     const xmlPath = getFiscalDocumentXmlPath(document);
+    const saleForPrint = mergeSaleWithFiscalDocumentSnapshot(sale, document);
 
     if (!isFiscalEmissionEnabled) {
       onSystemMessage("Emissão fiscal desativada neste PDV.");
@@ -4589,15 +4878,16 @@ export function DesktopCashierFlow({
     try {
       const fiscalConfig = await store.getFiscalConfig({ scope: localStoreScope });
       const config = asRecord(fiscalConfig) ?? {};
+      const fiscalModel: FiscalModel = document.modelo === "55" ? "55" : "65";
       const response = await store.callFiscalWorker({
         scope: localStoreScope,
         command: "reimprimir-danfe",
         documentId: document.id,
         config,
         payload: {
-          vendaId: sale.id,
+          vendaId: saleForPrint.id,
           xmlPath,
-          modelo: document.modelo || "65",
+          modelo: fiscalModel,
           serie: document.serie,
           numero: document.numero,
           chave: document.chave,
@@ -4605,15 +4895,74 @@ export function DesktopCashierFlow({
         }
       });
 
+      const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(saleForPrint);
+      const promissoryPrinted = shouldPrintPromissory && response.success
+        ? await printPromissoryNoteForSale(saleForPrint, {
+            documentKey: document.chave || document.id || saleForPrint.id,
+              fiscalDocument: {
+                modelo: document.modelo,
+                serie: document.serie,
+                numero: document.numero,
+                chave: document.chave
+              },
+              delayBeforePrintMs: response.success ? PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS : 0,
+              showMessage: false
+            })
+        : false;
+
       if (response.success) {
-        onSystemMessage("DANFE enviado para reimpressão.");
+        onSystemMessage(
+          promissoryPrinted
+            ? "DANFE e promissória enviados para reimpressão."
+            : shouldPrintPromissory
+              ? "DANFE enviado para reimpressão, mas não foi possível imprimir a promissória."
+              : "DANFE enviado para reimpressão."
+        );
       } else {
-        onSystemMessage(response.friendlyMessage || "Não foi possível reimprimir o DANFE.");
+        onSystemMessage(
+          promissoryPrinted
+            ? "Promissória enviada para reimpressão, mas não foi possível reimprimir o DANFE."
+            : shouldPrintPromissory
+              ? response.friendlyMessage || "Não foi possível reimprimir o DANFE. A promissória não foi enviada para não bagunçar a fila."
+              : response.friendlyMessage || "Não foi possível reimprimir o DANFE."
+        );
       }
 
       setFiscalDocumentsRefreshToken((current) => current + 1);
     } catch (error) {
       onSystemMessage(error instanceof Error ? error.message : "Não foi possível reimprimir o DANFE.");
+    } finally {
+      setReprintingFiscalDocumentId(null);
+    }
+  }
+
+  async function reprintPromissoryNoteFromDetails(sale: SaleRecord, document: FiscalDocumentRecord) {
+    const saleForPrint = mergeSaleWithFiscalDocumentSnapshot(sale, document);
+
+    if (!shouldPrintPromissoryNoteForSale(saleForPrint)) {
+      onSystemMessage("Promissória disponível apenas para venda em convênio.");
+      return;
+    }
+
+    setReprintingFiscalDocumentId(document.id);
+
+    try {
+      const printed = await printPromissoryNoteForSale(saleForPrint, {
+        documentKey: document.chave || document.id || saleForPrint.id,
+        fiscalDocument: {
+          modelo: document.modelo,
+          serie: document.serie,
+          numero: document.numero,
+          chave: document.chave
+        },
+        showMessage: false
+      });
+
+      onSystemMessage(
+        printed
+          ? "Promissória enviada para reimpressão."
+          : "Não foi possível imprimir a promissória."
+      );
     } finally {
       setReprintingFiscalDocumentId(null);
     }
@@ -4718,7 +5067,11 @@ export function DesktopCashierFlow({
     onSystemMessage("");
   }
 
-  function confirmPayment(method: PaymentMethod, agreementClient: AgreementClient | null = null) {
+  function confirmPayment(
+    method: PaymentMethod,
+    agreementClient: AgreementClient | null = null,
+    agreementAdditionalData: AgreementSaleAdditionalData = {}
+  ) {
     const sourceCommand = commandPaymentRequest;
     const sourceItems = sourceCommand?.items ?? cartItems;
     const sourceTotalCents = getCartTotal(sourceItems);
@@ -4726,6 +5079,12 @@ export function DesktopCashierFlow({
       agreementClient?.active === true &&
       activeAgreementClients.some((client) => client.id === agreementClient.id)
       ? agreementClient
+      : null;
+    const consumerName = method === "convenio"
+      ? compactReceiptText(agreementAdditionalData.consumerName).slice(0, 120) || null
+      : null;
+    const consumerObservation = method === "convenio"
+      ? compactReceiptText(agreementAdditionalData.consumerObservation).slice(0, 1000) || null
       : null;
 
     if (!session || sourceItems.length === 0) {
@@ -4776,7 +5135,9 @@ export function DesktopCashierFlow({
       clienteConvenioId: convenioClient?.id ?? null,
       clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
       clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null,
-      clientName: convenioClient?.name ?? null
+      clientName: convenioClient?.name ?? null,
+      consumerName,
+      consumerObservation
     };
 
     setSales((currentSales) => [nextSale, ...currentSales]);
@@ -4819,7 +5180,9 @@ export function DesktopCashierFlow({
       clienteConvenioId: convenioClient?.id ?? null,
       clienteConvenioNome: convenioClient?.name ?? null,
       clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
-      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null
+      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null,
+      consumerName,
+      consumerObservation
     });
     void openFiscalDispatchForSale(nextSale, session);
   }
@@ -5133,6 +5496,110 @@ export function DesktopCashierFlow({
     }
   }
 
+  function shouldPrintPromissoryNoteForSale(sale: SaleRecord) {
+    return sale.paymentMethod === "convenio" && !isSaleCanceled(sale);
+  }
+
+  async function printPromissoryNoteForSale(
+    sale: SaleRecord,
+    options: {
+      documentKey?: string | null;
+      fiscalDocument?: PromissoryFiscalDocument | null;
+      fiscalSettings?: Record<string, unknown> | null;
+      delayBeforePrintMs?: number;
+      showMessage?: boolean;
+    } = {}
+  ) {
+    if (!shouldPrintPromissoryNoteForSale(sale)) {
+      return false;
+    }
+
+    const store = getLocalPdvStore();
+
+    const printPromissoryReceipt = store?.printPromissoryNote ?? store?.printShiftSummary;
+
+    if (!printPromissoryReceipt) {
+      if (options.showMessage !== false) {
+        onSystemMessage("Impressão da promissória disponível apenas no app desktop.");
+      }
+
+      return false;
+    }
+
+    const agreementClient = sale.clienteConvenioId
+      ? activeAgreementClients.find((client) => client.id === sale.clienteConvenioId) ?? null
+      : null;
+    const promissoryClient = agreementClient ?? (sale.clientName
+      ? {
+          name: sale.clientName,
+          personType: sale.clienteConvenioTipoPessoa ?? "fisica",
+          fiscalData: sale.clienteConvenioDadosFiscais ?? null
+        }
+      : null);
+    const printerName = await getShiftSummaryPrinterName();
+    const payload = buildPromissoryNoteReceiptPayload({
+      fiscalSettings: options.fiscalSettings ?? accountFiscalSettings,
+      pdvIdentity,
+      printerName,
+      sale,
+      agreementClient: promissoryClient,
+      fiscalDocument: options.fiscalDocument
+    });
+    const delayBeforePrintMs = Math.max(0, Math.min(Number(options.delayBeforePrintMs || 0), 10000));
+
+    try {
+      if (delayBeforePrintMs > 0) {
+        await waitForPdvDelay(delayBeforePrintMs);
+      }
+
+      await printPromissoryReceipt({
+        documentKey: options.documentKey || sale.id,
+        payload
+      });
+
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível imprimir a promissória da venda em convênio.", error);
+
+      if (options.showMessage !== false) {
+        onSystemMessage("Venda em convênio concluída, mas não foi possível imprimir a promissória.");
+      }
+
+      return false;
+    }
+  }
+
+  async function printAutomaticPromissoryNoteForSale(
+    sale: SaleRecord,
+    options: {
+      documentKey?: string | null;
+      fiscalDocument?: PromissoryFiscalDocument | null;
+      fiscalSettings?: Record<string, unknown> | null;
+      delayBeforePrintMs?: number;
+      showMessage?: boolean;
+    } = {}
+  ) {
+    if (!shouldPrintPromissoryNoteForSale(sale)) {
+      return false;
+    }
+
+    const printKey = sale.id;
+
+    if (automaticPromissoryPrintsRef.current.has(printKey)) {
+      return true;
+    }
+
+    automaticPromissoryPrintsRef.current.add(printKey);
+
+    const printed = await printPromissoryNoteForSale(sale, options);
+
+    if (!printed) {
+      automaticPromissoryPrintsRef.current.delete(printKey);
+    }
+
+    return printed;
+  }
+
   async function runShiftSummaryPrint(
     state: ShiftSummaryPrintModalState,
     options: { reprint?: boolean } = {}
@@ -5314,6 +5781,18 @@ export function DesktopCashierFlow({
     let shouldIgnore = false;
     const store = getLocalPdvStore();
 
+    if (initialSettings?.fiscal) {
+      void synchronizeRemoteFiscalConfig(asRecord(initialSettings.fiscal)).catch(() => {
+        if (!shouldIgnore) {
+          setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(asRecord(initialSettings.fiscal)));
+        }
+      });
+
+      return () => {
+        shouldIgnore = true;
+      };
+    }
+
     if (!store?.getFiscalConfig) {
       setIsFiscalEmissionEnabled(false);
       return;
@@ -5335,7 +5814,7 @@ export function DesktopCashierFlow({
     return () => {
       shouldIgnore = true;
     };
-  }, [initialSettings, localStoreScope]);
+  }, [initialSettings, localStoreScope, synchronizeRemoteFiscalConfig]);
 
   useEffect(() => {
     if (!isLocalStateReady || connectivity !== "online") {
@@ -6860,7 +7339,7 @@ export function DesktopCashierFlow({
               setIsPaymentOpen(true);
             }}
             onClose={closePaymentFlow}
-            onConfirm={(client) => confirmPayment("convenio", client)}
+            onConfirm={(client, additionalData) => confirmPayment("convenio", client, additionalData)}
           />
         ) : null}
         {agreementReceiptDetailsClient && !isCashPaymentOpen ? (
@@ -6952,6 +7431,7 @@ export function DesktopCashierFlow({
             onCancelRequest={requestCancelSale}
             onClose={() => setSelectedSale(null)}
             onReprintFiscal={reprintFiscalDocumentFromDetails}
+            onReprintPromissory={reprintPromissoryNoteFromDetails}
             onRetryFiscal={(sale) => {
               if (!session) {
                 onSystemMessage("Abra o caixa antes de tentar emitir o documento fiscal.");
@@ -8479,10 +8959,12 @@ function AgreementPaymentModal({
   totalCents: number;
   onBack: () => void;
   onClose: () => void;
-  onConfirm: (client: AgreementClient) => void;
+  onConfirm: (client: AgreementClient, additionalData: AgreementSaleAdditionalData) => void;
 }) {
   const [query, setQuery] = useState("");
   const [selectedClient, setSelectedClient] = useState<AgreementClient | null>(null);
+  const [consumerName, setConsumerName] = useState("");
+  const [consumerObservation, setConsumerObservation] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const filteredClients = useMemo(() => {
     const normalizedQuery = normalizeSearch(query);
@@ -8504,6 +8986,17 @@ function AgreementPaymentModal({
     setActiveClientId(filteredClients[0]?.id ?? null);
   }, [filteredClients]);
 
+  function confirmSelectedClient() {
+    if (!selectedClient) {
+      return;
+    }
+
+    onConfirm(selectedClient, {
+      consumerName,
+      consumerObservation
+    });
+  }
+
   return (
     <CashierModal
       title={selectedClient ? "Confirmar convênio" : "Receber em convênio"}
@@ -8516,7 +9009,7 @@ function AgreementPaymentModal({
               <ArrowLeft aria-hidden="true" size={17} />
               Trocar cliente
             </button>
-            <button className="pdv-confirm-action" type="button" onClick={() => onConfirm(selectedClient)}>
+            <button className="pdv-confirm-action" type="button" onClick={confirmSelectedClient}>
               <Check aria-hidden="true" size={17} />
               Finalizar venda
             </button>
@@ -8545,6 +9038,25 @@ function AgreementPaymentModal({
             <div className="pdv-agreement-summary-total">
               <span>Total da venda</span>
               <strong>{formatCurrency(totalCents)}</strong>
+            </div>
+            <div className="pdv-agreement-promissory-fields" aria-label="Dados adicionais da promissória">
+              <label>
+                <span>Nome</span>
+                <input
+                  value={consumerName}
+                  onChange={(event) => setConsumerName(event.target.value)}
+                  placeholder="Nome do consumidor"
+                />
+              </label>
+              <label className="pdv-agreement-promissory-note">
+                <span>Observações</span>
+                <textarea
+                  value={consumerObservation}
+                  onChange={(event) => setConsumerObservation(event.target.value)}
+                  placeholder="Ex.: placa ABC1D23, modelo do veículo, cor, telefone, ponto de referência ou outra identificação"
+                  rows={3}
+                />
+              </label>
             </div>
           </section>
         ) : (
@@ -9096,6 +9608,13 @@ function FiscalEmissionModal({
   const fiscalNumberLabel = typeof state.fiscalNumber === "number" && Number.isFinite(state.fiscalNumber)
     ? `${fiscalLabel} nº ${state.fiscalNumber}`
     : "Aguardando número";
+  const printButtonLabel = isPrinting
+    ? printMode === "reprint"
+      ? "Reimprimindo"
+      : printMode === "promissory"
+        ? "Imprimindo promissória"
+        : `Imprimindo ${fiscalLabel}`
+    : `Reimprimir ${fiscalLabel}`;
 
   return (
     <CashierModal
@@ -9109,11 +9628,7 @@ function FiscalEmissionModal({
           canPrint ? (
             <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
               {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
-              {isPrinting
-                ? printMode === "reprint"
-                  ? "Reimprimindo"
-                  : "Imprimindo"
-                : "Reimprimir DANFE"}
+              {printButtonLabel}
             </button>
           ) : (
             <button className="pdv-secondary-action pdv-fiscal-close-action" type="button" onClick={onClose}>
@@ -9545,6 +10060,7 @@ function SaleFiscalDetailsModal({
   reprintingFiscalDocumentId,
   onClose,
   onReprintFiscal,
+  onReprintPromissory,
   onRetryFiscal
 }: {
   sale: SaleRecord;
@@ -9553,6 +10069,7 @@ function SaleFiscalDetailsModal({
   reprintingFiscalDocumentId: string | null;
   onClose: () => void;
   onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
+  onReprintPromissory: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
   onRetryFiscal: (sale: SaleRecord) => void;
 }) {
   const summary = getSaleFiscalSummary(fiscalDocuments, isFiscalLoading, sale);
@@ -9605,6 +10122,9 @@ function SaleFiscalDetailsModal({
                 const numberLabel = getFiscalDocumentNumberLabel(document, { includeSerie: true });
                 const message = getFiscalDocumentMessage(document);
                 const syncStatusLabel = getFiscalDocumentSyncStatusLabel(document.sync_status);
+                const reprintLabel = document.modelo === "55" ? "Reimprimir NF-e" : "Reimprimir NFC-e";
+                const canPrintPromissory = isFiscalDocumentAgreementSale(document);
+                const isReprintingThisDocument = reprintingFiscalDocumentId === document.id;
 
                 return (
                   <article className="pdv-fiscal-history-item" key={document.id}>
@@ -9624,21 +10144,38 @@ function SaleFiscalDetailsModal({
                     {status.tone !== "success" || document.sync_error ? (
                       <p>{document.sync_error || message}</p>
                     ) : null}
-                    {canReprintFiscalDocument(document) ? (
+                    {canReprintFiscalDocument(document) || canPrintPromissory ? (
                       <div className="pdv-fiscal-history-actions">
-                        <button
-                          className="pdv-secondary-action pdv-fiscal-reprint-action"
-                          disabled={reprintingFiscalDocumentId === document.id}
-                          type="button"
-                          onClick={() => onReprintFiscal(sale, document)}
-                        >
-                          {reprintingFiscalDocumentId === document.id ? (
-                            <LoaderCircle aria-hidden="true" className="pdv-spin" size={16} />
-                          ) : (
-                            <Printer aria-hidden="true" size={16} />
-                          )}
-                          {reprintingFiscalDocumentId === document.id ? "Reimprimindo" : "Reimprimir DANFE"}
-                        </button>
+                        {canReprintFiscalDocument(document) ? (
+                          <button
+                            className="pdv-secondary-action pdv-fiscal-reprint-action"
+                            disabled={isReprintingThisDocument}
+                            type="button"
+                            onClick={() => onReprintFiscal(sale, document)}
+                          >
+                            {isReprintingThisDocument ? (
+                              <LoaderCircle aria-hidden="true" className="pdv-spin" size={16} />
+                            ) : (
+                              <Printer aria-hidden="true" size={16} />
+                            )}
+                            {isReprintingThisDocument ? "Reimprimindo" : reprintLabel}
+                          </button>
+                        ) : null}
+                        {canPrintPromissory ? (
+                          <button
+                            className="pdv-secondary-action pdv-fiscal-reprint-action"
+                            disabled={isReprintingThisDocument}
+                            type="button"
+                            onClick={() => onReprintPromissory(sale, document)}
+                          >
+                            {isReprintingThisDocument ? (
+                              <LoaderCircle aria-hidden="true" className="pdv-spin" size={16} />
+                            ) : (
+                              <Printer aria-hidden="true" size={16} />
+                            )}
+                            {isReprintingThisDocument ? "Reimprimindo" : "Reimprimir promissória"}
+                          </button>
+                        ) : null}
                       </div>
                     ) : null}
                   </article>
@@ -9667,6 +10204,7 @@ function SaleDetailsModal({
   onClose,
   onCancelRequest,
   onReprintFiscal,
+  onReprintPromissory,
   onRetryFiscal
 }: {
   sale: SaleRecord;
@@ -9678,6 +10216,7 @@ function SaleDetailsModal({
   onClose: () => void;
   onCancelRequest: (sale: SaleRecord) => void;
   onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
+  onReprintPromissory: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
   onRetryFiscal: (sale: SaleRecord) => void;
 }) {
   const [isFiscalDetailsOpen, setIsFiscalDetailsOpen] = useState(false);
@@ -9809,6 +10348,7 @@ function SaleDetailsModal({
           sale={sale}
           onClose={() => setIsFiscalDetailsOpen(false)}
           onReprintFiscal={onReprintFiscal}
+          onReprintPromissory={onReprintPromissory}
           onRetryFiscal={onRetryFiscal}
         />
       ) : null}

@@ -1,6 +1,7 @@
 const { Pdv, Subconta } = require('../models');
 const { getBillingStatus } = require('./assinaturaInadimplenciaService');
 const { findSubscriptionForPlatformAccess } = require('./assinaturaAccessService');
+const { applyDueScheduledChanges } = require('./alteracoesAssinaturaService');
 const { buildPlanoSnapshot, getPlano } = require('./planosService');
 
 const FEATURE_MESSAGES = {
@@ -65,6 +66,8 @@ function createEntitlementError(code, message, entitlements, statusCode = 403) {
 }
 
 async function getActiveSubscription(usuarioId) {
+  await applyDueScheduledChanges({ usuarioId });
+
   return findSubscriptionForPlatformAccess(usuarioId);
 }
 
@@ -188,6 +191,54 @@ async function ensureFeature(usuarioId, codigo) {
   return entitlements;
 }
 
+async function getFeatureAccess(usuarioId, codigo) {
+  try {
+    const entitlements = await getEntitlements(usuarioId);
+
+    if (entitlements?.billing_status?.bloqueado) {
+      return {
+        allowed: false,
+        code: 'SUBSCRIPTION_BLOCKED',
+        message: entitlements.billing_status.mensagem || 'Conta bloqueada por pendencia de assinatura.',
+        entitlements,
+        statusCode: 402,
+      };
+    }
+
+    if (!entitlements?.recursos?.[codigo]) {
+      return {
+        allowed: false,
+        code: 'PLAN_FEATURE_REQUIRED',
+        message: FEATURE_MESSAGES[codigo] || 'Seu plano atual nao permite este recurso.',
+        entitlements,
+        statusCode: 403,
+      };
+    }
+
+    return {
+      allowed: true,
+      code: null,
+      message: null,
+      entitlements,
+      statusCode: 200,
+    };
+  } catch (error) {
+    return {
+      allowed: false,
+      code: error.code || 'SUBSCRIPTION_REQUIRED',
+      message: error.message || 'Assinatura ativa obrigatoria.',
+      entitlements: error.entitlements || null,
+      statusCode: error.statusCode || error.status || 403,
+    };
+  }
+}
+
+async function isFeatureEnabled(usuarioId, codigo) {
+  const access = await getFeatureAccess(usuarioId, codigo);
+
+  return access.allowed;
+}
+
 async function ensureLimitAvailable(usuarioId, codigo, options = {}) {
   const entitlements = await getEntitlements(usuarioId);
   const incremento = Number.isInteger(options.incremento) && options.incremento > 0 ? options.incremento : 1;
@@ -211,5 +262,7 @@ async function ensureLimitAvailable(usuarioId, codigo, options = {}) {
 module.exports = {
   ensureFeature,
   ensureLimitAvailable,
+  getFeatureAccess,
   getEntitlements,
+  isFeatureEnabled,
 };

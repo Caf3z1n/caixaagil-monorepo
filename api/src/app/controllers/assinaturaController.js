@@ -31,6 +31,7 @@ const {
   findSubscriptionForPlatformAccess,
   hasSubscriptionActivationEvidence,
 } = require('../services/assinaturaAccessService');
+const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 const { getPublicAppUrl } = require('../services/urlService');
 
 const MIN_MERCADO_PAGO_CHARGE_CENTAVOS = 100;
@@ -43,6 +44,14 @@ function normalizeEmail(email) {
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+function planoSnapshotHasFeature(snapshot, codigo) {
+  const recurso = Array.isArray(snapshot?.recursos)
+    ? snapshot.recursos.find(item => item?.codigo === codigo)
+    : null;
+
+  return Boolean(recurso && recurso.habilitado !== false && recurso.included !== false);
 }
 
 function normalizeCheckoutToken(value) {
@@ -563,6 +572,10 @@ async function finalizeActivatedSubscription(assinatura) {
     await normalizeRecurringAmountIfNeeded(assinatura);
   } catch {
     // A normalização será tentada novamente pelo webhook ou próxima consulta.
+  }
+
+  if (!planoSnapshotHasFeature(assinatura.plano_snapshot, 'emissao_fiscal')) {
+    await configuracaoSistemaService.deactivateFiscalEmission(assinatura.usuario_id);
   }
 
   if (!assinatura.assinatura_anterior_id) {

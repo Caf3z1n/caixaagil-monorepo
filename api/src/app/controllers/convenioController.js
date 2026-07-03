@@ -255,6 +255,8 @@ function sanitizeRecebimento(venda) {
     convenio_id: data.convenio_id || null,
     cliente_nome: cliente?.nome || getConvenioClienteNome(data),
     cliente,
+    nome_consumidor: data.nome_consumidor || null,
+    observacao: data.observacao || null,
     itens_count: Number(data.quantidade_itens || 0),
     total_centavos: sanitizeCents(data.total_centavos),
     status_convenio: status,

@@ -132,6 +132,8 @@ export type PrintShiftSummaryResult = {
   printedAt: string;
 };
 
+export type PrintPromissoryNoteResult = PrintShiftSummaryResult;
+
 export type LocalPdvStoreBridge = {
   loadState<TState>(payload: { scope: string }): Promise<TState | null>;
   saveState(payload: { scope: string; state: unknown }): Promise<{ ok: true; updatedAt: string }>;
@@ -194,6 +196,10 @@ export type LocalPdvStoreBridge = {
     documentKey?: string;
     payload: NonFiscalReceiptPayload;
   }): Promise<PrintShiftSummaryResult>;
+  printPromissoryNote?(payload: {
+    documentKey?: string;
+    payload: NonFiscalReceiptPayload;
+  }): Promise<PrintPromissoryNoteResult>;
   getUpdateStatus?(): Promise<PdvUpdateStatus>;
   checkForUpdates?(): Promise<PdvUpdateStatus>;
   downloadUpdate?(): Promise<PdvUpdateStatus>;

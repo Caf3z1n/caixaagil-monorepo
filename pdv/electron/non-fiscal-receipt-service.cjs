@@ -7,10 +7,76 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 
+let fallbackPrintQueue = Promise.resolve();
+
 function normalizeOptionalText(value) {
   const normalizedValue = typeof value === "string" ? value.trim() : "";
 
   return normalizedValue || null;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function repairMojibakeText(value) {
+  return String(value)
+    .replace(/Â /g, " ")
+    .replace(/Ã¡/g, "á")
+    .replace(/Ã /g, "à")
+    .replace(/Ã¢/g, "â")
+    .replace(/Ã£/g, "ã")
+    .replace(/Ã¤/g, "ä")
+    .replace(/Ã©/g, "é")
+    .replace(/Ãª/g, "ê")
+    .replace(/Ã­/g, "í")
+    .replace(/Ã³/g, "ó")
+    .replace(/Ã´/g, "ô")
+    .replace(/Ãµ/g, "õ")
+    .replace(/Ãº/g, "ú")
+    .replace(/Ã¼/g, "ü")
+    .replace(/Ã§/g, "ç")
+    .replace(/Ã/g, "Á")
+    .replace(/Ã/g, "À")
+    .replace(/Ã/g, "Â")
+    .replace(/Ã/g, "Ã")
+    .replace(/Ã/g, "É")
+    .replace(/Ã/g, "Ê")
+    .replace(/Ã/g, "Í")
+    .replace(/Ã/g, "Ó")
+    .replace(/Ã/g, "Ô")
+    .replace(/Ã/g, "Õ")
+    .replace(/Ã/g, "Ú")
+    .replace(/Ã/g, "Ç");
+}
+
+function normalizePrinterText(value) {
+  return repairMojibakeText(value)
+    .replace(/\u00a0/g, " ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+}
+
+function normalizePrinterPayload(value) {
+  if (typeof value === "string") {
+    return normalizePrinterText(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(normalizePrinterPayload);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, normalizePrinterPayload(entryValue)])
+    );
+  }
+
+  return value;
 }
 
 function sanitizePathSegment(value) {
@@ -164,7 +230,7 @@ function parsePowerShellOutput(stdout) {
 
 function normalizeReceiptPayload(payload) {
   if (!payload || typeof payload !== "object") {
-    throw new Error("Informe os dados do resumo do turno para impressão.");
+    throw new Error("Informe os dados do comprovante para impressão.");
   }
 
   return {
@@ -179,12 +245,17 @@ function normalizeReceiptPayload(payload) {
 }
 
 async function printNonFiscalReceipt(app, input) {
-  const payload = normalizeReceiptPayload(input?.payload);
+  const receiptPayload = normalizeReceiptPayload(input?.payload);
+  const payload = {
+    ...normalizePrinterPayload(receiptPayload),
+    printerName: receiptPayload.printerName,
+    preferredPrinterPatterns: receiptPayload.preferredPrinterPatterns
+  };
   const savedPayload = await persistPrintPayload(app, {
     documentKey: input?.documentKey,
     payload
   });
-  const printerName = normalizeOptionalText(payload.printerName) || normalizeOptionalText(process.env.NON_FISCAL_PRINTER_NAME);
+  const printerName = normalizeOptionalText(receiptPayload.printerName) || normalizeOptionalText(process.env.NON_FISCAL_PRINTER_NAME);
   const args = [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -203,13 +274,13 @@ async function printNonFiscalReceipt(app, input) {
     const { stdout } = await execFileAsync(getPowerShellExecutable(), args, {
       windowsHide: true,
       maxBuffer: 1024 * 1024,
-      timeout: 60_000
+      timeout: 120_000
     });
     const parsedOutput = parsePowerShellOutput(stdout);
 
     return {
       printer: normalizeOptionalText(parsedOutput?.printer) || printerName || "Impressora não fiscal",
-      message: normalizeOptionalText(parsedOutput?.message) || "Comprovante enviado para impressao.",
+      message: normalizeOptionalText(parsedOutput?.message) || "Comprovante enviado para impressão.",
       payloadPath: savedPayload.payloadPath
     };
   } catch (error) {
@@ -217,25 +288,46 @@ async function printNonFiscalReceipt(app, input) {
   }
 }
 
-function createNonFiscalReceiptService(app) {
-  async function printShiftSummary(input) {
-    const printedAt = new Date().toISOString();
-    const result = await printNonFiscalReceipt(app, input);
+function createNonFiscalReceiptService(app, printJobQueue = null) {
+  async function printReceipt(input) {
+    const run = async () => {
+      const printedAt = new Date().toISOString();
+      const result = await printNonFiscalReceipt(app, input);
 
-    return {
-      ...result,
-      printedAt
+      await delay(500);
+
+      return {
+        ...result,
+        printedAt
+      };
     };
+    const printerName = normalizeOptionalText(input?.payload?.printerName) || normalizeOptionalText(process.env.NON_FISCAL_PRINTER_NAME);
+
+    if (printJobQueue?.enqueuePrintJob) {
+      return printJobQueue.enqueuePrintJob({
+        printerName,
+        beforeTimeoutMs: 30_000,
+        afterTimeoutMs: 0,
+        afterSettleMs: 700
+      }, run);
+    }
+
+    const queuedPrint = fallbackPrintQueue.then(run, run);
+    fallbackPrintQueue = queuedPrint.catch(() => {});
+
+    return queuedPrint;
   }
 
   function registerIpc(ipcMain) {
-    ipcMain.handle("pdv-print:shift-summary", (_event, payload) => printShiftSummary(payload));
-    ipcMain.handle("pdv-printshift-summary", (_event, payload) => printShiftSummary(payload));
+    ipcMain.handle("pdv-print:shift-summary", (_event, payload) => printReceipt(payload));
+    ipcMain.handle("pdv-printshift-summary", (_event, payload) => printReceipt(payload));
+    ipcMain.handle("pdv-print:promissory-note", (_event, payload) => printReceipt(payload));
   }
 
   return {
     registerIpc,
-    printShiftSummary
+    printShiftSummary: printReceipt,
+    printPromissoryNote: printReceipt
   };
 }
 

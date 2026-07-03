@@ -480,6 +480,27 @@ function normalizeFiscalSettings(value = {}, previousValue = {}) {
   };
 }
 
+function deactivateFiscalSettings(value = {}) {
+  const fiscal = normalizeFiscalSettings(value);
+  const ambientes = fiscalEnvironmentKeys.reduce((acc, key) => {
+    acc[key] = {
+      ...fiscal.ambientes[key],
+      ativo: false,
+    };
+    return acc;
+  }, {});
+  const activeEnvironment = ambientes[fiscal.ambiente] || cloneDefaultFiscalEnvironmentSettings();
+
+  return {
+    ...fiscal,
+    ambientes,
+    ativo: false,
+    certificado: activeEnvironment.certificado,
+    nfce: activeEnvironment.nfce,
+    nfe: activeEnvironment.nfe,
+  };
+}
+
 function normalizeIntegrationSettings(value = {}, previousValue = {}) {
   const previousIntegrations =
     isObject(previousValue) && Object.keys(previousValue).length > 0
@@ -716,6 +737,7 @@ function fiscalCertificateMetadataMissing(settings = {}) {
 
 function sanitizeConfiguracao(configuracao, options = {}) {
   const data = configuracao?.get ? configuracao.get({ plain: true }) : configuracao || {};
+  const fiscal = options.disableFiscalEmission ? deactivateFiscalSettings(data.fiscal) : data.fiscal;
 
   return {
     id: data.id ?? null,
@@ -725,7 +747,7 @@ function sanitizeConfiguracao(configuracao, options = {}) {
     controle_funcionarios: normalizeEmployeeControlSettings(data.controle_funcionarios),
     comandas: normalizeCommandSettings(data.comandas),
     resumo_turno: normalizeShiftSummarySettings(data.resumo_turno),
-    fiscal: sanitizeFiscalSettings(data.fiscal, options.fiscal),
+    fiscal: sanitizeFiscalSettings(fiscal, options.fiscal),
     integracoes: sanitizeIntegrationSettings(data.integracoes),
     updated_at: data.updated_at ?? data.updatedAt ?? null,
   };
@@ -840,7 +862,7 @@ async function getOrCreateConfiguracao(usuarioId, options = {}) {
 }
 
 async function getConfiguracaoSnapshot(usuarioId, options = {}) {
-  const { sanitize, ...queryOptions } = options;
+  const { disableFiscalEmission, sanitize, ...queryOptions } = options;
   const configuracao = await getOrCreateConfiguracao(usuarioId, queryOptions);
 
   if (fiscalCertificateMetadataMissing(configuracao.fiscal)) {
@@ -851,7 +873,22 @@ async function getConfiguracaoSnapshot(usuarioId, options = {}) {
     await configuracao.save();
   }
 
-  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao, sanitize);
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao, {
+    ...sanitize,
+    disableFiscalEmission: disableFiscalEmission === true,
+  });
+}
+
+async function deactivateFiscalEmission(usuarioId, options = {}) {
+  const transaction = options.transaction || null;
+  const configuracao = await getOrCreateConfiguracao(usuarioId, { transaction });
+
+  configuracao.fiscal = deactivateFiscalSettings(configuracao.fiscal);
+  await configuracao.save({ transaction });
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao, {
+    disableFiscalEmission: true,
+  });
 }
 
 async function updatePaymentMethods(usuarioId, paymentMethods) {
@@ -969,6 +1006,8 @@ module.exports = {
   defaultIntegrationSettings,
   defaultPaymentMethods,
   defaultShiftSummarySettings,
+  deactivateFiscalEmission,
+  deactivateFiscalSettings,
   decryptSecret,
   getCnpjaApiKey,
   getCnpjaToken,

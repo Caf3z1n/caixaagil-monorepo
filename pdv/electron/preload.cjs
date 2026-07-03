@@ -89,6 +89,9 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   printShiftSummary(payload) {
     return ipcRenderer.invoke("pdv-print:shift-summary", payload);
   },
+  printPromissoryNote(payload) {
+    return ipcRenderer.invoke("pdv-print:promissory-note", payload);
+  },
   getUpdateStatus() {
     return ipcRenderer.invoke("pdv-update:get-status");
   },

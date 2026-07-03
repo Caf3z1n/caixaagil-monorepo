@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const sequelize = require('../../database');
 const { AlteracaoAssinatura, Assinatura } = require('../models');
+const configuracaoSistemaService = require('./configuracaoSistemaService');
 const { buildPlanoSnapshot } = require('./planosService');
 
 const STATUS_AGENDADA = 'agendada';
@@ -22,6 +23,14 @@ function getRecurringValue(assinatura) {
 
 function normalizeMetadata(metadata) {
   return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
+}
+
+function snapshotHasFeature(snapshot, codigo) {
+  const recurso = Array.isArray(snapshot?.recursos)
+    ? snapshot.recursos.find(item => item?.codigo === codigo)
+    : null;
+
+  return Boolean(recurso && recurso.habilitado !== false && recurso.included !== false);
 }
 
 async function findScheduledChange(usuarioId, assinaturaId = null, options = {}) {
@@ -135,6 +144,10 @@ async function applyScheduledChange(alteracao, options = {}) {
   assinatura.valor_normalizado_em = now;
   assinatura.tipo_movimento = 'mudar_plano_downgrade_aplicado';
   await assinatura.save({ transaction });
+
+  if (!snapshotHasFeature(assinatura.plano_snapshot, 'emissao_fiscal')) {
+    await configuracaoSistemaService.deactivateFiscalEmission(assinatura.usuario_id, { transaction });
+  }
 
   alteracao.status = STATUS_APLICADA;
   alteracao.aplicada_em = now;

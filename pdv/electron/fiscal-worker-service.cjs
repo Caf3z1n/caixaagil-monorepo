@@ -203,6 +203,55 @@ function normalizeWorkerResponse(command, rawOutput, rawErrorOutput) {
   }
 }
 
+function tryReadWorkerResponse(command, rawOutput, rawErrorOutput) {
+  const trimmed = String(rawOutput || "").trim();
+  const jsonLine = trimmed
+    .split(/\r?\n/)
+    .reverse()
+    .find(line => line.trim().startsWith("{") && line.trim().endsWith("}"));
+
+  if (!jsonLine) {
+    return null;
+  }
+
+  try {
+    JSON.parse(jsonLine);
+  } catch {
+    return null;
+  }
+
+  return normalizeWorkerResponse(command, rawOutput, rawErrorOutput);
+}
+
+function killProcessTree(child) {
+  if (!child?.pid) {
+    return;
+  }
+
+  try {
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      killer.unref?.();
+      return;
+    }
+  } catch {
+    // Fallback below.
+  }
+
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    try {
+      child.kill();
+    } catch {
+      // Processo já finalizado.
+    }
+  }
+}
+
 function runWorker(app, input) {
   const worker = resolveWorkerCommand(app);
 
@@ -227,37 +276,58 @@ function runWorker(app, input) {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      child.kill();
-      resolve({
-        success: false,
-        command: input.command,
-        status: "worker_timeout",
-        friendlyMessage: "O worker fiscal demorou demais para responder.",
-        technicalMessage: stderr || stdout || "Timeout aguardando processo fiscal.",
-        data: null
-      });
-    }, Number(process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 120000));
-
-    child.stdout.on("data", chunk => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", chunk => {
-      stderr += chunk.toString("utf8");
-    });
-    child.once("error", error => {
+    const settle = (response, options = {}) => {
       if (settled) {
         return;
       }
 
       clearTimeout(timeout);
       settled = true;
-      resolve({
+
+      if (!response.technicalMessage && stderr) {
+        response.technicalMessage = stderr.trim();
+      }
+
+      if (Object.prototype.hasOwnProperty.call(options, "exitCode")) {
+        response.exitCode = options.exitCode;
+      }
+
+      if (options.killTree) {
+        killProcessTree(child);
+      }
+
+      resolve(response);
+    };
+    const timeoutMs = Number(
+      isFiscalPrintCommand(input.command)
+        ? process.env.CAIXA_AGIL_FISCAL_PRINT_TIMEOUT_MS || process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 60000
+        : process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 120000
+    );
+    const timeout = setTimeout(() => {
+      settle({
+        success: false,
+        command: input.command,
+        status: "worker_timeout",
+        friendlyMessage: "O worker fiscal demorou demais para responder.",
+        technicalMessage: stderr || stdout || "Timeout aguardando processo fiscal.",
+        data: null
+      }, { killTree: true });
+    }, Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120000);
+
+    child.stdout.on("data", chunk => {
+      stdout += chunk.toString("utf8");
+
+      const response = tryReadWorkerResponse(input.command, stdout, stderr);
+
+      if (response) {
+        settle(response, { killTree: isFiscalPrintCommand(input.command) && response.success === false });
+      }
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk.toString("utf8");
+    });
+    child.once("error", error => {
+      settle({
         success: false,
         command: input.command,
         status: "worker_spawn_error",
@@ -269,20 +339,8 @@ function runWorker(app, input) {
       });
     });
     child.once("close", code => {
-      if (settled) {
-        return;
-      }
-
-      clearTimeout(timeout);
-      settled = true;
       const response = normalizeWorkerResponse(input.command, stdout, stderr);
-
-      if (!response.technicalMessage && stderr) {
-        response.technicalMessage = stderr.trim();
-      }
-
-      response.exitCode = code;
-      resolve(response);
+      settle(response, { exitCode: code });
     });
 
     child.stdin.end(JSON.stringify(input), "utf8");
@@ -332,10 +390,73 @@ function isFiscalEmissionCommand(command) {
     command === "emitir-nfe-contingencia";
 }
 
+function isFiscalPrintCommand(command) {
+  return command === "imprimir-danfe" || command === "reimprimir-danfe";
+}
+
+function isFiscalSerializedCommand(command) {
+  return isFiscalEmissionCommand(command) || isFiscalPrintCommand(command);
+}
+
+function normalizePrinterName(value) {
+  const normalizedValue = typeof value === "string" ? value.trim() : "";
+
+  return normalizedValue || null;
+}
+
+function getNestedObject(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function getFiscalPrintPrinterName(config) {
+  const printing = getNestedObject(config?.printing);
+  const impressao = getNestedObject(config?.impressao);
+  const candidates = [
+    printing.printerName,
+    printing.impressora,
+    printing.nomeImpressora,
+    impressao.printerName,
+    impressao.impressora,
+    impressao.nomeImpressora,
+    impressao.nome_impressora
+  ];
+
+  for (const candidate of candidates) {
+    const printerName = normalizePrinterName(candidate);
+
+    if (printerName) {
+      return printerName;
+    }
+  }
+
+  return null;
+}
+
+function createPrintQueueFailureResponse(command, error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+
+  return {
+    success: false,
+    command,
+    status: "fila_impressao_bloqueada",
+    friendlyMessage: message || "A fila de impressão está bloqueada.",
+    technicalMessage: message || null,
+    data: null
+  };
+}
+
 function getFiscalModelKey(command, payload, response) {
   const model = String(response?.data?.modelo || payload?.modelo || "");
 
   return model === "55" || command === "emitir-nfe" || command === "emitir-nfe-contingencia" ? "nfe" : "nfce";
+}
+
+function getFiscalWorkerLockKey(scope, command, payload) {
+  if (isFiscalPrintCommand(command)) {
+    return `${scope}:danfe-print`;
+  }
+
+  return `${scope}:emissao:${getFiscalModelKey(command, payload)}`;
 }
 
 function getFiscalEnvironment(config) {
@@ -570,15 +691,16 @@ async function advanceFiscalNumber(localStore, scope, config, command, payload, 
   });
 }
 
-function createFiscalWorkerService(app, localStore) {
+function createFiscalWorkerService(app, localStore, printJobQueue = null) {
   const emissionLocks = new Map();
+  let warmupPromise = null;
 
   async function withEmissionLock(scope, command, payload, task) {
-    if (!isFiscalEmissionCommand(command)) {
+    if (!isFiscalSerializedCommand(command)) {
       return task();
     }
 
-    const lockKey = `${scope}:${getFiscalModelKey(command, payload?.payload || payload)}`;
+    const lockKey = getFiscalWorkerLockKey(scope, command, payload?.payload || payload);
     const previous = emissionLocks.get(lockKey) || Promise.resolve();
     const current = previous.catch(() => null).then(task);
 
@@ -748,9 +870,29 @@ function createFiscalWorkerService(app, localStore) {
   async function executeFiscalWorkerRequest(scope, command, savedConfig, config, request, documentId, originalPayload) {
     let effectiveConfig = config;
     let effectivePayload = request.payload;
-    let response = command === "registrar-pendente"
-      ? createQueuedFiscalResponse(command, effectivePayload, documentId)
-      : await runWorker(app, request);
+    async function runRequest() {
+      return command === "registrar-pendente"
+        ? createQueuedFiscalResponse(command, effectivePayload, documentId)
+        : runWorker(app, request);
+    }
+
+    let response = null;
+
+    if (isFiscalPrintCommand(command) && printJobQueue?.enqueuePrintJob) {
+      try {
+        response = await printJobQueue.enqueuePrintJob({
+          printerName: getFiscalPrintPrinterName(effectiveConfig),
+          beforeTimeoutMs: 30_000,
+          afterTimeoutMs: 90_000,
+          afterSettleMs: 1500,
+          shouldWaitAfterResult: (result) => Boolean(result?.success)
+        }, runRequest);
+      } catch (error) {
+        response = createPrintQueueFailureResponse(command, error);
+      }
+    } else {
+      response = await runRequest();
+    }
     const duplicateAttempts = [];
 
     while (isFiscalEmissionCommand(command) && isDuplicateFiscalNumberResponse(response) && duplicateAttempts.length < 3) {
@@ -921,12 +1063,35 @@ function createFiscalWorkerService(app, localStore) {
     ipcMain.handle("pdv-fiscal:list-documents", (_event, payload) => localStore.listFiscalDocuments(payload));
   }
 
+  function warmUpFiscalWorker() {
+    if (warmupPromise) {
+      return warmupPromise;
+    }
+
+    warmupPromise = runWorker(app, {
+      command: "listar-impressoras-disponiveis",
+      correlationId: createId("fiscal-warmup"),
+      config: {},
+      payload: {}
+    }).catch(error => ({
+      success: false,
+      command: "listar-impressoras-disponiveis",
+      status: "warmup_error",
+      friendlyMessage: "Aquecimento do worker fiscal falhou.",
+      technicalMessage: error instanceof Error ? error.message : String(error),
+      data: null
+    }));
+
+    return warmupPromise;
+  }
+
   return {
     callFiscalWorker,
     getFiscalConfig,
     saveFiscalConfig,
     saveFiscalCertificate,
-    registerIpc
+    registerIpc,
+    warmUpFiscalWorker
   };
 }
 

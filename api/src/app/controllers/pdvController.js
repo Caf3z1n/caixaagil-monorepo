@@ -22,7 +22,11 @@ const {
 } = require('../models');
 const produtoController = require('./produtoController');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
-const { ensureLimitAvailable } = require('../services/assinaturaEntitlementsService');
+const {
+  ensureLimitAvailable,
+  getFeatureAccess,
+  isFeatureEnabled,
+} = require('../services/assinaturaEntitlementsService');
 const { getBillingStatus } = require('../services/assinaturaInadimplenciaService');
 const { decryptSecret, encryptSecret } = require('../services/secretService');
 const {
@@ -518,6 +522,8 @@ function sanitizeDesktopConvenioRecebimento(venda) {
     cliente_convenio_id: data.cliente_convenio_id || null,
     cliente_nome: getVendaClienteConvenioNome(data),
     cliente_tipo_pessoa: data.cliente_convenio?.tipo_pessoa || null,
+    nome_consumidor: data.nome_consumidor || null,
+    observacao: data.observacao || null,
     itens_count: Number(data.quantidade_itens || 0),
     itens: normalizeSaleItems(data.itens),
     total_centavos: sanitizeCents(data.total_centavos),
@@ -924,6 +930,14 @@ async function processSaleCompleted(pdv, payload, transaction) {
   const clientName = normalizeText(sale.clientName || sale.nome_cliente || sale.customerName, 120);
   const clientId = Number(sale.cliente_convenio_id || sale.clienteConvenioId || sale.clientId || 0);
   const requestedClientConvenioId = Number.isInteger(clientId) && clientId > 0 ? clientId : null;
+  const consumerName = normalizeText(
+    sale.consumerName || sale.nome_consumidor || sale.nomeConsumidor || payload.consumerName,
+    120
+  ) || null;
+  const consumerObservation = normalizeText(
+    sale.consumerObservation || sale.observacao || sale.observation || payload.consumerObservation,
+    1000
+  ) || null;
   let clientConvenioId = null;
   let convenioClientName = clientName || normalizeText(sale.customerLabel || sale.cliente_nome, 120) || null;
 
@@ -956,6 +970,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
       titulo: origemComandaNome ? `Venda - ${origemComandaNome}` : 'Venda no caixa',
       cliente_convenio_id: isConvenioPayment ? clientConvenioId : null,
       nome_cliente: isConvenioPayment ? convenioClientName : null,
+      nome_consumidor: consumerName,
       rotulo_origem: origemComandaNome || 'Caixa',
       canal: 'pdv',
       itens: items,
@@ -970,7 +985,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
       status_convenio: isConvenioPayment ? 'pendente' : null,
       situacao_recebimento: isConvenioPayment ? 'pendente' : 'nenhum',
       recebido_em: isConvenioPayment ? null : parseDate(sale.createdAt || sale.registrado_em),
-      observacao: null,
+      observacao: consumerObservation,
       registrado_em: parseDate(sale.createdAt || sale.registrado_em),
     },
     { transaction }
@@ -1969,6 +1984,31 @@ function resetPdvDevicePairing(pdv, status = 'pendente') {
   };
 }
 
+async function getDesktopConfiguracaoSnapshot(usuarioId) {
+  const fiscalEnabled = await isFeatureEnabled(usuarioId, 'emissao_fiscal');
+
+  return configuracaoSistemaService.getConfiguracaoSnapshot(usuarioId, {
+    disableFiscalEmission: !fiscalEnabled,
+  });
+}
+
+function buildFiscalFeatureBlockedSyncResponse(documentos, access) {
+  const message = access.message || 'Seu plano atual nao permite emissao fiscal.';
+
+  return {
+    documentos: documentos.slice(0, 100).map(documento => ({
+      id: normalizeText(documento?.id || documento?.documentId || documento?.document_id, 64) || null,
+      status: 'erro',
+      code: access.code || 'PLAN_FEATURE_REQUIRED',
+      message,
+    })),
+    erro_fiscal: {
+      code: access.code || 'PLAN_FEATURE_REQUIRED',
+      message,
+    },
+  };
+}
+
 module.exports = {
   getUserPdvsSnapshot,
 
@@ -2291,7 +2331,7 @@ module.exports = {
       );
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
       const [configuracoes, funcionarioSnapshot, billingStatus] = await Promise.all([
-        configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
+        getDesktopConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
         getBillingStatus(pdv.usuario_id),
       ]);
@@ -2323,7 +2363,7 @@ module.exports = {
 
       const identificacao = await getVirtualIdentificacao(pdv.usuario_id, pdv.id);
       const [configuracoes, funcionarioSnapshot, billingStatus] = await Promise.all([
-        configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
+        getDesktopConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
         getBillingStatus(pdv.usuario_id),
       ]);
@@ -2445,7 +2485,7 @@ module.exports = {
 
       const [snapshot, configuracoes, convenioSnapshot, funcionarioSnapshot, billingStatus] = await Promise.all([
         produtoController.loadSnapshot(pdv.usuario_id, { onlyActive: true }),
-        configuracaoSistemaService.getConfiguracaoSnapshot(pdv.usuario_id),
+        getDesktopConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopConvenioSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
         getBillingStatus(pdv.usuario_id),
@@ -2469,6 +2509,16 @@ module.exports = {
 
       if (!pdv) {
         return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const fiscalAccess = await getFeatureAccess(pdv.usuario_id, 'emissao_fiscal');
+
+      if (!fiscalAccess.allowed) {
+        return res.status(fiscalAccess.statusCode || 403).json({
+          code: fiscalAccess.code,
+          message: fiscalAccess.message || 'Seu plano atual nao permite emissao fiscal.',
+          entitlements: fiscalAccess.entitlements,
+        });
       }
 
       const arquivoId = Number(req.body?.arquivo_id || req.body?.arquivoId);
@@ -2569,6 +2619,24 @@ module.exports = {
 
       if (documentos.length === 0) {
         return res.status(400).json({ message: 'Nenhum documento fiscal informado.' });
+      }
+
+      const fiscalAccess = await getFeatureAccess(pdv.usuario_id, 'emissao_fiscal');
+
+      if (!fiscalAccess.allowed) {
+        const now = new Date();
+        pdv.status = 'online';
+        pdv.ultimo_acesso_em = now;
+        pdv.sincronizacao_pendente = true;
+        pdv.ultima_fila_offline_em = now;
+        await pdv.save();
+
+        return res.json({
+          sincronizado_em: now.toISOString(),
+          processados: 0,
+          erros: documentos.slice(0, 100).length,
+          ...buildFiscalFeatureBlockedSyncResponse(documentos, fiscalAccess),
+        });
       }
 
       const results = [];

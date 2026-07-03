@@ -3957,6 +3957,8 @@ button {
 
 .pdv-fiscal-history-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
 }
 
@@ -4732,6 +4734,70 @@ button {
   font-weight: 950;
   line-height: 1;
   white-space: nowrap;
+}
+
+.pdv-agreement-promissory-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.pdv-agreement-promissory-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pdv-agreement-promissory-fields span {
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.pdv-agreement-promissory-fields input,
+.pdv-agreement-promissory-fields textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line-cool);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-deep);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 800;
+  outline: 0;
+  transition:
+    border-color 180ms ease-out,
+    box-shadow 180ms ease-out;
+}
+
+.pdv-agreement-promissory-fields input {
+  min-height: 46px;
+  padding: 0 12px;
+}
+
+.pdv-agreement-promissory-fields textarea {
+  min-height: 78px;
+  resize: vertical;
+  padding: 11px 12px;
+}
+
+.pdv-agreement-promissory-fields input:focus,
+.pdv-agreement-promissory-fields input:focus-visible,
+.pdv-agreement-promissory-fields textarea:focus,
+.pdv-agreement-promissory-fields textarea:focus-visible {
+  border-color: oklch(0.78 0.12 45);
+  box-shadow: 0 0 0 4px oklch(0.92 0.05 45 / 0.62);
+}
+
+.pdv-agreement-promissory-fields input::placeholder,
+.pdv-agreement-promissory-fields textarea::placeholder {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.pdv-agreement-promissory-note {
+  grid-column: 1 / -1;
 }
 
 .pdv-cash-payment {
@@ -6107,6 +6173,10 @@ button {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .pdv-agreement-promissory-fields {
+    grid-template-columns: 1fr;
   }
 
   .pdv-agreement-detail-summary {

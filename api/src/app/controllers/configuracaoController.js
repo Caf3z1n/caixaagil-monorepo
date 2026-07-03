@@ -1,6 +1,6 @@
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 const cnpjaIntegrationService = require('../services/cnpjaIntegrationService');
-const { ensureFeature } = require('../services/assinaturaEntitlementsService');
+const { ensureFeature, isFeatureEnabled } = require('../services/assinaturaEntitlementsService');
 
 function handleConfiguracaoError(res, error, defaultMessage) {
   if (error.status) {
@@ -17,7 +17,10 @@ function handleConfiguracaoError(res, error, defaultMessage) {
 module.exports = {
   async show(req, res) {
     try {
-      const configuracao = await configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id);
+      const fiscalEnabled = await isFeatureEnabled(req.user.id, 'emissao_fiscal');
+      const configuracao = await configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id, {
+        disableFiscalEmission: !fiscalEnabled,
+      });
 
       return res.json(configuracao);
     } catch (error) {

@@ -1,6 +1,6 @@
 {
   "name": "caixaagil-pdv",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
   "main": "electron/main.cjs",
@@ -9,7 +9,7 @@
     "dev:next": "next dev --webpack -p 3030",
     "dev:electron": "wait-on http://localhost:3030 && electron electron/main.cjs",
     "build:fiscal-worker": "dotnet build fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj",
-    "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=true -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o electron/resources/fiscal-worker/win-x64",
+    "publish:fiscal-worker": "dotnet publish fiscal-worker/CaixaAgil.FiscalWorker/CaixaAgil.FiscalWorker.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:EnableCompressionInSingleFile=false -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o electron/resources/fiscal-worker/win-x64",
     "build": "next build",
     "dist": "npm run build && npm run publish:fiscal-worker && node scripts/build-electron.mjs --publish never",
     "dist:dir": "npm run build && npm run publish:fiscal-worker && node scripts/build-electron.mjs --dir",
