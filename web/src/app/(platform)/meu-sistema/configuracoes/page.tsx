@@ -46,8 +46,9 @@ import {
   type SubscriptionEntitlements
 } from "@/lib/subscription-entitlements";
 
-type PaymentMethodKey = "dinheiro" | "pix" | "cartao" | "convenio";
-type StandardPaymentMethodKey = Exclude<PaymentMethodKey, "convenio">;
+type PaymentMethodKey = "dinheiro" | "pix" | "cartao" | "parcelamento" | "convenio";
+type OperationalPaymentMethodKey = "dinheiro" | "pix" | "cartao" | "parcelamento";
+type ConfigurablePaymentMethodKey = Exclude<PaymentMethodKey, "convenio">;
 type PaymentSettings = Record<PaymentMethodKey, boolean>;
 type CommandSettings = {
   ativo: boolean;
@@ -117,6 +118,7 @@ const defaultPaymentSettings: PaymentSettings = {
   dinheiro: true,
   pix: true,
   cartao: true,
+  parcelamento: false,
   convenio: false
 };
 
@@ -143,10 +145,10 @@ const defaultIntegrationSettings: IntegrationSettings = {
   }
 };
 
-const standardPaymentMethodKeys: StandardPaymentMethodKey[] = ["dinheiro", "pix", "cartao"];
+const operationalPaymentMethodKeys: OperationalPaymentMethodKey[] = ["dinheiro", "pix", "cartao", "parcelamento"];
 
 const paymentMethodOptions: Array<{
-  id: StandardPaymentMethodKey;
+  id: ConfigurablePaymentMethodKey;
   title: string;
   description: string;
   icon: LucideIcon;
@@ -168,6 +170,12 @@ const paymentMethodOptions: Array<{
     title: "Cartão",
     description: "Maquininha do caixa.",
     icon: CreditCard
+  },
+  {
+    id: "parcelamento",
+    title: "Parcelamento",
+    description: "Venda em parcelas no PDV.",
+    icon: ReceiptText
   }
 ];
 
@@ -227,7 +235,11 @@ function normalizeIntegrationSettings(value?: Partial<IntegrationSettings> | nul
 }
 
 function countActivePaymentMethods(settings: PaymentSettings) {
-  return standardPaymentMethodKeys.filter(method => settings[method]).length;
+  return paymentMethodOptions.filter(option => settings[option.id]).length;
+}
+
+function countActiveOperationalPaymentMethods(settings: PaymentSettings) {
+  return operationalPaymentMethodKeys.filter(method => settings[method]).length;
 }
 
 function withFiscalEmissionStatus(settings: FiscalSettings, active: boolean) {
@@ -501,6 +513,10 @@ export default function MeuSistemaConfiguracoesPage() {
   const [pendingFiscalDeactivation, setPendingFiscalDeactivation] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const activePaymentCount = useMemo(() => countActivePaymentMethods(paymentSettings), [paymentSettings]);
+  const activeOperationalPaymentCount = useMemo(
+    () => countActiveOperationalPaymentMethods(paymentSettings),
+    [paymentSettings]
+  );
   const activeProgressIndex = getFlowStepIndex(flowStep);
   const progressStepCount = getFlowStepCount(flowStep);
   const fiscalDeactivationPresence = useModalPresence(pendingFiscalDeactivation);
@@ -716,10 +732,10 @@ export default function MeuSistemaConfiguracoesPage() {
       [method]: active
     };
 
-    if (method !== "convenio" && countActivePaymentMethods(nextSettings) === 0) {
+    if (countActiveOperationalPaymentMethods(nextSettings) === 0) {
       setFeedback({
         tone: "warning",
-        message: "Mantenha pelo menos uma forma de pagamento ativa."
+        message: "Mantenha pelo menos uma forma operacional ativa para o PDV."
       });
       return;
     }
@@ -747,6 +763,10 @@ export default function MeuSistemaConfiguracoesPage() {
             ? active
               ? "Convênios ativados."
               : "Convênios desativados."
+            : method === "parcelamento"
+              ? active
+                ? "Parcelamento ativado."
+                : "Parcelamento desativado."
             : "Formas de pagamento salvas."
       });
     } catch (error) {
@@ -758,7 +778,9 @@ export default function MeuSistemaConfiguracoesPage() {
             ? error.message
             : method === "convenio"
               ? "Não foi possível alterar convênios."
-              : "Não foi possível salvar as formas de pagamento."
+              : method === "parcelamento"
+                ? "Não foi possível alterar parcelamento."
+                : "Não foi possível salvar as formas de pagamento."
       });
     } finally {
       setSavingMethod(null);
@@ -1629,7 +1651,8 @@ export default function MeuSistemaConfiguracoesPage() {
                     {paymentMethodOptions.map(option => {
                       const Icon = option.icon;
                       const isActive = paymentSettings[option.id];
-                      const isLastActive = isActive && activePaymentCount === 1;
+                      const isOperationalMethod = operationalPaymentMethodKeys.includes(option.id as OperationalPaymentMethodKey);
+                      const isLastActive = isOperationalMethod && isActive && activeOperationalPaymentCount === 1;
                       const isSaving = savingMethod === option.id;
 
                       return (
@@ -1651,7 +1674,7 @@ export default function MeuSistemaConfiguracoesPage() {
                           </span>
                           <span className="configuration-payment-method-copy">
                             <strong>{option.title}</strong>
-                            <small>{isLastActive ? "Última ativa." : option.description}</small>
+                            <small>{isLastActive ? "Última operacional." : option.description}</small>
                           </span>
                           <span className="configuration-switch" aria-hidden="true">
                             {isSaving ? <LoaderCircle className="configuration-switch-loader" size={15} /> : <span />}

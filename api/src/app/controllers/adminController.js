@@ -1769,6 +1769,47 @@ module.exports = {
     }
   },
 
+  async verifyUserEmail(req, res) {
+    try {
+      const usuarioId = Number(req.params.id);
+
+      if (!Number.isInteger(usuarioId) || usuarioId <= 0) {
+        return res.status(400).json({ message: 'Usuario invalido.' });
+      }
+
+      const usuario = await Usuario.scope('withSenha').findByPk(usuarioId);
+
+      if (!usuario) {
+        return res.status(404).json({ message: 'Usuario nao encontrado.' });
+      }
+
+      if (!usuario.email_verificado_em) {
+        usuario.email_verificado_em = new Date();
+      }
+
+      usuario.token_verificacao_email = null;
+      usuario.token_verificacao_email_expira_em = null;
+      await usuario.save();
+
+      return res.json({
+        message: 'E-mail marcado como verificado.',
+        usuario: {
+          id: usuario.id,
+          email: usuario.email,
+          ativo: usuario.ativo,
+          email_verificado: true,
+          email_verificado_em: usuario.email_verificado_em,
+          created_at: usuario.created_at || usuario.createdAt || null,
+        },
+      });
+    } catch (error) {
+      return res.status(500).json({
+        message: 'Erro ao verificar e-mail do usuario.',
+        detail: error.message,
+      });
+    }
+  },
+
   async updateUserSubscriptionValue(req, res) {
     const usuarioId = Number(req.params.id);
     const assinaturaId = Number(req.params.assinaturaId);

@@ -11,6 +11,8 @@ import {
   Eye,
   EyeOff,
   History,
+  LoaderCircle,
+  MailCheck,
   Monitor,
   PauseCircle,
   PlayCircle,
@@ -213,6 +215,19 @@ type SubscriptionActionForm = {
   valor: string;
   diasGratis: string;
   motivo: string;
+};
+
+type AccountActionFeedback = {
+  tone: "success" | "error";
+  message: string;
+};
+
+type VerifyUserEmailResponse = {
+  message?: string;
+  usuario?: {
+    email_verificado?: boolean;
+    email_verificado_em?: string | null;
+  };
 };
 
 const statusOptions = [
@@ -561,8 +576,10 @@ export default function AdminUsuariosPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState(false);
+  const [isEmailVerifying, setIsEmailVerifying] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [accountActionFeedback, setAccountActionFeedback] = useState<AccountActionFeedback | null>(null);
   const [selectedUser, setSelectedUser] = useState<UsuarioDetalheResponse | null>(null);
   const [remoteSupportCredentialsByPdv, setRemoteSupportCredentialsByPdv] = useState<Record<number, RemoteSupportCredentialState>>({});
   const [subscriptionActionForm, setSubscriptionActionForm] = useState<SubscriptionActionForm | null>(null);
@@ -633,6 +650,7 @@ export default function AdminUsuariosPage() {
       setSubscriptionActionForm(null);
       setRemoteSupportCredentialsByPdv({});
       setActionFeedback(null);
+      setAccountActionFeedback(null);
       const result = await apiGet<UsuarioDetalheResponse>(`/admin/usuarios/${usuarioId}`, { token });
 
       setSelectedUser(result);
@@ -641,6 +659,61 @@ export default function AdminUsuariosPage() {
       setFeedback(getErrorMessage(error, "Não foi possível carregar os detalhes da conta."));
     } finally {
       setIsDetailLoading(false);
+    }
+  }
+
+  async function verifySelectedUserEmail() {
+    if (!token || !selectedUser || isEmailVerifying) {
+      return;
+    }
+
+    const usuarioId = selectedUser.usuario.id;
+
+    if (selectedUser.usuario.email_verificado_em) {
+      setAccountActionFeedback({
+        tone: "success",
+        message: "Este e-mail já está verificado."
+      });
+      return;
+    }
+
+    try {
+      setIsEmailVerifying(true);
+      setAccountActionFeedback(null);
+
+      const result = await apiPost<VerifyUserEmailResponse>(
+        `/admin/usuarios/${usuarioId}/verificar-email`,
+        {},
+        { token }
+      );
+      const verifiedAt = result.usuario?.email_verificado_em || new Date().toISOString();
+
+      setSelectedUser(current => current && current.usuario.id === usuarioId
+        ? {
+            ...current,
+            usuario: {
+              ...current.usuario,
+              email_verificado_em: verifiedAt
+            }
+          }
+        : current);
+      setUsuarios(current => current.map(usuario => usuario.id === usuarioId
+        ? {
+            ...usuario,
+            email_verificado: true
+          }
+        : usuario));
+      setAccountActionFeedback({
+        tone: "success",
+        message: result.message || "E-mail marcado como verificado."
+      });
+    } catch (error) {
+      setAccountActionFeedback({
+        tone: "error",
+        message: getErrorMessage(error, "Não foi possível verificar este e-mail.")
+      });
+    } finally {
+      setIsEmailVerifying(false);
     }
   }
 
@@ -928,6 +1001,7 @@ export default function AdminUsuariosPage() {
                     setSubscriptionActionForm(null);
                     setRemoteSupportCredentialsByPdv({});
                     setActionFeedback(null);
+                    setAccountActionFeedback(null);
                   }}
                   aria-label="Fechar detalhes da conta"
                 >
@@ -984,6 +1058,44 @@ export default function AdminUsuariosPage() {
                   </span>
                 </div>
               ) : null}
+
+              <section className="admin-detail-section admin-account-actions-section" aria-label="Ações administrativas da conta">
+                <header>
+                  <h3>Ações da conta</h3>
+                  <small>
+                    {selectedUser.usuario.email_verificado_em
+                      ? `E-mail verificado em ${formatDate(selectedUser.usuario.email_verificado_em)}`
+                      : "E-mail pendente"}
+                  </small>
+                </header>
+
+                <div className="admin-subscription-actions">
+                  <button
+                    className={selectedUser.usuario.email_verificado_em ? "admin-account-action-verified" : ""}
+                    disabled={isEmailVerifying || Boolean(selectedUser.usuario.email_verificado_em)}
+                    type="button"
+                    onClick={() => void verifySelectedUserEmail()}
+                  >
+                    {isEmailVerifying ? (
+                      <LoaderCircle aria-hidden="true" className="admin-spin" size={16} />
+                    ) : (
+                      <MailCheck aria-hidden="true" size={16} />
+                    )}
+                    {selectedUser.usuario.email_verificado_em ? "E-mail verificado" : "Verificar e-mail"}
+                  </button>
+                </div>
+
+                {accountActionFeedback ? (
+                  <div className={`admin-feedback admin-feedback-${accountActionFeedback.tone}`} role={accountActionFeedback.tone === "error" ? "alert" : "status"}>
+                    {accountActionFeedback.tone === "error" ? (
+                      <AlertTriangle aria-hidden="true" size={16} />
+                    ) : (
+                      <MailCheck aria-hidden="true" size={16} />
+                    )}
+                    <span>{accountActionFeedback.message}</span>
+                  </div>
+                ) : null}
+              </section>
 
               {assinaturaAtualDetalhe ? (
                 <section className="admin-detail-section admin-account-actions-section" aria-label="Ações administrativas da assinatura">

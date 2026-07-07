@@ -22,6 +22,7 @@ ConfiguracaoSistema.init(
         dinheiro: true,
         pix: true,
         cartao: true,
+        parcelamento: false,
         convenio: false,
       },
     },

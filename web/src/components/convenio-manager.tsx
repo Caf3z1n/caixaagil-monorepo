@@ -291,6 +291,45 @@ function formatCnpj(value: string) {
   return `${part1}.${part2}.${part3}/${part4}-${part5}`;
 }
 
+function formatCpf(value: string) {
+  const digits = digitsOnly(value, 11);
+  const part1 = digits.slice(0, 3);
+  const part2 = digits.slice(3, 6);
+  const part3 = digits.slice(6, 9);
+  const part4 = digits.slice(9, 11);
+
+  if (digits.length <= 3) {
+    return part1;
+  }
+
+  if (digits.length <= 6) {
+    return `${part1}.${part2}`;
+  }
+
+  if (digits.length <= 9) {
+    return `${part1}.${part2}.${part3}`;
+  }
+
+  return `${part1}.${part2}.${part3}-${part4}`;
+}
+
+function formatPhone(value: string) {
+  const digits = digitsOnly(value, 11);
+  const areaCode = digits.slice(0, 2);
+  const firstPart = digits.length > 10 ? digits.slice(2, 7) : digits.slice(2, 6);
+  const secondPart = digits.length > 10 ? digits.slice(7, 11) : digits.slice(6, 10);
+
+  if (digits.length <= 2) {
+    return areaCode;
+  }
+
+  if (!secondPart) {
+    return `(${areaCode}) ${firstPart}`;
+  }
+
+  return `(${areaCode}) ${firstPart}-${secondPart}`;
+}
+
 function formatCep(value: string) {
   const digits = digitsOnly(value, 8);
 
@@ -594,7 +633,10 @@ export function ConvenioManager() {
         cliente.nome,
         getClientDisplayName(cliente),
         cliente.dados_fiscais?.razao_social,
-        cliente.dados_fiscais?.cnpj_cpf
+        cliente.dados_fiscais?.cnpj_cpf,
+        cliente.dados_fiscais?.telefone,
+        cliente.dados_fiscais?.email,
+        cliente.dados_fiscais?.endereco?.municipio
       ]
         .filter(Boolean)
         .join(" ");
@@ -859,7 +901,7 @@ export function ConvenioManager() {
   }, [chargeGroupKey, chargeReceiptGroup, flowStep]);
 
   useEffect(() => {
-    if (!clientModal || clientDraftType !== "juridica") {
+    if (!clientModal) {
       return undefined;
     }
 
@@ -896,7 +938,7 @@ export function ConvenioManager() {
     }, 520);
 
     return () => window.clearTimeout(timeout);
-  }, [clientDraftFiscal.endereco.cep, clientDraftType, clientModal]);
+  }, [clientDraftFiscal.endereco.cep, clientModal]);
 
   function moveToFlowStep(nextStep: ConvenioFlowStep) {
     if (nextStep === flowStep) {
@@ -1087,7 +1129,7 @@ export function ConvenioManager() {
             ...(cliente.dados_fiscais ?? {}),
             nome_fantasia: cliente.dados_fiscais?.nome_fantasia || cliente.nome
           }
-        : null
+        : cliente.dados_fiscais
     );
 
     setFeedback(null);
@@ -1196,7 +1238,7 @@ export function ConvenioManager() {
       const payload = {
         tipo_pessoa: clientDraftType,
         nome,
-        dados_fiscais: clientDraftType === "juridica" ? clientDraftFiscal : null,
+        dados_fiscais: clientDraftFiscal,
         permite_pagamento_frente_caixa: clientDraftFrontPayment
       };
       const saved =
@@ -1691,15 +1733,11 @@ export function ConvenioManager() {
           data-modal-state={clientModalPresence.state}
           {...clientModalDismiss.backdropProps}
         >
-          <section
-            className={
-              clientDraftType === "juridica"
-                ? "platform-modal convenio-client-modal convenio-client-modal-legal"
-                : "platform-modal convenio-client-modal"
-            }
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="convenio-client-title"
+            <section
+              className="platform-modal convenio-client-modal convenio-client-modal-legal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="convenio-client-title"
           >
             <button className="platform-modal-close" type="button" aria-label="Fechar" onClick={closeClientModal}>
               <X aria-hidden="true" size={19} />
@@ -1739,24 +1777,178 @@ export function ConvenioManager() {
               </div>
 
               {clientDraftType === "fisica" ? (
-                <label className="convenio-client-field">
-                  <span>Nome</span>
-                  <input
-                    autoFocus
-                    disabled={isSubmitting}
-                    value={clientDraftName}
-                    onChange={(event) => {
-                      setClientDraftName(capitalizeFirstTextLetter(event.target.value));
-                      if (feedback?.tone === "error") {
-                        setFeedback(null);
-                      }
-                    }}
-                    placeholder="Nome do cliente"
-                  />
-                  {clientNameConflict ? (
-                    <small className="convenio-client-field-error">Já existe um cliente com esse nome.</small>
-                  ) : null}
-                </label>
+                <>
+                  <section className="fiscal-form-section fiscal-settings-section convenio-client-fiscal-section">
+                    <header className="fiscal-settings-section-head">
+                      <span aria-hidden="true">
+                        <UserRound size={18} />
+                      </span>
+                      <strong>Contato</strong>
+                    </header>
+
+                    <div className="fiscal-form-grid fiscal-company-grid">
+                      <label className="fiscal-field-span-6">
+                        <span>Nome</span>
+                        <input
+                          autoFocus
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          value={clientDraftName}
+                          onChange={(event) => {
+                            setClientDraftName(capitalizeFirstTextLetter(event.target.value));
+                            if (feedback?.tone === "error") {
+                              setFeedback(null);
+                            }
+                          }}
+                          placeholder="Nome do cliente"
+                        />
+                        {clientNameConflict ? (
+                          <small className="convenio-client-field-error">Já existe um cliente com esse nome.</small>
+                        ) : null}
+                      </label>
+
+                      <label className="fiscal-field-span-3">
+                        <span>CPF</span>
+                        <input
+                          autoComplete="off"
+                          disabled={isSubmitting}
+                          inputMode="numeric"
+                          maxLength={14}
+                          value={formatCpf(clientDraftFiscal.cnpj_cpf)}
+                          onChange={(event) => updateClientFiscal({ cnpj_cpf: digitsOnly(event.currentTarget.value, 11) })}
+                          placeholder="000.000.000-00"
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-3">
+                        <span>Telefone</span>
+                        <input
+                          autoComplete="tel"
+                          disabled={isSubmitting}
+                          inputMode="tel"
+                          maxLength={15}
+                          value={formatPhone(clientDraftFiscal.telefone)}
+                          onChange={(event) => updateClientFiscal({ telefone: digitsOnly(event.currentTarget.value, 11) })}
+                          placeholder="(00) 00000-0000"
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-12">
+                        <span>E-mail</span>
+                        <input
+                          autoComplete="email"
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          type="email"
+                          value={clientDraftFiscal.email}
+                          onChange={(event) => updateClientFiscal({ email: event.currentTarget.value })}
+                          placeholder="cliente@email.com"
+                        />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section className="fiscal-form-section fiscal-settings-section fiscal-settings-section-address convenio-client-fiscal-section">
+                    <header className="fiscal-settings-section-head">
+                      <span aria-hidden="true">
+                        <MapPin size={18} />
+                      </span>
+                      <strong>Endereço</strong>
+                    </header>
+
+                    <div className="fiscal-form-grid fiscal-address-grid">
+                      <label className="fiscal-field-span-3 fiscal-autofill-field">
+                        <span className="fiscal-field-label-row">
+                          <span>CEP</span>
+                          <em className={clientLookupTarget === "cep" ? "fiscal-autofill-badge fiscal-autofill-badge-loading" : "fiscal-autofill-badge"}>
+                            {clientLookupTarget === "cep" ? "Buscando" : "CEP"}
+                          </em>
+                        </span>
+                        <input
+                          autoComplete="postal-code"
+                          disabled={isSubmitting || clientLookupTarget === "cep"}
+                          inputMode="numeric"
+                          maxLength={9}
+                          type="text"
+                          value={formatCep(clientDraftFiscal.endereco.cep)}
+                          onChange={(event) => {
+                            clientCepChangedByUserRef.current = true;
+                            setClientLookupFeedback(null);
+                            setFeedback(null);
+                            updateClientFiscalAddress({ cep: digitsOnly(event.currentTarget.value, 8) });
+                          }}
+                        />
+                        {clientLookupTarget === "cep" ? (
+                          <small className="fiscal-lookup-hint">Consultando CEP.</small>
+                        ) : (
+                          <small className="fiscal-lookup-muted">Preenche endereço ao completar.</small>
+                        )}
+                      </label>
+
+                      <label className="fiscal-field-span-7">
+                        <span>Município</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.municipio}
+                          onChange={(event) => updateClientFiscalAddress({ municipio: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-2">
+                        <span>UF</span>
+                        <PlatformSelect
+                          ariaLabel="UF do endereço"
+                          disabled={isSubmitting}
+                          options={ufOptions}
+                          placeholder="UF"
+                          value={clientDraftFiscal.endereco.uf}
+                          onChange={uf => updateClientFiscalAddress({ uf })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-7">
+                        <span>Logradouro</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={160}
+                          value={clientDraftFiscal.endereco.logradouro}
+                          onChange={(event) => updateClientFiscalAddress({ logradouro: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-2">
+                        <span>Número</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={20}
+                          value={clientDraftFiscal.endereco.numero}
+                          onChange={(event) => updateClientFiscalAddress({ numero: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-3">
+                        <span>Bairro</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.bairro}
+                          onChange={(event) => updateClientFiscalAddress({ bairro: event.currentTarget.value })}
+                        />
+                      </label>
+
+                      <label className="fiscal-field-span-12">
+                        <span>Complemento</span>
+                        <input
+                          disabled={isSubmitting}
+                          maxLength={80}
+                          value={clientDraftFiscal.endereco.complemento}
+                          onChange={(event) => updateClientFiscalAddress({ complemento: event.currentTarget.value })}
+                        />
+                      </label>
+                    </div>
+                  </section>
+                </>
               ) : (
                 <>
                   <section className="fiscal-form-section fiscal-settings-section fiscal-settings-section-company convenio-client-fiscal-section">

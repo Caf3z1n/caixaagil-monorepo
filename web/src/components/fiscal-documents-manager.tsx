@@ -130,7 +130,7 @@ type FiscalDownloadOption = {
   icon?: LucideIcon;
 };
 
-const loadBatchSize = 10;
+const loadBatchSize = 100;
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
   currency: "BRL",
@@ -507,6 +507,23 @@ function buildFallbackFileName(documento: FiscalDocument, extension: "xml" | "pd
   const fileSuffix = suffix ? `-${suffix}` : "";
 
   return `${model}-serie-${documento.serie}-${number}${fileSuffix}.${extension}`;
+}
+
+function getDownloadFileNameFromResponse(response: Response, fallbackName: string) {
+  const disposition = response.headers.get("content-disposition") || "";
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+  const encodedName = utf8Match?.[1] || plainMatch?.[1] || "";
+
+  if (!encodedName) {
+    return fallbackName;
+  }
+
+  try {
+    return decodeURIComponent(encodedName);
+  } catch {
+    return encodedName;
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -989,7 +1006,7 @@ function FiscalDocumentDetails({
 export function FiscalDocumentsManager() {
   const [documents, setDocuments] = useState<FiscalDocument[]>([]);
   const [totalDocuments, setTotalDocuments] = useState(0);
-  const [visibleLimit, setVisibleLimit] = useState(loadBatchSize);
+  const [pageOffset, setPageOffset] = useState(0);
   const [searchValue, setSearchValue] = useState("");
   const [statusFilter, setStatusFilter] = useState<FiscalDocumentStatusFilter>("todos");
   const [startDate, setStartDate] = useState("");
@@ -1006,6 +1023,7 @@ export function FiscalDocumentsManager() {
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
   const [downloadingFileKey, setDownloadingFileKey] = useState<string | null>(null);
+  const [bulkDownloadKind, setBulkDownloadKind] = useState<"xmls" | "reports" | null>(null);
   const datePickerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreSentinelRef = useRef<HTMLSpanElement | null>(null);
   const deferredSearchValue = useDeferredValue(searchValue);
@@ -1028,6 +1046,28 @@ export function FiscalDocumentsManager() {
   const previewRangeStartDate = previewEndDate && previewEndDate < startDate ? previewEndDate : startDate;
   const previewRangeEndDate = previewEndDate && previewEndDate < startDate ? startDate : endDate || previewEndDate;
   const isPreviewingDateRange = Boolean(startDate && !endDate && hoveredDate);
+
+  const buildFilterParams = useCallback(() => {
+    const params = new URLSearchParams();
+
+    if (normalizedSearchValue) {
+      params.set("q", normalizedSearchValue);
+    }
+
+    if (statusFilter !== "todos") {
+      params.set("status", statusFilter);
+    }
+
+    if (startDate) {
+      params.set("data_inicio", startDate);
+    }
+
+    if (endDate) {
+      params.set("data_fim", endDate);
+    }
+
+    return params;
+  }, [endDate, normalizedSearchValue, startDate, statusFilter]);
 
   const closeModal = useCallback(() => {
     setSelectedDocumentId(null);
@@ -1079,7 +1119,7 @@ export function FiscalDocumentsManager() {
           return;
         }
 
-        setVisibleLimit(currentLimit => Math.min(currentLimit + loadBatchSize, totalDocuments || currentLimit + loadBatchSize));
+        setPageOffset(currentOffset => Math.min(currentOffset + loadBatchSize, totalDocuments));
       },
       {
         root: null,
@@ -1117,31 +1157,26 @@ export function FiscalDocumentsManager() {
       setIsLoading(true);
 
       try {
-        const params = new URLSearchParams({
-          limit: String(visibleLimit),
-          offset: "0"
-        });
-
-        if (normalizedSearchValue) {
-          params.set("q", normalizedSearchValue);
-        }
-
-        if (statusFilter !== "todos") {
-          params.set("status", statusFilter);
-        }
-
-        if (startDate) {
-          params.set("data_inicio", startDate);
-        }
-
-        if (endDate) {
-          params.set("data_fim", endDate);
-        }
+        const params = buildFilterParams();
+        params.set("limit", String(loadBatchSize));
+        params.set("offset", String(pageOffset));
 
         const result = await apiGet<FiscalDocumentListResponse>(`/nf?${params.toString()}`, { cacheTtlMs: 30_000, token });
 
         if (!cancelled) {
-          setDocuments(Array.isArray(result.items) ? result.items : []);
+          const nextItems = Array.isArray(result.items) ? result.items : [];
+
+          if (pageOffset === 0) {
+            setDocuments(nextItems);
+          } else {
+            setDocuments(currentItems => {
+              const existingIds = new Set(currentItems.map(documento => documento.id));
+              const appendedItems = nextItems.filter(documento => !existingIds.has(documento.id));
+
+              return [...currentItems, ...appendedItems];
+            });
+          }
+
           setTotalDocuments(Number(result.total || 0));
           setLoadError(null);
         }
@@ -1163,7 +1198,7 @@ export function FiscalDocumentsManager() {
     return () => {
       cancelled = true;
     };
-  }, [endDate, hasInvalidDateRange, normalizedSearchValue, refreshNonce, startDate, statusFilter, visibleLimit]);
+  }, [buildFilterParams, hasInvalidDateRange, pageOffset, refreshNonce]);
 
   useEffect(() => {
     if (!selectedDocumentId) {
@@ -1259,20 +1294,84 @@ export function FiscalDocumentsManager() {
     }
   }, []);
 
+  const downloadFilteredPackage = useCallback(async (kind: "xmls" | "reports") => {
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setDownloadError("Sessão expirada. Entre novamente para baixar os arquivos.");
+      return;
+    }
+
+    const endpoint = kind === "xmls" ? "/nf/download/xmls" : "/nf/download/relatorios";
+    const fallbackName = kind === "xmls" ? "documentos-fiscais-filtrados.zip" : "relatorios-fiscais.zip";
+    const params = buildFilterParams();
+
+    setDownloadError(null);
+    setBulkDownloadKind(kind);
+
+    try {
+      const queryString = params.toString();
+      const response = await fetch(getApiUrl(`${endpoint}${queryString ? `?${queryString}` : ""}`), {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        let message = kind === "xmls"
+          ? "Não foi possível baixar os documentos fiscais filtrados."
+          : "Não foi possível baixar os relatórios fiscais.";
+
+        try {
+          const parsed = JSON.parse(text) as { message?: string };
+          message = parsed.message || message;
+        } catch {
+          message = text || message;
+        }
+
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+
+      anchor.href = objectUrl;
+      anchor.download = getDownloadFileNameFromResponse(response, fallbackName);
+      window.document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      setDownloadError(getErrorMessage(
+        error,
+        kind === "xmls"
+          ? "Não foi possível baixar os documentos fiscais filtrados."
+          : "Não foi possível baixar os relatórios fiscais."
+      ));
+    } finally {
+      setBulkDownloadKind(null);
+    }
+  }, [buildFilterParams]);
+
   function handleSearchChange(value: string) {
     setSearchValue(value);
-    setVisibleLimit(loadBatchSize);
+    setPageOffset(0);
+    setDocuments([]);
   }
 
   function handleStatusChange(value: FiscalDocumentStatusFilter) {
     setStatusFilter(value);
-    setVisibleLimit(loadBatchSize);
+    setPageOffset(0);
+    setDocuments([]);
   }
 
   function handleDateRangeChange(nextStartDate: string, nextEndDate: string) {
     setStartDate(nextStartDate);
     setEndDate(nextEndDate);
-    setVisibleLimit(loadBatchSize);
+    setPageOffset(0);
+    setDocuments([]);
   }
 
   function handleDateSelection(value: string) {
@@ -1453,6 +1552,36 @@ export function FiscalDocumentsManager() {
               </div>
             </div>
 
+            <div className="fiscal-documents-export-actions" aria-label="Downloads dos documentos fiscais filtrados">
+              <button
+                className="platform-secondary-button"
+                type="button"
+                disabled={Boolean(bulkDownloadKind) || hasInvalidDateRange}
+                onClick={() => void downloadFilteredPackage("xmls")}
+              >
+                {bulkDownloadKind === "xmls" ? (
+                  <LoaderCircle aria-hidden="true" className="platform-spin" size={16} />
+                ) : (
+                  <Download aria-hidden="true" size={16} />
+                )}
+                Baixar XMLs filtrados
+              </button>
+
+              <button
+                className="platform-primary-button fiscal-documents-report-button"
+                type="button"
+                disabled={Boolean(bulkDownloadKind) || hasInvalidDateRange}
+                onClick={() => void downloadFilteredPackage("reports")}
+              >
+                {bulkDownloadKind === "reports" ? (
+                  <LoaderCircle aria-hidden="true" className="platform-spin" size={16} />
+                ) : (
+                  <FileText aria-hidden="true" size={16} />
+                )}
+                Baixar relatórios
+              </button>
+            </div>
+
             {loadError ? <FeedbackMessage message={loadError} tone={hasInvalidDateRange ? "warning" : "error"} /> : null}
             {downloadError && !modalPresence.isPresent ? <FeedbackMessage message={downloadError} /> : null}
 
@@ -1513,7 +1642,10 @@ export function FiscalDocumentsManager() {
               className="platform-primary-button fiscal-documents-refresh-button"
               type="button"
               disabled={isLoading}
-              onClick={() => setRefreshNonce(current => current + 1)}
+              onClick={() => {
+                setPageOffset(0);
+                setRefreshNonce(current => current + 1);
+              }}
             >
               <RefreshCcw className={isLoading ? "platform-spin" : undefined} size={16} />
               Atualizar

@@ -10,13 +10,14 @@ const {
   Venda,
 } = require('../models');
 
-const comparablePaymentKeys = ['dinheiro', 'cartao', 'pix'];
+const comparablePaymentKeys = ['dinheiro', 'cartao', 'pix', 'parcelamento'];
 const paymentKeys = [...comparablePaymentKeys, 'convenio'];
 
 const paymentLabels = {
   dinheiro: 'Dinheiro',
   cartao: 'Cartão',
   pix: 'Pix',
+  parcelamento: 'Parcelamento',
   convenio: 'Convênio',
 };
 
@@ -146,6 +147,7 @@ function buildEmptyTotals() {
     dinheiro: 0,
     cartao: 0,
     pix: 0,
+    parcelamento: 0,
     convenio: 0,
   };
 }
@@ -155,6 +157,7 @@ function buildEmptyCounts() {
     dinheiro: 0,
     cartao: 0,
     pix: 0,
+    parcelamento: 0,
     convenio: 0,
   };
 }
@@ -172,6 +175,10 @@ function resolvePaymentMethod(value) {
 
   if (normalized === 'pix') {
     return 'pix';
+  }
+
+  if (normalized === 'parcelamento' || normalized === 'parcelado' || normalized === 'installment') {
+    return 'parcelamento';
   }
 
   return null;
@@ -229,7 +236,7 @@ function resolveSaleDiscountCents(sale) {
 }
 
 function resolveSaleExpectedCents(sale, paymentKey) {
-  if (paymentKey === 'convenio') {
+  if (paymentKey === 'convenio' || paymentKey === 'parcelamento') {
     return sanitizeCents(sale.total_centavos);
   }
 
@@ -275,6 +282,7 @@ function mapConferenceTotals(record) {
     dinheiro: sanitizeCents(conference.dinheiro_confirmado_centavos),
     cartao: sanitizeCents(conference.cartao_confirmado_centavos),
     pix: sanitizeCents(conference.pix_confirmado_centavos),
+    parcelamento: sanitizeCents(conference.parcelamento_confirmado_centavos),
     convenio: sanitizeCents(conference.convenio_confirmado_centavos),
   };
 }
@@ -532,6 +540,7 @@ function mapSale(record, movementKind, productById = new Map()) {
     situacao: resolveSaleUiStatus(sale, movementKind),
     metodo_pagamento: paymentMethod,
     metodo_pagamento_recebimento: receiptPaymentMethod,
+    parcelamento: sale.parcelamento || null,
     caixa_recebimento_id: sale.caixa_recebimento_id || null,
     recebido_em: toIso(sale.recebido_em),
   };
@@ -834,6 +843,7 @@ module.exports = {
           dinheiro_confirmado_centavos: confirmedTotals.dinheiro,
           cartao_confirmado_centavos: confirmedTotals.cartao,
           pix_confirmado_centavos: confirmedTotals.pix,
+          parcelamento_confirmado_centavos: confirmedTotals.parcelamento,
           convenio_confirmado_centavos: confirmedTotals.convenio,
           ativo: true,
           revisado_em: now,
@@ -846,6 +856,7 @@ module.exports = {
           dinheiro_confirmado_centavos: confirmedTotals.dinheiro,
           cartao_confirmado_centavos: confirmedTotals.cartao,
           pix_confirmado_centavos: confirmedTotals.pix,
+          parcelamento_confirmado_centavos: confirmedTotals.parcelamento,
           convenio_confirmado_centavos: confirmedTotals.convenio,
           ativo: true,
           revisado_em: now,

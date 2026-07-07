@@ -32,6 +32,11 @@ ConferenciaCaixa.init(
       allowNull: false,
       defaultValue: 0,
     },
+    parcelamento_confirmado_centavos: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+    },
     convenio_confirmado_centavos: {
       type: DataTypes.INTEGER,
       allowNull: false,

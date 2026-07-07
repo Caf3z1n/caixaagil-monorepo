@@ -180,7 +180,7 @@ function sanitizeCliente(cliente, extra = {}) {
     nome: data.nome,
     ativo: Boolean(data.ativo),
     permite_pagamento_frente_caixa: Boolean(data.permite_pagamento_frente_caixa),
-    dados_fiscais: resolveTipoPessoa(data.tipo_pessoa) === 'juridica' ? sanitizeFiscalData(data.dados_fiscais) : null,
+    dados_fiscais: sanitizeFiscalData(data.dados_fiscais),
     registros_vinculados: Number.isFinite(registrosVinculados) ? registrosVinculados : 0,
     pode_excluir: registrosVinculados <= 0,
     acao_remocao: registrosVinculados > 0 ? 'desativar' : 'excluir',
@@ -429,7 +429,7 @@ module.exports = {
   async createCliente(req, res) {
     try {
       const tipoPessoa = resolveTipoPessoa(req.body?.tipo_pessoa);
-      const dadosFiscais = tipoPessoa === 'juridica' ? sanitizeFiscalData(resolveFiscalSource(req.body)) : null;
+      const dadosFiscais = sanitizeFiscalData(resolveFiscalSource(req.body));
       const nome = resolveClienteNome(tipoPessoa, req.body, dadosFiscais);
 
       if (nome.length < 2) {
@@ -492,9 +492,7 @@ module.exports = {
       const tipoPessoa = Object.prototype.hasOwnProperty.call(req.body || {}, 'tipo_pessoa')
         ? resolveTipoPessoa(req.body?.tipo_pessoa)
         : resolveTipoPessoa(cliente.tipo_pessoa);
-      const dadosFiscais = tipoPessoa === 'juridica'
-        ? sanitizeFiscalData(hasFiscalPayload ? resolveFiscalSource(req.body) : cliente.dados_fiscais)
-        : null;
+      const dadosFiscais = sanitizeFiscalData(hasFiscalPayload ? resolveFiscalSource(req.body) : cliente.dados_fiscais);
       const nome = resolveClienteNome(tipoPessoa, req.body, dadosFiscais) || normalizeText(cliente.nome, 160);
 
       if (nome.length < 2) {

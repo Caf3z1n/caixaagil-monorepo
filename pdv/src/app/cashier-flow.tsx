@@ -93,14 +93,17 @@ import { CashierModal } from "./cashier-modal";
 import { PdvScaleSurface } from "./pdv-scale-surface";
 import {
   buildPromissoryNoteReceiptPayload,
+  buildSaleReceiptPayload,
   type AgreementSaleAdditionalData,
+  type InstallmentPaymentEntry,
+  type InstallmentPaymentPlan,
   type PromissoryFiscalDocument
 } from "./promissory-note";
 
 type ConnectivityState = "online" | "offline";
-type CashierView = "menu" | "sale" | "commands" | "command-editor" | "agreement" | "expenses" | "history";
-type PaymentMethod = "dinheiro" | "pix" | "cartao" | "convenio";
-type ReceiptPaymentMethod = Exclude<PaymentMethod, "convenio">;
+type CashierView = "menu" | "sale" | "commands" | "command-editor" | "agreement" | "installments" | "expenses" | "history";
+type PaymentMethod = "dinheiro" | "pix" | "cartao" | "parcelamento" | "convenio";
+type ReceiptPaymentMethod = Exclude<PaymentMethod, "parcelamento" | "convenio">;
 
 type Product = {
   id: string;
@@ -300,13 +303,14 @@ type SaleRecord = {
   clientName?: string | null;
   consumerName?: string | null;
   consumerObservation?: string | null;
+  installmentPlan?: InstallmentPaymentPlan | null;
   status?: "completed" | "canceled";
   canceledAt?: string | null;
 };
 
 type FiscalModel = "55" | "65";
 type FiscalEmissionModalTone = "pending" | "queued" | "success" | "error";
-type FiscalPrintMode = "initial" | "promissory" | "reprint";
+type FiscalPrintMode = "initial" | "reprint";
 
 type FiscalEmissionModalState = {
   tone: FiscalEmissionModalTone;
@@ -315,6 +319,7 @@ type FiscalEmissionModalState = {
   detail?: string | null;
   sale: SaleRecord;
   documentId?: string | null;
+  fiscalSerie?: number | null;
   fiscalNumber?: number | null;
   fiscalStatus?: string | null;
   fiscalProtocol?: string | null;
@@ -322,6 +327,7 @@ type FiscalEmissionModalState = {
   fiscalModel?: FiscalModel | null;
   xmlPath?: string | null;
   logPath?: string | null;
+  danfePrinted?: boolean;
 };
 
 type AgreementClient = {
@@ -377,6 +383,44 @@ type AgreementClientReceivableSummary = {
 };
 
 type AgreementReceiptStatusFilter = "pendente" | "pago";
+
+type InstallmentReceivableEntry = {
+  id: string;
+  saleId: string;
+  sale: SaleRecord;
+  entry: InstallmentPaymentEntry;
+  client: AgreementClient;
+  installmentCount: number;
+  overdue: boolean;
+};
+
+type InstallmentReceivableSummary = {
+  client: AgreementClient;
+  pendingEntries: InstallmentReceivableEntry[];
+  paidEntries: InstallmentReceivableEntry[];
+  totalOpenCents: number;
+  overdueCount: number;
+  saleCount: number;
+  lastActivityAt: string;
+};
+
+type InstallmentPaymentRequest = {
+  client: AgreementClient;
+  entries: InstallmentReceivableEntry[];
+};
+
+type InstallmentPaymentCompletionRecord = {
+  id: string;
+  clientName: string;
+  installmentCount: number;
+  saleCount: number;
+  totalCents: number;
+  paymentMethod?: ReceiptPaymentMethod | null;
+  receivedAt?: string | null;
+  sales: SaleRecord[];
+};
+
+type InstallmentReceiptStatusFilter = "pendente" | "pago";
 
 type CommandRecord = {
   id: string;
@@ -557,6 +601,7 @@ const paymentOptions: Array<{
   { id: "dinheiro", label: "Dinheiro", description: "Calcula troco antes de concluir.", icon: Banknote },
   { id: "pix", label: "Pix", description: "Recebimento por QR Code.", icon: QrCode },
   { id: "cartao", label: "Cartão", description: "Recebimento na maquininha.", icon: CreditCard },
+  { id: "parcelamento", label: "Parcelamento", description: "Divide e controla as parcelas.", icon: WalletCards },
   { id: "convenio", label: "Convênio", description: "Cliente para receber depois.", icon: HandCoins }
 ];
 
@@ -596,6 +641,7 @@ const defaultPaymentSettings: PaymentSettings = {
   dinheiro: true,
   pix: true,
   cartao: true,
+  parcelamento: false,
   convenio: false
 };
 
@@ -884,6 +930,78 @@ const receiptPreferredPrinterPatterns = ["TANCA", "POS-", "EPSON TM", "BEMATECH"
 
 function compactReceiptText(value: unknown) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function formatDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  const date = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Não informado";
+  }
+
+  return shortDateFormatter.format(date);
+}
+
+function addMonthsKeepingDay(date: Date, months: number) {
+  const nextDate = new Date(date);
+  const originalDay = nextDate.getDate();
+
+  nextDate.setMonth(nextDate.getMonth() + months);
+
+  if (nextDate.getDate() !== originalDay) {
+    nextDate.setDate(0);
+  }
+
+  return nextDate;
+}
+
+function splitCentsInInstallments(totalCents: number, installmentCount: number) {
+  const safeCount = Math.max(1, Math.floor(installmentCount));
+  const baseValue = Math.floor(totalCents / safeCount);
+  const remainder = totalCents - baseValue * safeCount;
+
+  return Array.from({ length: safeCount }, (_, index) => baseValue + (index < remainder ? 1 : 0));
+}
+
+function buildInstallmentPaymentPlan({
+  installmentCount,
+  adjustmentPercent,
+  originalTotalCents,
+  customerName,
+  observation,
+  saleDate = new Date()
+}: {
+  installmentCount: number;
+  adjustmentPercent: number;
+  originalTotalCents: number;
+  customerName?: string;
+  observation?: string;
+  saleDate?: Date;
+}): InstallmentPaymentPlan {
+  const safeInstallmentCount = Math.max(2, Math.min(12, Math.floor(installmentCount)));
+  const safeAdjustmentPercent = Math.max(-100, Math.min(100, Math.round(adjustmentPercent)));
+  const adjustmentCents = Math.round(originalTotalCents * (safeAdjustmentPercent / 100));
+  const adjustedTotalCents = Math.max(0, originalTotalCents + adjustmentCents);
+  const installmentValues = splitCentsInInstallments(adjustedTotalCents, safeInstallmentCount);
+
+  return {
+    installmentCount: safeInstallmentCount,
+    adjustmentPercent: safeAdjustmentPercent,
+    originalTotalCents,
+    adjustmentCents,
+    adjustedTotalCents,
+    customerName: compactReceiptText(customerName).slice(0, 120) || null,
+    observation: compactReceiptText(observation).slice(0, 1000) || null,
+    entries: installmentValues.map((amountCents, index) => ({
+      number: index + 1,
+      dueDate: getLocalDateKey(addMonthsKeepingDay(saleDate, index)),
+      amountCents,
+      paid: false
+    }))
+  };
 }
 
 function buildReceiptLine(label: string, value: string) {
@@ -1365,7 +1483,7 @@ function mapAgreementClient(client: ApiAgreementClient): AgreementClient {
     id: Number(client.id),
     name: client.nome || "Cliente",
     personType: client.tipo_pessoa === "juridica" ? "juridica" : "fisica",
-    fiscalData: client.tipo_pessoa === "juridica" ? asRecord(client.dados_fiscais) : null,
+    fiscalData: asRecord(client.dados_fiscais),
     active: client.ativo !== false,
     allowFrontPayment: Boolean(client.permite_pagamento_frente_caixa)
   };
@@ -1677,6 +1795,82 @@ function buildAgreementReceiptFromSale(sale: SaleRecord, client: AgreementClient
     receivedSessionId: null,
     createdAt: sale.createdAt,
     receivedAt: null
+  };
+}
+
+function getDateKeyFromValue(value?: string | null) {
+  const rawValue = String(value ?? "").trim();
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(rawValue);
+
+  if (dateOnlyMatch) {
+    return `${dateOnlyMatch[1]}-${dateOnlyMatch[2]}-${dateOnlyMatch[3]}`;
+  }
+
+  const date = new Date(rawValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return getLocalDateKey(date);
+}
+
+function getInstallmentEntryId(sale: Pick<SaleRecord, "id">, entry: Pick<InstallmentPaymentEntry, "number">) {
+  return `${sale.id}:parcela:${entry.number}`;
+}
+
+function isInstallmentEntryPaid(entry: InstallmentPaymentEntry) {
+  return Boolean(entry.paid || entry.paidAt);
+}
+
+function getInstallmentEntryPaidAt(entry: InstallmentPaymentEntry, sale: SaleRecord) {
+  if (entry.paidAt) {
+    return entry.paidAt;
+  }
+
+  return entry.paid ? sale.createdAt : null;
+}
+
+function isInstallmentEntryOverdue(entry: InstallmentPaymentEntry, todayKey = getLocalDateKey()) {
+  if (isInstallmentEntryPaid(entry)) {
+    return false;
+  }
+
+  const dueDateKey = getDateKeyFromValue(entry.dueDate);
+
+  return Boolean(dueDateKey && dueDateKey < todayKey);
+}
+
+function getSaleReceiptPaymentLabel(sale: SaleRecord) {
+  if (sale.paymentMethod === "parcelamento" && sale.installmentPlan) {
+    return `Parcelamento ${sale.installmentPlan.installmentCount}x`;
+  }
+
+  return getPaymentLabel(sale.paymentMethod);
+}
+
+function markInitialInstallmentPayment(
+  plan: InstallmentPaymentPlan | null,
+  paidAt: string,
+  sessionId: string | null | undefined
+): InstallmentPaymentPlan | null {
+  if (!plan) {
+    return null;
+  }
+
+  return {
+    ...plan,
+    entries: plan.entries.map((entry, index) =>
+      index === 0
+        ? {
+            ...entry,
+            paid: true,
+            paidAt,
+            paymentMethod: entry.paymentMethod ?? "parcelamento",
+            receivedSessionId: entry.receivedSessionId ?? sessionId ?? null
+          }
+        : entry
+    )
   };
 }
 
@@ -2022,7 +2216,7 @@ function getFirstKnownNumber(
 }
 
 function normalizePaymentMethodFromDocument(value: unknown): PaymentMethod | null {
-  return value === "dinheiro" || value === "pix" || value === "cartao" || value === "convenio"
+  return value === "dinheiro" || value === "pix" || value === "cartao" || value === "parcelamento" || value === "convenio"
     ? value
     : null;
 }
@@ -2519,6 +2713,10 @@ export function DesktopCashierFlow({
   const [agreementReceiptPaymentRequest, setAgreementReceiptPaymentRequest] =
     useState<AgreementReceiptPaymentRequest | null>(null);
   const [completedAgreementReceipt, setCompletedAgreementReceipt] = useState<AgreementReceiptCompletionRecord | null>(null);
+  const [installmentSearchQuery, setInstallmentSearchQuery] = useState("");
+  const [installmentReceiptDetailsClient, setInstallmentReceiptDetailsClient] = useState<AgreementClient | null>(null);
+  const [installmentPaymentRequest, setInstallmentPaymentRequest] = useState<InstallmentPaymentRequest | null>(null);
+  const [completedInstallmentPayment, setCompletedInstallmentPayment] = useState<InstallmentPaymentCompletionRecord | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedPickerCategoryId, setSelectedPickerCategoryId] = useState("all");
   const [catalogProducts, setCatalogProducts] = useState<Product[]>([]);
@@ -2556,6 +2754,8 @@ export function DesktopCashierFlow({
   const [selectedSaleFiscalDocuments, setSelectedSaleFiscalDocuments] = useState<FiscalDocumentRecord[]>([]);
   const [isSelectedSaleFiscalLoading, setIsSelectedSaleFiscalLoading] = useState(false);
   const [reprintingFiscalDocumentId, setReprintingFiscalDocumentId] = useState<string | null>(null);
+  const [printingSaleReceiptId, setPrintingSaleReceiptId] = useState<string | null>(null);
+  const [printingInstallmentReceiptId, setPrintingInstallmentReceiptId] = useState<string | null>(null);
   const [fiscalDocumentsRefreshToken, setFiscalDocumentsRefreshToken] = useState(0);
   const [completedSale, setCompletedSale] = useState<SaleRecord | null>(null);
   const [fiscalEmissionModal, setFiscalEmissionModal] = useState<FiscalEmissionModalState | null>(null);
@@ -2569,8 +2769,9 @@ export function DesktopCashierFlow({
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCashPaymentOpen, setIsCashPaymentOpen] = useState(false);
-  const [cashPaymentTarget, setCashPaymentTarget] = useState<"sale" | "agreement-receipt">("sale");
+  const [cashPaymentTarget, setCashPaymentTarget] = useState<"sale" | "agreement-receipt" | "installment-receipt">("sale");
   const [isAgreementPaymentOpen, setIsAgreementPaymentOpen] = useState(false);
+  const [isInstallmentPaymentOpen, setIsInstallmentPaymentOpen] = useState(false);
   const [isExpenseOpen, setIsExpenseOpen] = useState(false);
   const [expenseEditRequest, setExpenseEditRequest] = useState<CashExpenseRecord | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
@@ -2629,7 +2830,7 @@ export function DesktopCashierFlow({
     [activeAgreementClients.length, paymentSettings]
   );
   const receiptPaymentOptions = useMemo(
-    () => enabledPaymentOptions.filter((option) => option.id !== "convenio"),
+    () => enabledPaymentOptions.filter((option) => option.id !== "convenio" && option.id !== "parcelamento"),
     [enabledPaymentOptions]
   );
   const isCommandsEnabled = commandSettings.ativo;
@@ -2733,6 +2934,128 @@ export function DesktopCashierFlow({
   }, [agreementReceiptDetailsClient, agreementReceipts]);
   const agreementReceiptPaymentTotalCents =
     agreementReceiptPaymentRequest?.receipts.reduce((total, receipt) => total + receipt.totalCents, 0) ?? 0;
+  const isInstallmentPaymentEnabled = paymentSettings.parcelamento;
+  const installmentReceivableEntries = useMemo<InstallmentReceivableEntry[]>(() => {
+    const clientById = new Map(activeAgreementClients.map((client) => [client.id, client]));
+    const todayKey = getLocalDateKey();
+
+    return sales.flatMap((sale) => {
+      if (sale.paymentMethod !== "parcelamento" || !sale.installmentPlan || isSaleCanceled(sale)) {
+        return [];
+      }
+
+      const client = sale.clienteConvenioId ? clientById.get(sale.clienteConvenioId) : null;
+
+      if (!client) {
+        return [];
+      }
+
+      return sale.installmentPlan.entries.map((entry, index) => ({
+        id: getInstallmentEntryId(sale, entry.number ? entry : { ...entry, number: index + 1 }),
+        saleId: sale.id,
+        sale,
+        entry: {
+          ...entry,
+          number: entry.number || index + 1
+        },
+        client,
+        installmentCount: sale.installmentPlan?.installmentCount ?? sale.installmentPlan?.entries.length ?? 0,
+        overdue: isInstallmentEntryOverdue(entry, todayKey)
+      }));
+    });
+  }, [activeAgreementClients, sales]);
+  const pendingInstallmentEntries = useMemo(
+    () => installmentReceivableEntries.filter((entry) => !isInstallmentEntryPaid(entry.entry)),
+    [installmentReceivableEntries]
+  );
+  const installmentReceivableSummaries = useMemo<InstallmentReceivableSummary[]>(() => {
+    const summaryByClientId = new Map<number, InstallmentReceivableSummary>();
+
+    for (const receivable of installmentReceivableEntries) {
+      const existingSummary = summaryByClientId.get(receivable.client.id);
+      const isPaid = isInstallmentEntryPaid(receivable.entry);
+      const currentDate = getInstallmentEntryPaidAt(receivable.entry, receivable.sale) ?? receivable.entry.dueDate ?? receivable.sale.createdAt;
+
+      if (!existingSummary) {
+        summaryByClientId.set(receivable.client.id, {
+          client: receivable.client,
+          pendingEntries: isPaid ? [] : [receivable],
+          paidEntries: isPaid ? [receivable] : [],
+          totalOpenCents: isPaid ? 0 : receivable.entry.amountCents,
+          overdueCount: !isPaid && receivable.overdue ? 1 : 0,
+          saleCount: 1,
+          lastActivityAt: currentDate
+        });
+        continue;
+      }
+
+      if (isPaid) {
+        existingSummary.paidEntries.push(receivable);
+      } else {
+        existingSummary.pendingEntries.push(receivable);
+        existingSummary.totalOpenCents += receivable.entry.amountCents;
+        existingSummary.overdueCount += receivable.overdue ? 1 : 0;
+      }
+
+      if (new Date(currentDate).getTime() > new Date(existingSummary.lastActivityAt).getTime()) {
+        existingSummary.lastActivityAt = currentDate;
+      }
+    }
+
+    return [...summaryByClientId.values()]
+      .map((summary) => ({
+        ...summary,
+        saleCount: new Set(summary.pendingEntries.map((entry) => entry.saleId)).size
+      }))
+      .filter((summary) => summary.pendingEntries.length > 0)
+      .sort((firstSummary, secondSummary) => {
+        if (firstSummary.overdueCount !== secondSummary.overdueCount) {
+          return secondSummary.overdueCount - firstSummary.overdueCount;
+        }
+
+        const totalDifference = secondSummary.totalOpenCents - firstSummary.totalOpenCents;
+
+        if (totalDifference !== 0) {
+          return totalDifference;
+        }
+
+        return firstSummary.client.name.localeCompare(secondSummary.client.name, "pt-BR");
+      });
+  }, [installmentReceivableEntries]);
+  const filteredInstallmentReceivableSummaries = useMemo(() => {
+    const query = normalizeSearch(installmentSearchQuery);
+
+    if (!query) {
+      return installmentReceivableSummaries;
+    }
+
+    return installmentReceivableSummaries.filter((summary) =>
+      normalizeSearch(summary.client.name).includes(query)
+    );
+  }, [installmentReceivableSummaries, installmentSearchQuery]);
+  const selectedInstallmentClientEntries = useMemo(() => {
+    if (!installmentReceiptDetailsClient) {
+      return [];
+    }
+
+    return installmentReceivableEntries
+      .filter((entry) => entry.client.id === installmentReceiptDetailsClient.id)
+      .sort((firstEntry, secondEntry) => {
+        const firstPaid = isInstallmentEntryPaid(firstEntry.entry);
+        const secondPaid = isInstallmentEntryPaid(secondEntry.entry);
+
+        if (firstPaid !== secondPaid) {
+          return firstPaid ? 1 : -1;
+        }
+
+        const firstDate = getInstallmentEntryPaidAt(firstEntry.entry, firstEntry.sale) ?? firstEntry.entry.dueDate;
+        const secondDate = getInstallmentEntryPaidAt(secondEntry.entry, secondEntry.sale) ?? secondEntry.entry.dueDate;
+
+        return new Date(firstDate).getTime() - new Date(secondDate).getTime();
+      });
+  }, [installmentReceiptDetailsClient, installmentReceivableEntries]);
+  const installmentPaymentTotalCents =
+    installmentPaymentRequest?.entries.reduce((total, entry) => total + entry.entry.amountCents, 0) ?? 0;
   const sessionRecordedSales = useMemo(
     () => sales.filter((sale) => saleBelongsToSession(sale, session)),
     [sales, session]
@@ -4309,7 +4632,7 @@ export function DesktopCashierFlow({
     const config = await getActiveLocalFiscalConfig();
 
     if (!config) {
-      void printAutomaticPromissoryNoteForSale(sale);
+      void printAutomaticSupplementalReceiptForSale(sale);
       return;
     }
 
@@ -4328,7 +4651,7 @@ export function DesktopCashierFlow({
         fiscalModel: getSaleStoredFiscalModel(sale)
       });
       onSystemMessage(message);
-      void printAutomaticPromissoryNoteForSale(sale, { fiscalSettings: config });
+      void printAutomaticSupplementalReceiptForSale(sale, { fiscalSettings: config });
       return;
     }
 
@@ -4383,6 +4706,21 @@ export function DesktopCashierFlow({
     };
   }
 
+  function appendFiscalDetail(baseDetail: string | null | undefined, extraDetail: string | null | undefined) {
+    const base = compactReceiptText(baseDetail);
+    const extra = compactReceiptText(extraDetail);
+
+    if (!base) {
+      return extra || null;
+    }
+
+    if (!extra) {
+      return base;
+    }
+
+    return `${base} ${extra}`;
+  }
+
   function showFiscalEmissionResult(
     sale: SaleRecord,
     response: {
@@ -4392,7 +4730,8 @@ export function DesktopCashierFlow({
       technicalMessage?: string | null;
       data?: unknown;
       logPath?: string;
-    }
+    },
+    options: { supplementalDetail?: string | null } = {}
   ) {
     const status = String(response.status || "");
     const data = asRecord(response.data) ?? {};
@@ -4402,6 +4741,7 @@ export function DesktopCashierFlow({
     const operatorMessage = typeof data.mensagemOperador === "string" && data.mensagemOperador.trim()
       ? data.mensagemOperador
       : response.friendlyMessage;
+    const fiscalSerie = Number(data.serie);
     const fiscalNumber = Number(data.numero);
     const fiscalStatus = typeof data.xMotivo === "string" ? data.xMotivo : typeof data.cStat === "number" ? String(data.cStat) : status;
     const fiscalCode = Number(data.cStat);
@@ -4426,16 +4766,21 @@ export function DesktopCashierFlow({
         tone: "queued",
         title: `${fiscalLabel} pendente`,
         message: "Emissão pendente",
-        detail: operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+        detail: appendFiscalDetail(
+          operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+          options.supplementalDetail
+        ),
         sale,
         documentId,
+        fiscalSerie: Number.isFinite(fiscalSerie) ? fiscalSerie : null,
         fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
         fiscalModel,
         xmlPath: null,
-        logPath: response.logPath ?? null
+        logPath: response.logPath ?? null,
+        danfePrinted: false
       });
       return;
     }
@@ -4446,16 +4791,18 @@ export function DesktopCashierFlow({
           tone: "queued",
           title: `${fiscalLabel} em contingência`,
           message: "Salva em contingência",
-          detail: "Transmita quando a conexão voltar.",
+          detail: appendFiscalDetail("Transmita quando a conexão voltar.", options.supplementalDetail),
           sale,
           documentId,
+          fiscalSerie: Number.isFinite(fiscalSerie) ? fiscalSerie : null,
           fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
           fiscalStatus: "contingencia_emitida",
           fiscalProtocol: null,
           fiscalKey,
           fiscalModel,
           xmlPath: approvedXmlPath,
-          logPath: response.logPath ?? null
+          logPath: response.logPath ?? null,
+          danfePrinted: false
         });
         return;
       }
@@ -4464,16 +4811,18 @@ export function DesktopCashierFlow({
         tone: "success",
         title: `${fiscalLabel} autorizada`,
         message: approvedXmlPath ? "Autorizada pela SEFAZ" : "Autorizada sem DANFE disponível",
-        detail: null,
+        detail: options.supplementalDetail ?? null,
         sale,
         documentId,
+        fiscalSerie: Number.isFinite(fiscalSerie) ? fiscalSerie : null,
         fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
         fiscalModel,
         xmlPath: approvedXmlPath,
-        logPath: response.logPath ?? null
+        logPath: response.logPath ?? null,
+        danfePrinted: false
       });
       return;
     }
@@ -4483,19 +4832,30 @@ export function DesktopCashierFlow({
         tone: "queued",
         title: "Emissão fiscal pendente",
         message: response.friendlyMessage || "A venda foi concluída, mas a transmissão fiscal ainda não foi autorizada.",
-        detail: operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+        detail: appendFiscalDetail(
+          operatorMessage || "Abra os detalhes da venda para tentar novamente.",
+          options.supplementalDetail
+        ),
         sale,
         documentId,
+        fiscalSerie: Number.isFinite(fiscalSerie) ? fiscalSerie : null,
         fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
         fiscalStatus,
         fiscalProtocol,
         fiscalKey,
         fiscalModel,
         xmlPath: null,
-        logPath: response.logPath ?? null
+        logPath: response.logPath ?? null,
+        danfePrinted: false
       });
       return;
     }
+
+    const failureDetail = isDuplicateFiscalNumber
+      ? "A próxima numeração foi ajustada automaticamente. Tente novamente pelos detalhes da venda."
+      : fiscalStatus && fiscalStatus !== status && fiscalStatus !== operatorMessage
+        ? fiscalStatus
+        : "Abra os detalhes da venda para tentar novamente.";
 
     setFiscalEmissionModal({
       tone: "error",
@@ -4503,20 +4863,18 @@ export function DesktopCashierFlow({
       message: isDuplicateFiscalNumber
         ? "Numeração já utilizada na SEFAZ."
         : operatorMessage || `Não foi possível emitir a ${fiscalLabel}.`,
-      detail: isDuplicateFiscalNumber
-        ? "A próxima numeração foi ajustada automaticamente. Tente novamente pelos detalhes da venda."
-        : fiscalStatus && fiscalStatus !== status && fiscalStatus !== operatorMessage
-          ? fiscalStatus
-          : "Abra os detalhes da venda para tentar novamente.",
+      detail: appendFiscalDetail(failureDetail, options.supplementalDetail),
       sale,
       documentId,
+      fiscalSerie: Number.isFinite(fiscalSerie) ? fiscalSerie : null,
       fiscalNumber: Number.isFinite(fiscalNumber) ? fiscalNumber : null,
       fiscalStatus,
       fiscalProtocol,
       fiscalKey,
       fiscalModel,
       xmlPath: null,
-      logPath: response.logPath ?? null
+      logPath: response.logPath ?? null,
+      danfePrinted: false
     });
   }
 
@@ -4579,7 +4937,24 @@ export function DesktopCashierFlow({
     });
   }
 
-  async function printFiscalDocumentAfterEmission(
+  function isFiscalPrintQueuePending(response: FiscalWorkerResponse | null | undefined) {
+    const data = asRecord(response?.data) ?? {};
+    const printQueue = asRecord(data.printQueue);
+
+    return printQueue?.status === "pending_after_timeout";
+  }
+
+  function getFiscalPrintSuccessDetail(response: FiscalWorkerResponse | null | undefined, fiscalLabel: string, reprint: boolean) {
+    if (isFiscalPrintQueuePending(response)) {
+      return `DANFE ${fiscalLabel} enviada para a fila da impressora. Aguarde a impressão terminar antes de reimprimir.`;
+    }
+
+    return reprint
+      ? "DANFE reenviada para impressão."
+      : "DANFE enviada para impressão.";
+  }
+
+  async function printSupplementalReceiptAfterEmission(
     sale: SaleRecord,
     response: {
       success?: boolean;
@@ -4588,18 +4963,9 @@ export function DesktopCashierFlow({
       data?: unknown;
     },
     config: Record<string, unknown>
-  ) {
+  ): Promise<string | null> {
     const data = asRecord(response.data) ?? {};
     const xmlPath = getFiscalResponseXmlPath(response);
-
-    if (!xmlPath || fiscalPrintingLockRef.current) {
-      await printAutomaticPromissoryNoteForSale(sale, {
-        fiscalSettings: config,
-        showMessage: false
-      });
-      return;
-    }
-
     const documentId = typeof data.documentId === "string" ? data.documentId : null;
     const fiscalDocument: PromissoryFiscalDocument = {
       modelo: String(data.modelo || getSaleStoredFiscalModel(sale)),
@@ -4609,76 +4975,24 @@ export function DesktopCashierFlow({
     };
     const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(sale);
 
-    fiscalPrintingLockRef.current = true;
-    setFiscalPrintMode("initial");
-    setIsFiscalPrinting(true);
+    if (!shouldPrintPromissory) {
+      return null;
+    }
 
     try {
-      const printResponse = await callFiscalDanfePrint({
-        sale,
-        documentId,
-        xmlPath,
-        command: "imprimir-danfe",
-        config,
-        payload: {
-          fiscalStatus: response.status,
-          modelo: data.modelo || "65",
-          serie: data.serie,
-          numero: data.numero,
-          chave: data.chave,
-          tpEmis: data.tpEmis,
-          contingencia: data.contingencia === true
-        }
-      });
-      const danfeDetail = printResponse?.success
-        ? "DANFE enviada para impressão."
-        : printResponse?.friendlyMessage || "Documento fiscal emitido, mas a impressão automática da DANFE não foi concluída.";
-
-      setFiscalEmissionModal(current => current?.sale.id === sale.id
-        ? {
-            ...current,
-            detail: shouldPrintPromissory && printResponse?.success
-              ? `${danfeDetail} Imprimindo promissória.`
-              : shouldPrintPromissory
-                ? `${danfeDetail} Promissória não enviada porque a impressão fiscal não foi confirmada.`
-                : danfeDetail
-          }
-        : current);
-
-      if (!shouldPrintPromissory || !printResponse?.success) {
-        return;
-      }
-
-      setFiscalPrintMode("promissory");
-      const promissoryPrinted = await printAutomaticPromissoryNoteForSale(sale, {
-        documentKey: fiscalDocument.chave || documentId || sale.id,
+      const supplementalPrinted = await printAutomaticSupplementalReceiptForSale(sale, {
+        documentKey: fiscalDocument.chave || documentId || xmlPath || sale.id,
         fiscalDocument,
         fiscalSettings: config,
-        delayBeforePrintMs: printResponse?.success ? PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS : 0,
         showMessage: false
       });
 
-      setFiscalEmissionModal(current => current?.sale.id === sale.id
-        ? {
-            ...current,
-            detail: promissoryPrinted
-              ? `${danfeDetail} Promissória enviada para impressão.`
-              : `${danfeDetail} Não foi possível imprimir a promissória.`
-          }
-        : current);
+      return supplementalPrinted
+        ? "Promissória enviada para impressão."
+        : "Não foi possível imprimir a promissória.";
     } catch (error) {
-      setFiscalEmissionModal(current => current?.sale.id === sale.id
-        ? {
-            ...current,
-            detail: shouldPrintPromissory
-              ? "Documento fiscal emitido, mas a impressão automática da DANFE não foi confirmada. Promissória não enviada para não bagunçar a fila."
-              : "Documento fiscal emitido, mas a impressão automática da DANFE não foi concluída."
-          }
-        : current);
-    } finally {
-      fiscalPrintingLockRef.current = false;
-      setFiscalPrintMode(null);
-      setIsFiscalPrinting(false);
+      console.warn("Não foi possível imprimir o comprovante complementar da venda.", error);
+      return "Não foi possível imprimir a promissória.";
     }
   }
 
@@ -4751,22 +5065,30 @@ export function DesktopCashierFlow({
         }
       };
 
-      showFiscalEmissionResult(sale, emissionResponse);
-      void printFiscalDocumentAfterEmission(sale, emissionResponse, config);
-      if (!getFiscalResponseXmlPath(emissionResponse)) {
-        void printAutomaticPromissoryNoteForSale(sale, { fiscalSettings: config });
-      }
+      const supplementalDetail = await printSupplementalReceiptAfterEmission(sale, emissionResponse, config);
+
+      showFiscalEmissionResult(sale, emissionResponse, { supplementalDetail });
       setFiscalDocumentsRefreshToken((current) => current + 1);
       void syncPendingOutboundQueues({ showMessage: false });
     } catch (error) {
-      void printAutomaticPromissoryNoteForSale(sale);
+      const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(sale);
+      const supplementalDetail = shouldPrintPromissory
+        ? (await printAutomaticSupplementalReceiptForSale(sale, { showMessage: false })
+            ? "Promissória enviada para impressão."
+            : "Não foi possível imprimir a promissória.")
+        : null;
+
       setFiscalEmissionModal({
         tone: "error",
         title: "Falha na emissão fiscal",
         message: "A venda foi concluída, mas o PDV não conseguiu chamar o fluxo fiscal.",
-        detail: "Verifique a configuração fiscal local e tente emitir novamente pelos detalhes da venda.",
+        detail: appendFiscalDetail(
+          "Verifique a configuração fiscal local e tente emitir novamente pelos detalhes da venda.",
+          supplementalDetail
+        ),
         sale,
-        fiscalModel: getSaleStoredFiscalModel(sale)
+        fiscalModel: getSaleStoredFiscalModel(sale),
+        danfePrinted: false
       });
       setFiscalDocumentsRefreshToken((current) => current + 1);
     }
@@ -4859,8 +5181,10 @@ export function DesktopCashierFlow({
       return;
     }
 
+    const command = state.danfePrinted ? "reimprimir-danfe" : "imprimir-danfe";
+
     fiscalPrintingLockRef.current = true;
-    setFiscalPrintMode("reprint");
+    setFiscalPrintMode(state.danfePrinted ? "reprint" : "initial");
     setIsFiscalPrinting(true);
 
     try {
@@ -4868,35 +5192,25 @@ export function DesktopCashierFlow({
         sale: state.sale,
         documentId: state.documentId,
         xmlPath: state.xmlPath,
-        command: "reimprimir-danfe",
+        command,
         payload: {
           fiscalStatus: state.fiscalStatus,
-          modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale)
+          modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale),
+          serie: state.fiscalSerie ?? undefined,
+          numero: state.fiscalNumber ?? undefined,
+          chave: state.fiscalKey ?? undefined,
+          protocolo: state.fiscalProtocol ?? undefined
         }
       });
-      const shouldPrintPromissory = shouldPrintPromissoryNoteForSale(state.sale);
-      const promissoryPrinted = response?.success && shouldPrintPromissory
-        ? await printPromissoryNoteForSale(state.sale, {
-            documentKey: state.fiscalKey || state.documentId || state.sale.id,
-            fiscalDocument: {
-              modelo: state.fiscalModel ?? getSaleStoredFiscalModel(state.sale),
-              serie: null,
-              numero: state.fiscalNumber ?? null,
-              chave: state.fiscalKey ?? null
-            },
-            delayBeforePrintMs: PROMISSORY_AFTER_FISCAL_PRINT_DELAY_MS,
-            showMessage: false
-          })
-        : false;
+      const fiscalLabel = getFiscalModelLabel(state.fiscalModel ?? getSaleStoredFiscalModel(state.sale));
 
       setFiscalEmissionModal(current => current
         ? {
             ...current,
             detail: response?.success
-              ? shouldPrintPromissory && promissoryPrinted
-                ? "DANFE e promissória reenviados para impressão."
-                : "DANFE reenviado para impressão."
-              : response?.friendlyMessage || current.detail || "Não foi possível reimprimir o DANFE."
+              ? getFiscalPrintSuccessDetail(response, fiscalLabel, Boolean(state.danfePrinted))
+              : response?.friendlyMessage || current.detail || "Não foi possível imprimir o DANFE.",
+            danfePrinted: response?.success ? true : current.danfePrinted
           }
         : current);
     } catch (error) {
@@ -4966,12 +5280,14 @@ export function DesktopCashierFlow({
         : false;
 
       if (response.success) {
+        const danfeMessage = getFiscalPrintSuccessDetail(response, getFiscalModelLabel(fiscalModel), true);
+
         onSystemMessage(
           promissoryPrinted
-            ? "DANFE e promissória enviados para reimpressão."
+            ? `${danfeMessage} Promissória enviada para reimpressão.`
             : shouldPrintPromissory
-              ? "DANFE enviado para reimpressão, mas não foi possível imprimir a promissória."
-              : "DANFE enviado para reimpressão."
+              ? `${danfeMessage} Não foi possível imprimir a promissória.`
+              : danfeMessage
         );
       } else {
         onSystemMessage(
@@ -5125,12 +5441,17 @@ export function DesktopCashierFlow({
   function confirmPayment(
     method: PaymentMethod,
     agreementClient: AgreementClient | null = null,
-    agreementAdditionalData: AgreementSaleAdditionalData = {}
+    agreementAdditionalData: AgreementSaleAdditionalData = {},
+    installmentPlan: InstallmentPaymentPlan | null = null
   ) {
     const sourceCommand = commandPaymentRequest;
     const sourceItems = sourceCommand?.items ?? cartItems;
-    const sourceTotalCents = getCartTotal(sourceItems);
-    const convenioClient = method === "convenio" &&
+    const sourceOriginalTotalCents = getCartTotal(sourceItems);
+    const sourceTotalCents = method === "parcelamento" && installmentPlan
+      ? installmentPlan.adjustedTotalCents
+      : sourceOriginalTotalCents;
+    const requiresRegisteredClient = method === "convenio" || method === "parcelamento";
+    const paymentClient = requiresRegisteredClient &&
       agreementClient?.active === true &&
       activeAgreementClients.some((client) => client.id === agreementClient.id)
       ? agreementClient
@@ -5150,6 +5471,7 @@ export function DesktopCashierFlow({
       setIsPaymentOpen(false);
       setIsCashPaymentOpen(false);
       setIsAgreementPaymentOpen(false);
+      setIsInstallmentPaymentOpen(false);
       onSystemMessage(getBillingOperationMessage(billingStatusRef.current));
       return;
     }
@@ -5159,14 +5481,27 @@ export function DesktopCashierFlow({
       setIsPaymentOpen(false);
       setIsCashPaymentOpen(false);
       setIsAgreementPaymentOpen(false);
+      setIsInstallmentPaymentOpen(false);
       setView("sale");
       onSystemMessage("Comandas desativadas neste PDV.");
       return;
     }
 
-    if (method === "convenio" && !convenioClient) {
+    if (method === "convenio" && !paymentClient) {
       onSystemMessage("Selecione o cliente do convênio antes de concluir a venda.");
       setIsAgreementPaymentOpen(true);
+      return;
+    }
+
+    if (method === "parcelamento" && !paymentClient) {
+      onSystemMessage("Selecione o cliente antes de configurar as parcelas.");
+      setIsInstallmentPaymentOpen(true);
+      return;
+    }
+
+    if (method === "parcelamento" && !installmentPlan) {
+      onSystemMessage("Configure as parcelas antes de concluir a venda.");
+      setIsInstallmentPaymentOpen(true);
       return;
     }
 
@@ -5179,26 +5514,31 @@ export function DesktopCashierFlow({
       }
     }
 
+    const saleCreatedAt = new Date().toISOString();
+    const normalizedInstallmentPlan = method === "parcelamento"
+      ? markInitialInstallmentPayment(installmentPlan, saleCreatedAt, session.id)
+      : null;
     const nextSale: SaleRecord = {
       id: createId("venda"),
-      createdAt: new Date().toISOString(),
+      createdAt: saleCreatedAt,
       sessionId: session.id,
       items: sourceItems,
       paymentMethod: method,
       totalCents: sourceTotalCents,
       originCommandTitle: sourceCommand?.title ?? null,
-      clienteConvenioId: convenioClient?.id ?? null,
-      clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
-      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null,
-      clientName: convenioClient?.name ?? null,
+      clienteConvenioId: paymentClient?.id ?? null,
+      clienteConvenioTipoPessoa: paymentClient?.personType ?? null,
+      clienteConvenioDadosFiscais: paymentClient?.fiscalData ?? null,
+      clientName: paymentClient?.name ?? null,
       consumerName,
-      consumerObservation
+      consumerObservation,
+      installmentPlan: normalizedInstallmentPlan
     };
 
     setSales((currentSales) => [nextSale, ...currentSales]);
-    if (convenioClient?.allowFrontPayment) {
+    if (method === "convenio" && paymentClient?.allowFrontPayment) {
       setAgreementReceipts((currentReceipts) =>
-        mergeAgreementReceipts(currentReceipts, [buildAgreementReceiptFromSale(nextSale, convenioClient)])
+        mergeAgreementReceipts(currentReceipts, [buildAgreementReceiptFromSale(nextSale, paymentClient)])
       );
     }
     setCatalogProducts((currentProducts) =>
@@ -5224,6 +5564,7 @@ export function DesktopCashierFlow({
     }
     setIsPaymentOpen(false);
     setIsAgreementPaymentOpen(false);
+    setIsInstallmentPaymentOpen(false);
     setCompletedSale(nextSale);
     setView("sale");
     onSystemMessage("");
@@ -5232,12 +5573,13 @@ export function DesktopCashierFlow({
       sale: nextSale,
       origem: sourceCommand ? "comanda" : "caixa",
       origemComandaNome: sourceCommand?.title ?? null,
-      clienteConvenioId: convenioClient?.id ?? null,
-      clienteConvenioNome: convenioClient?.name ?? null,
-      clienteConvenioTipoPessoa: convenioClient?.personType ?? null,
-      clienteConvenioDadosFiscais: convenioClient?.fiscalData ?? null,
+      clienteConvenioId: paymentClient?.id ?? null,
+      clienteConvenioNome: paymentClient?.name ?? null,
+      clienteConvenioTipoPessoa: paymentClient?.personType ?? null,
+      clienteConvenioDadosFiscais: paymentClient?.fiscalData ?? null,
       consumerName,
-      consumerObservation
+      consumerObservation,
+      parcelamento: nextSale.installmentPlan
     });
     void openFiscalDispatchForSale(nextSale, session);
   }
@@ -5302,8 +5644,11 @@ export function DesktopCashierFlow({
     setIsCashPaymentOpen(false);
     setCashPaymentTarget("sale");
     setIsAgreementPaymentOpen(false);
+    setIsInstallmentPaymentOpen(false);
     setAgreementReceiptDetailsClient(null);
     setAgreementReceiptPaymentRequest(null);
+    setInstallmentReceiptDetailsClient(null);
+    setInstallmentPaymentRequest(null);
     setCommandPaymentRequest(null);
   }
 
@@ -5330,6 +5675,18 @@ export function DesktopCashierFlow({
 
       setIsPaymentOpen(false);
       setIsAgreementPaymentOpen(true);
+      return;
+    }
+
+    if (method === "parcelamento") {
+      if (activeAgreementClients.length === 0) {
+        onSystemMessage("Cadastre um cliente antes de usar venda parcelada.");
+        closePaymentFlow();
+        return;
+      }
+
+      setIsPaymentOpen(false);
+      setIsInstallmentPaymentOpen(true);
       return;
     }
 
@@ -5402,6 +5759,123 @@ export function DesktopCashierFlow({
     }
 
     confirmAgreementReceiptPayment(method, paymentRequest);
+  }
+
+  function confirmInstallmentPayment(
+    method: ReceiptPaymentMethod,
+    paymentRequest: InstallmentPaymentRequest | null = installmentPaymentRequest
+  ) {
+    if (!session || !paymentRequest || paymentRequest.entries.length === 0) {
+      return;
+    }
+
+    const receivedAt = new Date().toISOString();
+    const selectedIds = new Set(paymentRequest.entries.map((entry) => entry.id));
+    const selectedSaleIds = new Set(paymentRequest.entries.map((entry) => entry.saleId));
+    const updatedSales = new Map<string, SaleRecord>();
+    const nextSales = sales.map((sale) => {
+      if (!selectedSaleIds.has(sale.id) || !sale.installmentPlan) {
+        return sale;
+      }
+
+      const nextEntries = sale.installmentPlan.entries.map((entry, index) => {
+        const normalizedEntry = {
+          ...entry,
+          number: entry.number || index + 1
+        };
+        const entryId = getInstallmentEntryId(sale, normalizedEntry);
+
+        if (!selectedIds.has(entryId)) {
+          return entry;
+        }
+
+        return {
+          ...entry,
+          number: normalizedEntry.number,
+          paid: true,
+          paidAt: receivedAt,
+          paymentMethod: method,
+          receivedSessionId: session.id
+        };
+      });
+      const nextSale: SaleRecord = {
+        ...sale,
+        installmentPlan: {
+          ...sale.installmentPlan,
+          entries: nextEntries
+        }
+      };
+
+      updatedSales.set(nextSale.id, nextSale);
+
+      return nextSale;
+    });
+    const paidEntries = paymentRequest.entries.filter((entry) => selectedIds.has(entry.id));
+    const totalCents = paidEntries.reduce((total, entry) => total + entry.entry.amountCents, 0);
+    const completedSales = [...updatedSales.values()];
+
+    if (completedSales.length === 0) {
+      onSystemMessage("Nenhuma parcela foi atualizada.");
+      return;
+    }
+
+    setSales(nextSales);
+    setSelectedSale((currentSale) => currentSale ? updatedSales.get(currentSale.id) ?? currentSale : currentSale);
+    setInstallmentReceiptDetailsClient(null);
+    setInstallmentPaymentRequest(null);
+    setIsCashPaymentOpen(false);
+    setCashPaymentTarget("sale");
+    setView("sale");
+    setCompletedInstallmentPayment({
+      id: createId("parcelamento-recebido"),
+      clientName: paymentRequest.client.name,
+      installmentCount: paidEntries.length,
+      saleCount: new Set(paidEntries.map((entry) => entry.saleId)).size,
+      totalCents,
+      paymentMethod: method,
+      receivedAt,
+      sales: completedSales
+    });
+    onSystemMessage("");
+
+    completedSales.forEach((updatedSale) => {
+      enqueueLocalEvent("parcelamento_recebido", "venda", updatedSale.id, {
+        session,
+        sale: updatedSale,
+        parcelamento: updatedSale.installmentPlan,
+        paymentMethod: method,
+        receivedAt,
+        entries: paidEntries
+          .filter((entry) => entry.saleId === updatedSale.id)
+          .map((entry) => ({
+            ...entry.entry,
+            paid: true,
+            paidAt: receivedAt,
+            paymentMethod: method,
+            receivedSessionId: session.id
+          }))
+      });
+    });
+  }
+
+  function requestInstallmentPayment(
+    method: ReceiptPaymentMethod,
+    entries: InstallmentReceivableEntry[],
+    client: AgreementClient
+  ) {
+    const paymentRequest: InstallmentPaymentRequest = {
+      client,
+      entries
+    };
+
+    if (method === "dinheiro") {
+      setInstallmentPaymentRequest(paymentRequest);
+      setCashPaymentTarget("installment-receipt");
+      setIsCashPaymentOpen(true);
+      return;
+    }
+
+    confirmInstallmentPayment(method, paymentRequest);
   }
 
   function requestEmployeeAuth(mode: EmployeeAuthMode) {
@@ -5555,6 +6029,75 @@ export function DesktopCashierFlow({
     return sale.paymentMethod === "convenio" && !isSaleCanceled(sale);
   }
 
+  function canPrintStoreReceiptForSale(sale: SaleRecord) {
+    return (!isFiscalEmissionEnabled || sale.paymentMethod === "parcelamento") && !isSaleCanceled(sale);
+  }
+
+  async function printStoreReceiptForSale(
+    sale: SaleRecord,
+    options: {
+      documentKey?: string | null;
+      fiscalSettings?: Record<string, unknown> | null;
+      showMessage?: boolean;
+    } = {}
+  ) {
+    if (!canPrintStoreReceiptForSale(sale)) {
+      return false;
+    }
+
+    const store = getLocalPdvStore();
+    const printStoreReceipt = store?.printPromissoryNote ?? store?.printShiftSummary;
+
+    if (!printStoreReceipt) {
+      if (options.showMessage !== false) {
+        onSystemMessage("Impressão do comprovante disponível apenas no app desktop.");
+      }
+
+      return false;
+    }
+
+    let receiptFiscalSettings = options.fiscalSettings ?? accountFiscalSettings;
+
+    if (!receiptFiscalSettings && store?.getFiscalConfig) {
+      try {
+        receiptFiscalSettings = asRecord(await store.getFiscalConfig({ scope: localStoreScope })) ?? null;
+
+        if (receiptFiscalSettings) {
+          setAccountFiscalSettings(receiptFiscalSettings);
+        }
+      } catch (error) {
+        console.warn("Não foi possível carregar os dados fiscais locais para o comprovante.", error);
+      }
+    }
+
+    const printerName = await getShiftSummaryPrinterName();
+    const payload = buildSaleReceiptPayload({
+      fiscalSettings: receiptFiscalSettings,
+      paymentLabel: getSaleReceiptPaymentLabel(sale),
+      pdvIdentity,
+      printerName,
+      sale,
+      sellerName: isEmployeeControlEnabled ? session?.openedByEmployeeName ?? null : null
+    });
+
+    try {
+      await printStoreReceipt({
+        documentKey: options.documentKey || sale.id,
+        payload
+      });
+
+      return true;
+    } catch (error) {
+      console.warn("Não foi possível imprimir o comprovante de venda.", error);
+
+      if (options.showMessage !== false) {
+        onSystemMessage("Não foi possível imprimir o comprovante de venda.");
+      }
+
+      return false;
+    }
+  }
+
   async function printPromissoryNoteForSale(
     sale: SaleRecord,
     options: {
@@ -5653,6 +6196,108 @@ export function DesktopCashierFlow({
     }
 
     return printed;
+  }
+
+  async function printAutomaticSupplementalReceiptForSale(
+    sale: SaleRecord,
+    options: {
+      documentKey?: string | null;
+      fiscalDocument?: PromissoryFiscalDocument | null;
+      fiscalSettings?: Record<string, unknown> | null;
+      delayBeforePrintMs?: number;
+      showMessage?: boolean;
+    } = {}
+  ) {
+    return printAutomaticPromissoryNoteForSale(sale, options);
+  }
+
+  async function printCompletedSaleReceipt(sale: SaleRecord) {
+    if (printingSaleReceiptId) {
+      return;
+    }
+
+    setPrintingSaleReceiptId(sale.id);
+
+    try {
+      const printed = await printStoreReceiptForSale(sale, { showMessage: false });
+
+      if (printed) {
+        onSystemMessage("Comprovante de venda enviado para impressão.");
+        setCompletedSale(null);
+        return;
+      }
+
+      onSystemMessage("Não foi possível imprimir o comprovante de venda.");
+    } finally {
+      setPrintingSaleReceiptId(null);
+    }
+  }
+
+  async function printCompletedInstallmentPaymentReceipt(payment: InstallmentPaymentCompletionRecord) {
+    if (printingInstallmentReceiptId) {
+      return;
+    }
+
+    setPrintingInstallmentReceiptId(payment.id);
+
+    try {
+      let printedCount = 0;
+
+      for (const sale of payment.sales) {
+        const printed = await printStoreReceiptForSale(sale, {
+          documentKey: `${sale.id}-parcelamento-recebido-${payment.receivedAt ?? payment.id}`,
+          showMessage: false
+        });
+
+        printedCount += printed ? 1 : 0;
+      }
+
+      if (printedCount > 0) {
+        onSystemMessage(
+          printedCount === 1
+            ? "Comprovante atualizado enviado para impressão."
+            : "Comprovantes atualizados enviados para impressão."
+        );
+        setCompletedInstallmentPayment(null);
+        return;
+      }
+
+      onSystemMessage("Não foi possível imprimir o comprovante atualizado.");
+    } finally {
+      setPrintingInstallmentReceiptId(null);
+    }
+  }
+
+  async function reprintStoreReceiptFromDetails(sale: SaleRecord) {
+    if (printingSaleReceiptId) {
+      return;
+    }
+
+    if (!canPrintStoreReceiptForSale(sale)) {
+      onSystemMessage(
+        isFiscalEmissionEnabled
+          ? "Use o documento fiscal para reimprimir vendas com emissão fiscal ativa."
+          : "Comprovante indisponível para venda cancelada."
+      );
+      return;
+    }
+
+    setPrintingSaleReceiptId(sale.id);
+
+    try {
+      const printed = await printStoreReceiptForSale(sale, {
+        documentKey: `${sale.id}-reimpressao`,
+        showMessage: false
+      });
+
+      onSystemMessage(
+        printed
+          ? "Comprovante de venda enviado para reimpressão."
+          : "Não foi possível reimprimir o comprovante de venda."
+      );
+    } finally {
+      setPrintingSaleReceiptId(null);
+    }
   }
 
   async function runShiftSummaryPrint(
@@ -5857,7 +6502,10 @@ export function DesktopCashierFlow({
       .getFiscalConfig({ scope: localStoreScope })
       .then((config) => {
         if (!shouldIgnore) {
-          setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(asRecord(config)));
+          const localFiscalSettings = asRecord(config);
+
+          setAccountFiscalSettings(localFiscalSettings ?? null);
+          setIsFiscalEmissionEnabled(isFiscalEmissionActiveConfig(localFiscalSettings));
         }
       })
       .catch(() => {
@@ -6019,18 +6667,22 @@ export function DesktopCashierFlow({
       isPaymentOpen ||
       isCashPaymentOpen ||
       isAgreementPaymentOpen ||
+      isInstallmentPaymentOpen ||
       isExpenseOpen ||
       isClosingSession ||
       isSettingsOpen ||
       isProductPickerOpen ||
       agreementReceiptDetailsClient ||
       agreementReceiptPaymentRequest ||
+      installmentReceiptDetailsClient ||
+      installmentPaymentRequest ||
       commandNameRequest ||
       commandDeleteRequest ||
       commandPaymentRequest ||
       selectedSale ||
       completedSale ||
       completedAgreementReceipt ||
+      completedInstallmentPayment ||
       shiftSummaryPrintModal ||
       saleCancelRequest
     ) {
@@ -6042,7 +6694,8 @@ export function DesktopCashierFlow({
       F1: "history",
       ...(isCommandsEnabled ? { F2: "commands" as const } : {}),
       ...(isAgreementPaymentEnabled && frontCashAgreementClients.length > 0 ? { F3: "agreement" as const } : {}),
-      ...(isExpensesEnabled ? { F4: "expenses" as const } : {})
+      ...(isExpensesEnabled ? { F4: "expenses" as const } : {}),
+      ...(isInstallmentPaymentEnabled ? { F5: "installments" as const } : {})
     };
 
     const handleFunctionShortcut = (event: KeyboardEvent) => {
@@ -6059,6 +6712,11 @@ export function DesktopCashierFlow({
       }
 
       if (event.key === "F4" && !isExpensesEnabled) {
+        event.preventDefault();
+        return;
+      }
+
+      if (event.key === "F5" && !isInstallmentPaymentEnabled) {
         event.preventDefault();
         return;
       }
@@ -6086,24 +6744,29 @@ export function DesktopCashierFlow({
     isPaymentOpen,
     isCashPaymentOpen,
     isAgreementPaymentOpen,
+    isInstallmentPaymentOpen,
     isExpenseOpen,
     isClosingSession,
     isSettingsOpen,
     isProductPickerOpen,
     agreementReceiptDetailsClient,
     agreementReceiptPaymentRequest,
+    installmentReceiptDetailsClient,
+    installmentPaymentRequest,
     commandNameRequest,
     commandDeleteRequest,
     commandPaymentRequest,
     selectedSale,
     completedSale,
     completedAgreementReceipt,
+    completedInstallmentPayment,
     shiftSummaryPrintModal,
     saleCancelRequest,
     frontCashAgreementClients.length,
     isCommandsEnabled,
     isExpensesEnabled,
     isAgreementPaymentEnabled,
+    isInstallmentPaymentEnabled,
     onSystemMessage
   ]);
 
@@ -6114,18 +6777,22 @@ export function DesktopCashierFlow({
       isPaymentOpen ||
       isCashPaymentOpen ||
       isAgreementPaymentOpen ||
+      isInstallmentPaymentOpen ||
       isExpenseOpen ||
       isClosingSession ||
       isSettingsOpen ||
       isProductPickerOpen ||
       agreementReceiptDetailsClient ||
       agreementReceiptPaymentRequest ||
+      installmentReceiptDetailsClient ||
+      installmentPaymentRequest ||
       commandNameRequest ||
       commandDeleteRequest ||
       commandPaymentRequest ||
       selectedSale ||
       completedSale ||
       completedAgreementReceipt ||
+      completedInstallmentPayment ||
       shiftSummaryPrintModal ||
       saleCancelRequest
     ) {
@@ -6165,18 +6832,22 @@ export function DesktopCashierFlow({
     isPaymentOpen,
     isCashPaymentOpen,
     isAgreementPaymentOpen,
+    isInstallmentPaymentOpen,
     isExpenseOpen,
     isClosingSession,
     isSettingsOpen,
     isProductPickerOpen,
     agreementReceiptDetailsClient,
     agreementReceiptPaymentRequest,
+    installmentReceiptDetailsClient,
+    installmentPaymentRequest,
     commandNameRequest,
     commandDeleteRequest,
     commandPaymentRequest,
     selectedSale,
     completedSale,
     completedAgreementReceipt,
+    completedInstallmentPayment,
     shiftSummaryPrintModal,
     saleCancelRequest,
     openProductPicker
@@ -7059,6 +7730,98 @@ export function DesktopCashierFlow({
     );
   }
 
+  function renderInstallments() {
+    const hasInstallmentReceivables = installmentReceivableSummaries.length > 0;
+    const hasInstallmentSearchResults = filteredInstallmentReceivableSummaries.length > 0;
+
+    return (
+      <section className="pdv-work-card pdv-sale-work-card pdv-command-list-card" aria-labelledby="pdv-installments-title">
+        <header className="pdv-work-head">
+          <div>
+            <h1 id="pdv-installments-title">Receber parcelas</h1>
+            <p>Clientes com parcelas em aberto no caixa.</p>
+          </div>
+          <span className="pdv-work-chip">{pendingInstallmentEntries.length} pendentes</span>
+        </header>
+
+        {hasInstallmentReceivables ? (
+          <label className="pdv-agreement-search pdv-agreement-page-search">
+            <Search aria-hidden="true" size={20} />
+            <input
+              value={installmentSearchQuery}
+              onChange={(event) => setInstallmentSearchQuery(event.target.value)}
+              placeholder="Buscar cliente"
+            />
+          </label>
+        ) : null}
+
+        {hasInstallmentSearchResults ? (
+          <div className="pdv-command-board pdv-agreement-client-board" aria-label="Clientes com parcelas em aberto">
+            {filteredInstallmentReceivableSummaries.map((summary) => (
+              <button
+                className="pdv-command-line pdv-agreement-line pdv-installment-line"
+                key={summary.client.id}
+                type="button"
+                onClick={() => setInstallmentReceiptDetailsClient(summary.client)}
+              >
+                <span className="pdv-record-icon">
+                  <AgreementClientIcon client={summary.client} />
+                </span>
+                <span className="pdv-record-copy">
+                  <strong>{summary.client.name}</strong>
+                  <em className="pdv-sale-item-meta">
+                    <span>
+                      {summary.pendingEntries.length}{" "}
+                      {summary.pendingEntries.length === 1 ? "parcela em aberto" : "parcelas em aberto"}
+                    </span>
+                    <span>
+                      {summary.saleCount} {summary.saleCount === 1 ? "venda em aberto" : "vendas em aberto"}
+                    </span>
+                    {summary.overdueCount > 0 ? (
+                      <span className="pdv-installment-overdue-text">
+                        {summary.overdueCount} {summary.overdueCount === 1 ? "parcela em atraso" : "parcelas em atraso"}
+                      </span>
+                    ) : null}
+                  </em>
+                </span>
+                <span className="pdv-command-line-total">
+                  <em>Total em aberto</em>
+                  <strong>{formatCurrency(summary.totalOpenCents)}</strong>
+                </span>
+                <span className="pdv-command-line-actions pdv-agreement-line-action">
+                  <span>Receber</span>
+                  <ArrowRight aria-hidden="true" size={18} />
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <section className="pdv-sale-board pdv-command-empty-board" aria-label="Nenhuma parcela pendente">
+            <div className="pdv-empty-sale">
+              <span className="pdv-empty-sale-icon" aria-hidden="true">
+                <WalletCards size={42} strokeWidth={1.9} />
+                <span className="pdv-empty-sale-zero">0</span>
+              </span>
+              <strong>{hasInstallmentReceivables ? "Nenhum cliente encontrado" : "Nenhuma parcela pendente"}</strong>
+              <span>
+                {hasInstallmentReceivables
+                  ? "Ajuste a busca para localizar o cliente."
+                  : "Parcelas em aberto aparecerão aqui."}
+              </span>
+            </div>
+          </section>
+        )}
+
+        <div className="pdv-work-actions">
+          <button className="pdv-secondary-action" type="button" onClick={() => setView("sale")}>
+            <ArrowLeft aria-hidden="true" size={17} />
+            Voltar
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   function renderExpenses() {
     return (
       <section className="pdv-work-card pdv-sale-work-card pdv-command-list-card pdv-expense-list-card" aria-labelledby="pdv-expenses-title">
@@ -7140,6 +7903,10 @@ export function DesktopCashierFlow({
     navItems.push({ view: "agreement", label: "Receber Convênios", shortcut: "F3" });
   }
 
+  if (isInstallmentPaymentEnabled) {
+    navItems.push({ view: "installments", label: "Receber parcelas", shortcut: "F5" });
+  }
+
   if (isExpensesEnabled) {
     navItems.push({ view: "expenses", label: "Despesas", shortcut: "F4" });
   }
@@ -7150,6 +7917,10 @@ export function DesktopCashierFlow({
         ? "sale"
         : "menu"
       : !isExpensesEnabled && view === "expenses"
+        ? session
+          ? "sale"
+          : "menu"
+      : !isInstallmentPaymentEnabled && view === "installments"
         ? session
           ? "sale"
           : "menu"
@@ -7171,11 +7942,13 @@ export function DesktopCashierFlow({
               : "Criar comanda"
             : activeView === "agreement"
             ? "Receber convênios"
-            : activeView === "expenses"
-              ? "Despesas"
-              : activeView === "history"
-                ? "Vendas"
-                : "Caixa";
+            : activeView === "installments"
+              ? "Receber parcelas"
+              : activeView === "expenses"
+                ? "Despesas"
+                : activeView === "history"
+                  ? "Vendas"
+                  : "Caixa";
   const SectionIcon =
     activeView === "sale"
       ? ShoppingCart
@@ -7183,15 +7956,17 @@ export function DesktopCashierFlow({
         ? ReceiptText
         : activeView === "agreement"
           ? HandCoins
-          : activeView === "expenses"
+          : activeView === "installments"
             ? WalletCards
-            : activeView === "history"
-              ? History
-              : Store;
+            : activeView === "expenses"
+              ? WalletCards
+              : activeView === "history"
+                ? History
+                : Store;
   const isWideShell = session && activeView !== "menu";
   const isScrollableShell =
     session &&
-    ["sale", "commands", "command-editor", "agreement", "expenses", "history"].includes(activeView);
+    ["sale", "commands", "command-editor", "agreement", "installments", "expenses", "history"].includes(activeView);
   const shellClassName = [
     "pdv-cashier-shell",
     isWideShell ? "pdv-cashier-shell-wide" : "",
@@ -7323,6 +8098,7 @@ export function DesktopCashierFlow({
           {isCommandsEnabled && activeView === "commands" ? renderCommands() : null}
           {isCommandsEnabled && activeView === "command-editor" ? renderCommandEditor() : null}
           {activeView === "agreement" ? renderAgreement() : null}
+          {isInstallmentPaymentEnabled && activeView === "installments" ? renderInstallments() : null}
           {isExpensesEnabled && activeView === "expenses" ? renderExpenses() : null}
           {activeView === "history" ? renderHistory() : null}
 
@@ -7362,22 +8138,48 @@ export function DesktopCashierFlow({
         ) : null}
         {isCashPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
           <CashPaymentModal
-            confirmLabel={cashPaymentTarget === "agreement-receipt" ? "Confirmar recebimento" : "Confirmar venda"}
-            title={cashPaymentTarget === "agreement-receipt" ? "Receber convênio" : "Receber em dinheiro"}
-            totalCents={cashPaymentTarget === "agreement-receipt" ? agreementReceiptPaymentTotalCents : paymentTotalCents}
-            totalLabel={cashPaymentTarget === "agreement-receipt" ? "Total do convênio" : "Total da venda"}
+            confirmLabel={cashPaymentTarget === "sale" ? "Confirmar venda" : "Confirmar recebimento"}
+            title={
+              cashPaymentTarget === "agreement-receipt"
+                ? "Receber convênio"
+                : cashPaymentTarget === "installment-receipt"
+                  ? "Receber parcela"
+                  : "Receber em dinheiro"
+            }
+            totalCents={
+              cashPaymentTarget === "agreement-receipt"
+                ? agreementReceiptPaymentTotalCents
+                : cashPaymentTarget === "installment-receipt"
+                  ? installmentPaymentTotalCents
+                  : paymentTotalCents
+            }
+            totalLabel={
+              cashPaymentTarget === "agreement-receipt"
+                ? "Total do convênio"
+                : cashPaymentTarget === "installment-receipt"
+                  ? "Total das parcelas"
+                  : "Total da venda"
+            }
             onClose={() => {
               setIsCashPaymentOpen(false);
               if (cashPaymentTarget === "sale") {
                 setIsPaymentOpen(true);
-              } else {
+              } else if (cashPaymentTarget === "agreement-receipt") {
                 setCashPaymentTarget("sale");
                 setAgreementReceiptPaymentRequest(null);
+              } else {
+                setCashPaymentTarget("sale");
+                setInstallmentPaymentRequest(null);
               }
             }}
             onConfirm={() => {
               if (cashPaymentTarget === "agreement-receipt") {
                 confirmAgreementReceiptPayment("dinheiro");
+                return;
+              }
+
+              if (cashPaymentTarget === "installment-receipt") {
+                confirmInstallmentPayment("dinheiro");
                 return;
               }
 
@@ -7399,6 +8201,18 @@ export function DesktopCashierFlow({
             onConfirm={(client, additionalData) => confirmPayment("convenio", client, additionalData)}
           />
         ) : null}
+        {isInstallmentPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
+          <InstallmentPaymentModal
+            clients={activeAgreementClients}
+            originalTotalCents={paymentTotalCents}
+            onBack={() => {
+              setIsInstallmentPaymentOpen(false);
+              setIsPaymentOpen(true);
+            }}
+            onClose={closePaymentFlow}
+            onConfirm={(client, installmentPlan) => confirmPayment("parcelamento", client, {}, installmentPlan)}
+          />
+        ) : null}
         {agreementReceiptDetailsClient && !isCashPaymentOpen ? (
           <AgreementReceiptPaymentModal
             client={agreementReceiptDetailsClient}
@@ -7409,6 +8223,21 @@ export function DesktopCashierFlow({
               setAgreementReceiptPaymentRequest(null);
             }}
             onConfirm={requestAgreementReceiptPayment}
+          />
+        ) : null}
+        {installmentReceiptDetailsClient && !isCashPaymentOpen ? (
+          <InstallmentReceiptPaymentModal
+            client={installmentReceiptDetailsClient}
+            entries={selectedInstallmentClientEntries}
+            options={receiptPaymentOptions}
+            onClose={() => {
+              setInstallmentReceiptDetailsClient(null);
+              setInstallmentPaymentRequest(null);
+            }}
+            onConfirm={requestInstallmentPayment}
+            onOpenSaleDetails={(sale) => {
+              setSelectedSale(sale);
+            }}
           />
         ) : null}
         {isExpensesEnabled && isExpenseOpen ? (
@@ -7483,12 +8312,14 @@ export function DesktopCashierFlow({
             isFiscalEmissionEnabled={isFiscalEmissionEnabled}
             isFiscalLoading={isSelectedSaleFiscalLoading}
             reprintingFiscalDocumentId={reprintingFiscalDocumentId}
+            printingSaleReceiptId={printingSaleReceiptId}
             sale={selectedSale}
             saleDisplayTitle={getSaleOrdinalTitle(selectedSale, sessionRecordedSales)}
             onCancelRequest={requestCancelSale}
             onClose={() => setSelectedSale(null)}
             onReprintFiscal={reprintFiscalDocumentFromDetails}
             onReprintPromissory={reprintPromissoryNoteFromDetails}
+            onReprintStoreReceipt={reprintStoreReceiptFromDetails}
             onRetryFiscal={(sale) => {
               if (!session) {
                 onSystemMessage("Abra o caixa antes de tentar emitir o documento fiscal.");
@@ -7510,7 +8341,15 @@ export function DesktopCashierFlow({
             onConfirm={confirmCancelSale}
           />
         ) : null}
-        {completedSale ? <SaleSuccessModal sale={completedSale} onClose={() => setCompletedSale(null)} /> : null}
+        {completedSale ? (
+          <SaleSuccessModal
+            canPrintReceipt={canPrintStoreReceiptForSale(completedSale)}
+            isPrintingReceipt={printingSaleReceiptId === completedSale.id}
+            sale={completedSale}
+            onClose={() => setCompletedSale(null)}
+            onPrintReceipt={() => printCompletedSaleReceipt(completedSale)}
+          />
+        ) : null}
         {fiscalEmissionModal ? (
           <FiscalEmissionModal
             isPrinting={isFiscalPrinting}
@@ -7532,6 +8371,14 @@ export function DesktopCashierFlow({
           <AgreementReceiptSuccessModal
             receipt={completedAgreementReceipt}
             onClose={() => setCompletedAgreementReceipt(null)}
+          />
+        ) : null}
+        {completedInstallmentPayment ? (
+          <InstallmentPaymentSuccessModal
+            isPrintingReceipt={printingInstallmentReceiptId === completedInstallmentPayment.id}
+            payment={completedInstallmentPayment}
+            onClose={() => setCompletedInstallmentPayment(null)}
+            onPrintReceipt={() => printCompletedInstallmentPaymentReceipt(completedInstallmentPayment)}
           />
         ) : null}
 
@@ -9039,6 +9886,8 @@ function PaymentModal({
               <Banknote aria-hidden="true" size={17} />
             ) : selectedMethod === "convenio" ? (
               <SelectedIcon aria-hidden="true" size={17} />
+            ) : selectedMethod === "parcelamento" ? (
+              <WalletCards aria-hidden="true" size={17} />
             ) : selectedMethod ? (
               <Check aria-hidden="true" size={17} />
             ) : (
@@ -9048,9 +9897,11 @@ function PaymentModal({
               ? "Informar valor"
               : selectedMethod === "convenio"
                 ? "Buscar cliente"
-                : selectedMethod
-                  ? "Confirmar venda"
-                  : "Escolha o pagamento"}
+                : selectedMethod === "parcelamento"
+                  ? "Configurar parcelas"
+                  : selectedMethod
+                    ? "Confirmar venda"
+                    : "Escolha o pagamento"}
           </button>
         </>
       }
@@ -9212,6 +10063,304 @@ function CashPaymentModal({
           <strong>{balanceDisplay}</strong>
         </div>
       </form>
+    </CashierModal>
+  );
+}
+
+function InstallmentPaymentModal({
+  clients,
+  originalTotalCents,
+  onBack,
+  onClose,
+  onConfirm
+}: {
+  clients: AgreementClient[];
+  originalTotalCents: number;
+  onBack: () => void;
+  onClose: () => void;
+  onConfirm: (client: AgreementClient, installmentPlan: InstallmentPaymentPlan) => void;
+}) {
+  const [step, setStep] = useState<"client" | "terms">("client");
+  const [query, setQuery] = useState("");
+  const [selectedClient, setSelectedClient] = useState<AgreementClient | null>(null);
+  const [installmentCount, setInstallmentCount] = useState(2);
+  const [adjustmentPercent, setAdjustmentPercent] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const filteredClients = useMemo(() => {
+    const normalizedQuery = normalizeSearch(query);
+
+    if (!normalizedQuery) {
+      return clients;
+    }
+
+    return clients.filter((client) => normalizeSearch(client.name).includes(normalizedQuery));
+  }, [clients, query]);
+  const [activeClientId, setActiveClientId] = useState<number | null>(filteredClients[0]?.id ?? null);
+  const activeClient = filteredClients.find((client) => client.id === activeClientId) ?? filteredClients[0] ?? null;
+  const installmentSelectOptions = useMemo<PdvPlatformSelectOption[]>(
+    () => Array.from({ length: 11 }, (_, index) => {
+      const option = index + 2;
+
+      return {
+        value: String(option),
+        label: `${option}x`
+      };
+    }),
+    []
+  );
+  const installmentPlan = useMemo(
+    () => buildInstallmentPaymentPlan({
+      installmentCount,
+      adjustmentPercent,
+      originalTotalCents
+    }),
+    [adjustmentPercent, installmentCount, originalTotalCents]
+  );
+  const adjustmentTone = installmentPlan.adjustmentCents > 0
+    ? "Juros"
+    : installmentPlan.adjustmentCents < 0
+      ? "Desconto"
+      : "Ajuste";
+  const adjustmentPosition = `${(adjustmentPercent + 100) / 2}%`;
+
+  useEffect(() => {
+    if (step === "client") {
+      inputRef.current?.focus();
+    }
+  }, [step]);
+
+  useEffect(() => {
+    setActiveClientId(filteredClients[0]?.id ?? null);
+  }, [filteredClients]);
+
+  function handleClientSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!selectedClient) {
+      return;
+    }
+
+    setStep("terms");
+  }
+
+  function handleTermsSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!selectedClient) {
+      setStep("client");
+      return;
+    }
+
+    onConfirm(selectedClient, installmentPlan);
+  }
+
+  return (
+    <CashierModal
+      title={step === "client" ? "Cliente" : "Parcelamento"}
+      description={step === "client" ? "Selecione quem assumiu a venda parcelada." : "Defina parcelas e ajuste da venda."}
+      className="pdv-installment-modal"
+      size="md"
+      onClose={onClose}
+      footer={
+        <>
+          <button
+            className="pdv-secondary-action"
+            type="button"
+            onClick={step === "client" ? onBack : () => setStep("client")}
+          >
+            <ArrowLeft aria-hidden="true" size={17} />
+            Voltar
+          </button>
+          {step === "client" ? (
+            <button
+              className="pdv-confirm-action"
+              type="submit"
+              form="pdv-installment-client-form"
+              disabled={!selectedClient}
+            >
+              Próximo
+              <ArrowRight aria-hidden="true" size={17} />
+            </button>
+          ) : (
+            <button
+              className="pdv-confirm-action"
+              type="submit"
+              form="pdv-installment-terms-form"
+            >
+              <Check aria-hidden="true" size={17} />
+              Finalizar venda
+            </button>
+          )}
+        </>
+      }
+    >
+      {step === "client" ? (
+        <form className="pdv-installment-payment" id="pdv-installment-client-form" onSubmit={handleClientSubmit}>
+          <div className="pdv-installment-total">
+            <span>
+              <ReceiptText aria-hidden="true" size={18} />
+              Total parcelado
+            </span>
+            <strong>{formatCurrency(originalTotalCents)}</strong>
+          </div>
+
+          <label className="pdv-agreement-search">
+            <Search aria-hidden="true" size={19} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && activeClient) {
+                  event.preventDefault();
+                  setSelectedClient(activeClient);
+                  setStep("terms");
+                  return;
+                }
+
+                if (event.key === "ArrowDown" && filteredClients.length > 0) {
+                  event.preventDefault();
+                  const currentIndex = Math.max(0, filteredClients.findIndex((client) => client.id === activeClientId));
+                  const nextClient = filteredClients[Math.min(filteredClients.length - 1, currentIndex + 1)];
+                  setActiveClientId(nextClient.id);
+                  return;
+                }
+
+                if (event.key === "ArrowUp" && filteredClients.length > 0) {
+                  event.preventDefault();
+                  const currentIndex = Math.max(0, filteredClients.findIndex((client) => client.id === activeClientId));
+                  const nextClient = filteredClients[Math.max(0, currentIndex - 1)];
+                  setActiveClientId(nextClient.id);
+                }
+              }}
+              placeholder="Buscar cliente"
+              type="search"
+            />
+          </label>
+
+          <div className="pdv-agreement-client-list" aria-label="Clientes">
+            {filteredClients.map((client) => (
+              <button
+                className={
+                  client.id === activeClient?.id || client.id === selectedClient?.id
+                    ? "pdv-agreement-client-row pdv-agreement-client-row-active"
+                    : "pdv-agreement-client-row"
+                }
+                key={client.id}
+                type="button"
+                onPointerEnter={() => setActiveClientId(client.id)}
+                onClick={() => {
+                  setSelectedClient(client);
+                  setStep("terms");
+                }}
+              >
+                <span className="pdv-record-icon">
+                  <AgreementClientIcon client={client} />
+                </span>
+                <span className="pdv-record-copy">
+                  <strong>{client.name}</strong>
+                  <em>{getAgreementClientTypeLabel(client)}</em>
+                </span>
+                <ArrowRight aria-hidden="true" size={18} />
+              </button>
+            ))}
+
+            {filteredClients.length === 0 ? (
+              <div className="pdv-empty-state">
+                <Search aria-hidden="true" size={22} />
+                <strong>Nenhum cliente encontrado</strong>
+              </div>
+            ) : null}
+          </div>
+        </form>
+      ) : (
+        <form className="pdv-installment-payment" id="pdv-installment-terms-form" onSubmit={handleTermsSubmit}>
+          {selectedClient ? (
+            <section className="pdv-agreement-summary" aria-label="Cliente selecionado">
+              <span className="pdv-agreement-summary-label">Cliente selecionado</span>
+              <div className="pdv-agreement-summary-client">
+                <span className="pdv-record-icon">
+                  <AgreementClientIcon client={selectedClient} />
+                </span>
+                <span className="pdv-record-copy">
+                  <strong>{selectedClient.name}</strong>
+                  <em>{getAgreementClientTypeLabel(selectedClient)}</em>
+                </span>
+              </div>
+            </section>
+          ) : null}
+
+          <div className="pdv-installment-total">
+            <span>
+              <WalletCards aria-hidden="true" size={18} />
+              Valor original
+            </span>
+            <strong>{formatCurrency(originalTotalCents)}</strong>
+          </div>
+
+          <div className="pdv-installment-select">
+            <span>Parcelas</span>
+            <PdvPlatformSelect
+              ariaLabel="Selecionar quantidade de parcelas"
+              options={installmentSelectOptions}
+              placeholder="Selecione"
+              value={String(installmentCount)}
+              onChange={(value) => setInstallmentCount(Number(value))}
+            />
+          </div>
+
+          <div className="pdv-installment-preview" aria-label="Resumo das parcelas">
+            {installmentPlan.entries.map((entry) => (
+              <span key={entry.number}>
+                <strong>{entry.number}x</strong>
+                <em>{formatDateOnly(entry.dueDate)}</em>
+                <b>{formatCurrency(entry.amountCents)}</b>
+              </span>
+            ))}
+          </div>
+
+          <div
+            className="pdv-installment-range"
+            style={{ "--pdv-installment-adjustment-position": adjustmentPosition } as CSSProperties}
+          >
+            <span className="pdv-installment-range-head">
+              <strong>Desconto ou juros</strong>
+              <em>{adjustmentPercent > 0 ? `+${adjustmentPercent}%` : `${adjustmentPercent}%`}</em>
+            </span>
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              step={1}
+              value={adjustmentPercent}
+              onChange={(event) => setAdjustmentPercent(Number(event.target.value))}
+            />
+            <span className="pdv-installment-range-labels" aria-hidden="true">
+              <small>Desconto</small>
+              <small>Sem ajuste</small>
+              <small>Juros</small>
+            </span>
+          </div>
+
+          <div className="pdv-installment-summary" aria-label="Resumo do parcelamento">
+            <span>
+              <small>Original</small>
+              <strong>{formatCurrency(installmentPlan.originalTotalCents)}</strong>
+            </span>
+            <span>
+              <small>{adjustmentTone}</small>
+              <strong>
+                {installmentPlan.adjustmentCents > 0 ? "+" : installmentPlan.adjustmentCents < 0 ? "-" : ""}
+                {formatCurrency(Math.abs(installmentPlan.adjustmentCents))}
+              </strong>
+            </span>
+            <span>
+              <small>Final</small>
+              <strong>{formatCurrency(installmentPlan.adjustedTotalCents)}</strong>
+            </span>
+          </div>
+        </form>
+      )}
     </CashierModal>
   );
 }
@@ -9652,7 +10801,324 @@ function AgreementReceiptPaymentModal({
           <span className="pdv-payment-section-title">Forma de pagamento</span>
           <div className="pdv-payment-methods">
             {options.map((option) => {
-              if (option.id === "convenio") {
+              if (option.id === "convenio" || option.id === "parcelamento") {
+                return null;
+              }
+
+              const Icon = option.icon;
+              const method = option.id as ReceiptPaymentMethod;
+              const isActive = selectedMethod === method;
+
+              return (
+                <button
+                  className={isActive ? "pdv-payment-method pdv-payment-method-active" : "pdv-payment-method"}
+                  key={option.id}
+                  type="button"
+                  onClick={() => setSelectedMethod(method)}
+                >
+                  <Icon aria-hidden="true" size={20} />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <em>{option.description}</em>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+    </CashierModal>
+  );
+}
+
+function InstallmentReceiptPaymentModal({
+  client,
+  entries,
+  options,
+  onClose,
+  onConfirm,
+  onOpenSaleDetails
+}: {
+  client: AgreementClient;
+  entries: InstallmentReceivableEntry[];
+  options: typeof paymentOptions;
+  onClose: () => void;
+  onConfirm: (method: ReceiptPaymentMethod, entries: InstallmentReceivableEntry[], client: AgreementClient) => void;
+  onOpenSaleDetails: (sale: SaleRecord) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<InstallmentReceiptStatusFilter>("pendente");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [selectedMethod, setSelectedMethod] = useState<ReceiptPaymentMethod | null>(null);
+  const pendingEntries = useMemo(
+    () => entries.filter((entry) => !isInstallmentEntryPaid(entry.entry)),
+    [entries]
+  );
+  const paidEntries = useMemo(
+    () => entries.filter((entry) => isInstallmentEntryPaid(entry.entry)),
+    [entries]
+  );
+  const filteredEntries = useMemo(() => {
+    const normalizedQuery = normalizeSearch(query);
+
+    return entries.filter((receivable) => {
+      const paid = isInstallmentEntryPaid(receivable.entry);
+
+      if ((statusFilter === "pendente" && paid) || (statusFilter === "pago" && !paid)) {
+        return false;
+      }
+
+      if (!normalizedQuery) {
+        return true;
+      }
+
+      const searchableText = [
+        `Parcela ${receivable.entry.number}`,
+        formatDateOnly(receivable.entry.dueDate),
+        formatCurrency(receivable.entry.amountCents),
+        getSaleReceiptPaymentLabel(receivable.sale)
+      ].join(" ");
+
+      return normalizeSearch(searchableText).includes(normalizedQuery);
+    });
+  }, [entries, query, statusFilter]);
+  const saleOrdinalById = useMemo(() => {
+    const saleById = new Map<string, SaleRecord>();
+
+    entries.forEach((receivable) => {
+      if (!saleById.has(receivable.saleId)) {
+        saleById.set(receivable.saleId, receivable.sale);
+      }
+    });
+
+    return new Map(
+      [...saleById.values()]
+        .sort((firstSale, secondSale) => new Date(firstSale.createdAt).getTime() - new Date(secondSale.createdAt).getTime())
+        .map((sale, index) => [sale.id, `${index + 1}º Venda`])
+    );
+  }, [entries]);
+  const selectedEntries = pendingEntries.filter((entry) => selectedIds.has(entry.id));
+  const selectedTotalCents = selectedEntries.reduce((total, entry) => total + entry.entry.amountCents, 0);
+  const pendingTotalCents = pendingEntries.reduce((total, entry) => total + entry.entry.amountCents, 0);
+  const visiblePendingEntries = filteredEntries.filter((entry) => !isInstallmentEntryPaid(entry.entry));
+  const allVisiblePendingSelected =
+    visiblePendingEntries.length > 0 && visiblePendingEntries.every((entry) => selectedIds.has(entry.id));
+  const canConfirmReceipt = selectedEntries.length > 0 && selectedMethod !== null;
+
+  useEffect(() => {
+    const pendingIds = new Set(pendingEntries.map((entry) => entry.id));
+
+    setSelectedIds((currentIds) => {
+      const nextIds = new Set([...currentIds].filter((entryId) => pendingIds.has(entryId)));
+
+      return nextIds.size === currentIds.size ? currentIds : nextIds;
+    });
+  }, [pendingEntries]);
+
+  function toggleEntrySelection(entry: InstallmentReceivableEntry) {
+    if (isInstallmentEntryPaid(entry.entry)) {
+      return;
+    }
+
+    setSelectedIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (nextIds.has(entry.id)) {
+        nextIds.delete(entry.id);
+      } else {
+        nextIds.add(entry.id);
+      }
+
+      return nextIds;
+    });
+  }
+
+  function toggleVisiblePendingEntries() {
+    if (visiblePendingEntries.length === 0) {
+      return;
+    }
+
+    setSelectedIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (allVisiblePendingSelected) {
+        visiblePendingEntries.forEach((entry) => nextIds.delete(entry.id));
+      } else {
+        visiblePendingEntries.forEach((entry) => nextIds.add(entry.id));
+      }
+
+      return nextIds;
+    });
+  }
+
+  return (
+    <CashierModal
+      title="Detalhes das parcelas"
+      description={client.name}
+      size="lg"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="pdv-secondary-action" type="button" onClick={onClose}>
+            Cancelar
+          </button>
+          <button
+            className="pdv-confirm-action"
+            type="button"
+            onClick={() => selectedMethod && onConfirm(selectedMethod, selectedEntries, client)}
+            disabled={!canConfirmReceipt}
+          >
+            <CreditCard aria-hidden="true" size={17} />
+            {selectedMethod === "dinheiro"
+              ? "Receber em dinheiro"
+              : selectedMethod
+                ? "Finalizar recebimento"
+                : "Escolha o pagamento"}
+          </button>
+        </>
+      }
+    >
+      <div className="pdv-agreement-detail pdv-installment-detail">
+        <section className="pdv-agreement-detail-summary" aria-label="Resumo do cliente">
+          <span className="pdv-record-icon">
+            <AgreementClientIcon client={client} />
+          </span>
+          <span className="pdv-record-copy">
+            <strong>{client.name}</strong>
+            <em>{getAgreementClientTypeLabel(client)}</em>
+          </span>
+          <span
+            className="pdv-command-line-total pdv-agreement-detail-total"
+            aria-label={`${pendingEntries.length} ${pendingEntries.length === 1 ? "parcela aberta" : "parcelas abertas"}, total ${formatCurrency(pendingTotalCents)}`}
+          >
+            <strong>{formatCurrency(pendingTotalCents)}</strong>
+          </span>
+        </section>
+
+        <div className="pdv-agreement-detail-toolbar">
+          <label className="pdv-agreement-search">
+            <Search aria-hidden="true" size={20} />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Buscar parcela"
+              type="search"
+            />
+          </label>
+          <div className="pdv-agreement-status-filter" aria-label="Filtro de parcelas">
+            <button
+              className={
+                statusFilter === "pendente"
+                  ? "pdv-status-filter-chip pdv-status-filter-chip-active"
+                  : "pdv-status-filter-chip"
+              }
+              type="button"
+              aria-pressed={statusFilter === "pendente"}
+              onClick={() => setStatusFilter("pendente")}
+            >
+              Pendentes
+              <span>{pendingEntries.length}</span>
+            </button>
+            <button
+              className={
+                statusFilter === "pago"
+                  ? "pdv-status-filter-chip pdv-status-filter-chip-active"
+                  : "pdv-status-filter-chip"
+              }
+              type="button"
+              aria-pressed={statusFilter === "pago"}
+              onClick={() => setStatusFilter("pago")}
+            >
+              Pagas
+              <span>{paidEntries.length}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="pdv-agreement-note-list-head">
+          <span>{statusFilter === "pendente" ? "Parcelas em aberto" : "Parcelas pagas"}</span>
+          {statusFilter === "pendente" && visiblePendingEntries.length > 0 ? (
+            <button type="button" onClick={toggleVisiblePendingEntries}>
+              {allVisiblePendingSelected ? "Limpar seleção" : "Selecionar visíveis"}
+            </button>
+          ) : null}
+        </div>
+
+        {filteredEntries.length > 0 ? (
+          <div className="pdv-agreement-note-list" aria-label="Parcelas do cliente">
+            {filteredEntries.map((receivable) => {
+              const selected = selectedIds.has(receivable.id);
+              const paid = isInstallmentEntryPaid(receivable.entry);
+              const paidAt = getInstallmentEntryPaidAt(receivable.entry, receivable.sale);
+              const rowClassName = [
+                selected ? "pdv-agreement-note-row pdv-agreement-note-row-selected" : "pdv-agreement-note-row",
+                receivable.overdue && !paid ? "pdv-installment-note-row-overdue" : ""
+              ].filter(Boolean).join(" ");
+
+              return (
+                <div className={`${rowClassName} pdv-installment-note-row`} key={receivable.id}>
+                  <button
+                    className="pdv-installment-note-select"
+                    type="button"
+                    onClick={() => toggleEntrySelection(receivable)}
+                  >
+                    <span className="pdv-agreement-note-check" aria-hidden="true">
+                      {paid ? <CreditCard size={16} /> : selected ? <Check size={17} /> : null}
+                    </span>
+                    <span className="pdv-record-copy">
+                      <strong>{saleOrdinalById.get(receivable.saleId) ?? "Venda"}</strong>
+                      <em className="pdv-sale-item-meta">
+                        <span>Parcela {receivable.entry.number}/{receivable.installmentCount}</span>
+                        <span>Venc. {formatDateOnly(receivable.entry.dueDate)}</span>
+                        <span>{getSaleReceiptPaymentLabel(receivable.sale)}</span>
+                      </em>
+                    </span>
+                    <span className="pdv-command-line-total">
+                      <em className={receivable.overdue && !paid ? "pdv-installment-overdue-text" : undefined}>
+                        {paid
+                          ? `Pago${paidAt ? ` em ${formatDateTime(paidAt)}` : ""}`
+                          : receivable.overdue
+                            ? `Em atraso desde ${formatDateOnly(receivable.entry.dueDate)}`
+                            : "Pendente"}
+                      </em>
+                      <strong>{formatCurrency(receivable.entry.amountCents)}</strong>
+                    </span>
+                  </button>
+                  <button
+                    className="pdv-installment-sale-button"
+                    type="button"
+                    onClick={() => onOpenSaleDetails(receivable.sale)}
+                    aria-label={`Ver detalhes da ${saleOrdinalById.get(receivable.saleId) ?? "venda"}`}
+                  >
+                    <Eye aria-hidden="true" size={16} />
+                    <span>Detalhes</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <section className="pdv-agreement-note-empty" aria-label="Nenhuma parcela encontrada">
+            <WalletCards aria-hidden="true" size={24} />
+            <strong>Nenhuma parcela encontrada</strong>
+          </section>
+        )}
+
+        <section className="pdv-agreement-receive-footer" aria-label="Resumo do recebimento">
+          <span>
+            <em>Selecionado</em>
+            <strong>
+              {selectedEntries.length} {selectedEntries.length === 1 ? "parcela" : "parcelas"}
+            </strong>
+          </span>
+          <strong>{formatCurrency(selectedTotalCents)}</strong>
+        </section>
+
+        <section className="pdv-payment-method-section pdv-agreement-method-section" aria-label="Formas de pagamento">
+          <span className="pdv-payment-section-title">Forma de pagamento</span>
+          <div className="pdv-payment-methods">
+            {options.map((option) => {
+              if (option.id === "convenio" || option.id === "parcelamento") {
                 return null;
               }
 
@@ -9789,22 +11255,40 @@ function CloseSessionModal({
   );
 }
 
-function SaleSuccessModal({ sale, onClose }: { sale: SaleRecord; onClose: () => void }) {
+function SaleSuccessModal({
+  canPrintReceipt,
+  isPrintingReceipt,
+  sale,
+  onClose,
+  onPrintReceipt
+}: {
+  canPrintReceipt: boolean;
+  isPrintingReceipt: boolean;
+  sale: SaleRecord;
+  onClose: () => void;
+  onPrintReceipt: () => void;
+}) {
   const itemsCount = getCartQuantity(sale.items);
-  const paymentOption = getPaymentOption(sale.paymentMethod);
-  const PaymentIcon = paymentOption.icon;
+  const paymentLabel = getSaleReceiptPaymentLabel(sale);
   const isCommandSale = Boolean(sale.originCommandTitle);
-  const OriginIcon = isCommandSale ? ReceiptText : ShoppingCart;
 
   return (
     <CashierModal
       title="Venda concluída"
+      description={canPrintReceipt ? "Deseja imprimir o comprovante de venda?" : undefined}
       onClose={onClose}
       footer={
-        <button className="pdv-confirm-action" type="button" onClick={onClose}>
-          <Check aria-hidden="true" size={17} />
-          Voltar ao caixa
-        </button>
+        <>
+          <button className="pdv-secondary-action" disabled={isPrintingReceipt} type="button" onClick={onClose}>
+            {canPrintReceipt ? "Agora não" : "Voltar ao caixa"}
+          </button>
+          {canPrintReceipt ? (
+            <button className="pdv-confirm-action" disabled={isPrintingReceipt} type="button" onClick={onPrintReceipt}>
+              {isPrintingReceipt ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+              {isPrintingReceipt ? "Imprimindo" : "Imprimir comprovante"}
+            </button>
+          ) : null}
+        </>
       }
     >
       <div className="pdv-sale-success">
@@ -9818,26 +11302,17 @@ function SaleSuccessModal({ sale, onClose }: { sale: SaleRecord; onClose: () => 
           </div>
         </section>
 
-        <dl className="pdv-sale-success-details">
+        <dl className="pdv-sale-success-details pdv-sale-success-details-compact">
           <div>
-            <dt>
-              <PaymentIcon aria-hidden="true" size={18} />
-              Pagamento
-            </dt>
-            <dd>{paymentOption.label}</dd>
+            <dt>Pagamento</dt>
+            <dd>{paymentLabel}</dd>
           </div>
           <div>
-            <dt>
-              <OriginIcon aria-hidden="true" size={18} />
-              {isCommandSale ? "Comanda" : "Origem"}
-            </dt>
+            <dt>{isCommandSale ? "Comanda" : "Origem"}</dt>
             <dd>{isCommandSale ? sale.originCommandTitle : "Venda direta"}</dd>
           </div>
           <div>
-            <dt>
-              <Package aria-hidden="true" size={18} />
-              Itens
-            </dt>
+            <dt>Itens</dt>
             <dd>
               {itemsCount} {itemsCount === 1 ? "item" : "itens"}
             </dd>
@@ -9876,13 +11351,14 @@ function FiscalEmissionModal({
   const fiscalNumberLabel = typeof state.fiscalNumber === "number" && Number.isFinite(state.fiscalNumber)
     ? `${fiscalLabel} nº ${state.fiscalNumber}`
     : "Aguardando número";
+  const hasPrintedDanfe = state.danfePrinted === true;
   const printButtonLabel = isPrinting
     ? printMode === "reprint"
       ? "Reimprimindo"
-      : printMode === "promissory"
-        ? "Imprimindo promissória"
-        : `Imprimindo ${fiscalLabel}`
-    : `Reimprimir ${fiscalLabel}`;
+      : `Imprimindo ${fiscalLabel}`
+    : hasPrintedDanfe
+      ? `Reimprimir ${fiscalLabel}`
+      : `Imprimir ${fiscalLabel}`;
 
   return (
     <CashierModal
@@ -9894,10 +11370,15 @@ function FiscalEmissionModal({
       footer={
         canClose ? (
           canPrint ? (
-            <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
-              {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
-              {printButtonLabel}
-            </button>
+            <>
+              <button className="pdv-secondary-action" disabled={isPrinting} type="button" onClick={onClose}>
+                Fechar
+              </button>
+              <button className="pdv-confirm-action" disabled={isPrinting} type="button" onClick={onPrint}>
+                {isPrinting ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+                {printButtonLabel}
+              </button>
+            </>
           ) : (
             <button className="pdv-secondary-action pdv-fiscal-close-action" type="button" onClick={onClose}>
               Fechar
@@ -10045,6 +11526,79 @@ function AgreementReceiptSuccessModal({
             <dd>
               {receipt.receiptCount} {receipt.receiptCount === 1 ? "nota" : "notas"} · {receipt.itemsCount}{" "}
               {receipt.itemsCount === 1 ? "item" : "itens"}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </CashierModal>
+  );
+}
+
+function InstallmentPaymentSuccessModal({
+  payment,
+  isPrintingReceipt,
+  onClose,
+  onPrintReceipt
+}: {
+  payment: InstallmentPaymentCompletionRecord;
+  isPrintingReceipt: boolean;
+  onClose: () => void;
+  onPrintReceipt: () => void;
+}) {
+  const paymentOption = payment.paymentMethod ? getPaymentOption(payment.paymentMethod) : getPaymentOption("dinheiro");
+  const PaymentIcon = paymentOption.icon;
+
+  return (
+    <CashierModal
+      title={payment.installmentCount === 1 ? "Parcela recebida" : "Parcelas recebidas"}
+      description="Deseja imprimir o comprovante atualizado?"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="pdv-secondary-action" disabled={isPrintingReceipt} type="button" onClick={onClose}>
+            Agora não
+          </button>
+          <button className="pdv-confirm-action" disabled={isPrintingReceipt} type="button" onClick={onPrintReceipt}>
+            {isPrintingReceipt ? <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} /> : <Printer aria-hidden="true" size={17} />}
+            {isPrintingReceipt ? "Imprimindo" : "Imprimir comprovante"}
+          </button>
+        </>
+      }
+    >
+      <div className="pdv-sale-success">
+        <section className="pdv-sale-success-main" aria-label="Resumo do recebimento de parcelas">
+          <span className="pdv-sale-success-icon" aria-hidden="true">
+            <Check size={24} strokeWidth={2.6} />
+          </span>
+          <div>
+            <span>Total recebido</span>
+            <strong>{formatCurrency(payment.totalCents)}</strong>
+          </div>
+        </section>
+
+        <dl className="pdv-sale-success-details">
+          <div>
+            <dt>
+              <PaymentIcon aria-hidden="true" size={18} />
+              Pagamento
+            </dt>
+            <dd>{paymentOption.label}</dd>
+          </div>
+          <div>
+            <dt>
+              <UserRound aria-hidden="true" size={18} />
+              Cliente
+            </dt>
+            <dd>{payment.clientName}</dd>
+          </div>
+          <div>
+            <dt>
+              <WalletCards aria-hidden="true" size={18} />
+              Parcelas
+            </dt>
+            <dd>
+              {payment.installmentCount} {payment.installmentCount === 1 ? "parcela" : "parcelas"} · {payment.saleCount}{" "}
+              {payment.saleCount === 1 ? "venda" : "vendas"}
             </dd>
           </div>
         </dl>
@@ -10469,10 +12023,12 @@ function SaleDetailsModal({
   isFiscalEmissionEnabled,
   isFiscalLoading,
   reprintingFiscalDocumentId,
+  printingSaleReceiptId,
   onClose,
   onCancelRequest,
   onReprintFiscal,
   onReprintPromissory,
+  onReprintStoreReceipt,
   onRetryFiscal
 }: {
   sale: SaleRecord;
@@ -10481,10 +12037,12 @@ function SaleDetailsModal({
   isFiscalEmissionEnabled: boolean;
   isFiscalLoading: boolean;
   reprintingFiscalDocumentId: string | null;
+  printingSaleReceiptId: string | null;
   onClose: () => void;
   onCancelRequest: (sale: SaleRecord) => void;
   onReprintFiscal: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
   onReprintPromissory: (sale: SaleRecord, document: FiscalDocumentRecord) => void;
+  onReprintStoreReceipt: (sale: SaleRecord) => void;
   onRetryFiscal: (sale: SaleRecord) => void;
 }) {
   const [isFiscalDetailsOpen, setIsFiscalDetailsOpen] = useState(false);
@@ -10497,12 +12055,15 @@ function SaleDetailsModal({
   const fiscalTitle = isFiscalEmissionEnabled ? getHistoryFiscalTitle(fiscalSummary.title) : saleDisplayTitle;
   const saleClientName = compactReceiptText(sale.clientName);
   const saleClientPersonType = sale.clienteConvenioTipoPessoa ?? "fisica";
+  const paymentLabel = getSaleReceiptPaymentLabel(sale);
+  const canReprintStoreReceipt = (!isFiscalEmissionEnabled || sale.paymentMethod === "parcelamento") && !canceled;
+  const isReprintingStoreReceipt = printingSaleReceiptId === sale.id;
 
   return (
     <>
       <CashierModal
         title="Detalhes da venda"
-        description={`${formatDateTime(sale.createdAt)} · ${getPaymentLabel(sale.paymentMethod)}${canceled ? " · Cancelada" : ""}`}
+        description={`${formatDateTime(sale.createdAt)} · ${paymentLabel}${canceled ? " · Cancelada" : ""}`}
         size="lg"
         onClose={onClose}
         footer={
@@ -10510,6 +12071,21 @@ function SaleDetailsModal({
             <button className="pdv-secondary-action" type="button" onClick={onClose}>
               Fechar
             </button>
+            {canReprintStoreReceipt ? (
+              <button
+                className="pdv-secondary-action"
+                disabled={isReprintingStoreReceipt}
+                type="button"
+                onClick={() => onReprintStoreReceipt(sale)}
+              >
+                {isReprintingStoreReceipt ? (
+                  <LoaderCircle aria-hidden="true" className="pdv-spin" size={17} />
+                ) : (
+                  <Printer aria-hidden="true" size={17} />
+                )}
+                {isReprintingStoreReceipt ? "Reimprimindo" : "Reimprimir comprovante"}
+              </button>
+            ) : null}
             {!canceled ? (
               <button className="pdv-danger-action" type="button" onClick={() => onCancelRequest(sale)}>
                 <Trash2 aria-hidden="true" size={17} />
@@ -10537,7 +12113,7 @@ function SaleDetailsModal({
               </span>
               <span>
                 <em>Pagamento</em>
-                <strong>{paymentOption.label}</strong>
+                <strong>{paymentLabel}</strong>
               </span>
             </span>
             {saleClientName ? (

@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
+  BadgeCheck,
   Building2,
   Check,
   Eye,
@@ -1063,8 +1064,22 @@ export function FiscalSettingsManager({ settings, isLoading, mode, onCancel, onS
             />
           </label>
 
+        </div>
+      </section>
+      ) : null}
+
+      {isCompanyMode ? (
+      <section className="fiscal-form-section fiscal-settings-section fiscal-settings-section-tax">
+        <header className="fiscal-settings-section-head">
+          <span aria-hidden="true">
+            <BadgeCheck size={18} />
+          </span>
+          <strong>Fiscal</strong>
+        </header>
+
+        <div className="fiscal-form-grid fiscal-tax-grid">
           <label className="fiscal-field-span-4">
-            <span>Regime</span>
+            <span>Regime tributário</span>
             <PlatformSelect
               ariaLabel="Regime tributário do emitente"
               disabled={isSaving}

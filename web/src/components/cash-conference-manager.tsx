@@ -40,6 +40,7 @@ import {
   Store,
   Utensils,
   UserRound,
+  WalletCards,
   Warehouse,
   Wrench,
   X
@@ -53,7 +54,7 @@ import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 
-type PaymentKey = "dinheiro" | "cartao" | "pix" | "convenio";
+type PaymentKey = "dinheiro" | "cartao" | "pix" | "parcelamento" | "convenio";
 type ComparablePaymentKey = Exclude<PaymentKey, "convenio">;
 type ConferenceStatus = "fechado" | "conferido";
 type DifferenceStatus = "batido" | "faltando" | "sobrando" | "misto";
@@ -175,6 +176,7 @@ type CashSale = {
   situacao: "paga" | "convenio" | "recebido_caixa" | "cancelada";
   metodo_pagamento: ComparablePaymentKey | null;
   metodo_pagamento_recebimento: ComparablePaymentKey | null;
+  parcelamento?: Record<string, unknown> | null;
   caixa_recebimento_id: string | null;
   recebido_em: string | null;
 };
@@ -196,7 +198,7 @@ type CashConferenceDetails = {
 
 type DraftTotals = Record<ComparablePaymentKey, string>;
 
-const comparablePaymentKeys = ["dinheiro", "cartao", "pix"] as const satisfies ComparablePaymentKey[];
+const comparablePaymentKeys = ["dinheiro", "cartao", "pix", "parcelamento"] as const satisfies ComparablePaymentKey[];
 
 const paymentVisuals = {
   dinheiro: {
@@ -209,6 +211,10 @@ const paymentVisuals = {
   },
   pix: {
     icon: QrCode,
+    className: "cash-payment-orange"
+  },
+  parcelamento: {
+    icon: WalletCards,
     className: "cash-payment-orange"
   }
 } satisfies Record<ComparablePaymentKey, { icon: LucideIcon; className: string }>;
@@ -264,7 +270,8 @@ function buildEmptyDraft(): DraftTotals {
   return {
     dinheiro: "",
     cartao: "",
-    pix: ""
+    pix: "",
+    parcelamento: ""
   };
 }
 
@@ -481,6 +488,10 @@ function getPaymentMethodLabel(paymentMethod: ComparablePaymentKey | null) {
     return "Pix";
   }
 
+  if (paymentMethod === "parcelamento") {
+    return "Parcelamento";
+  }
+
   return "Não informado";
 }
 
@@ -525,7 +536,8 @@ function buildDraftFromDetails(details: CashConferenceDetails): DraftTotals {
   return {
     dinheiro: formatCurrencyInputFromCents(totals.dinheiro),
     cartao: formatCurrencyInputFromCents(totals.cartao),
-    pix: formatCurrencyInputFromCents(totals.pix)
+    pix: formatCurrencyInputFromCents(totals.pix),
+    parcelamento: formatCurrencyInputFromCents(totals.parcelamento)
   };
 }
 
@@ -542,6 +554,7 @@ function getDraftTotals(draft: DraftTotals): PaymentTotals {
     dinheiro: parseCurrencyInputToCents(draft.dinheiro),
     cartao: parseCurrencyInputToCents(draft.cartao),
     pix: parseCurrencyInputToCents(draft.pix),
+    parcelamento: parseCurrencyInputToCents(draft.parcelamento),
     convenio: 0
   };
 }

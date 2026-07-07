@@ -243,7 +243,7 @@ function getBillingBlockedMessage(billingStatus) {
 }
 
 function isPdvOperationalEventType(eventType) {
-  return eventType === 'venda_concluida';
+  return eventType === 'venda_concluida' || eventType === 'parcelamento_recebido';
 }
 
 async function getPdvRegistrosVinculados(usuarioId, pdvId) {
@@ -311,6 +311,16 @@ function sanitizeCents(value) {
   }
 
   return Math.max(0, Math.round(parsed));
+}
+
+function sanitizeSignedCents(value) {
+  const parsed = Number(value || 0);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.round(parsed);
 }
 
 function parsePositiveNumber(value) {
@@ -458,6 +468,60 @@ function normalizeSaleItems(items) {
       ),
     };
   });
+}
+
+function normalizePercent(value) {
+  const parsed = Number(value || 0);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.max(-100, Math.min(100, Math.round(parsed)));
+}
+
+function normalizeInstallmentPlan(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const installmentCount = Math.max(
+    2,
+    Math.min(12, Math.floor(Number(value.installmentCount || value.parcelas || value.quantidade_parcelas || 2)))
+  );
+  const entriesSource = Array.isArray(value.entries)
+    ? value.entries
+    : Array.isArray(value.parcelasDetalhes)
+      ? value.parcelasDetalhes
+      : Array.isArray(value.parcelas_detalhes)
+        ? value.parcelas_detalhes
+        : [];
+  const entries = entriesSource.slice(0, 12).map((entry, index) => {
+    const paidAt = normalizeText(entry.paidAt || entry.pago_em || entry.recebido_em, 40) || null;
+    const paymentMethod = normalizeKey(entry.paymentMethod || entry.metodo_pagamento || entry.forma_pagamento) || null;
+    const receivedSessionId = normalizeText(entry.receivedSessionId || entry.caixa_recebimento_id || entry.sessionId, 64) || null;
+
+    return {
+      number: Math.max(1, Math.floor(Number(entry.number || entry.numero || index + 1))),
+      dueDate: normalizeText(entry.dueDate || entry.vencimento || entry.data_vencimento, 20) || null,
+      amountCents: sanitizeCents(entry.amountCents || entry.valorCentavos || entry.valor_centavos),
+      paid: Boolean(entry.paid || entry.pago || paidAt),
+      paidAt,
+      paymentMethod,
+      receivedSessionId,
+    };
+  });
+
+  return {
+    installmentCount,
+    adjustmentPercent: normalizePercent(value.adjustmentPercent || value.percentual_ajuste),
+    originalTotalCents: sanitizeCents(value.originalTotalCents || value.valorOriginalCentavos || value.valor_original_centavos),
+    adjustmentCents: sanitizeSignedCents(value.adjustmentCents || value.ajusteCentavos || value.ajuste_centavos),
+    adjustedTotalCents: sanitizeCents(value.adjustedTotalCents || value.valorFinalCentavos || value.valor_final_centavos),
+    customerName: normalizeText(value.customerName || value.nomeCliente || value.nome_cliente, 120) || null,
+    observation: normalizeText(value.observation || value.observacao, 1000) || null,
+    entries,
+  };
 }
 
 function sanitizeDesktopClienteConvenio(cliente) {
@@ -918,7 +982,13 @@ async function processSaleCompleted(pdv, payload, transaction) {
 
   const items = normalizeSaleItems(sale.items);
   const quantity = items.reduce((total, item) => total + item.quantidade, 0);
-  const totalCents = sanitizeCents(sale.totalCents || sale.total_centavos);
+  const installmentPlan = normalizeInstallmentPlan(
+    sale.installmentPlan || sale.parcelamento || payload.installmentPlan || payload.parcelamento
+  );
+  const rawTotalCents = sanitizeCents(sale.totalCents || sale.total_centavos);
+  const totalCents = installmentPlan ? installmentPlan.adjustedTotalCents : rawTotalCents;
+  const subtotalCents = installmentPlan ? installmentPlan.originalTotalCents : rawTotalCents;
+  const discountCents = installmentPlan?.adjustmentCents < 0 ? Math.abs(installmentPlan.adjustmentCents) : 0;
   const requestedCommandOrigin = payload.origem === 'comanda' || Boolean(payload.origemComandaNome);
   const commandSettings = requestedCommandOrigin
     ? await configuracaoSistemaService.getCommandSettings(pdv.usuario_id)
@@ -931,11 +1001,19 @@ async function processSaleCompleted(pdv, payload, transaction) {
   const clientId = Number(sale.cliente_convenio_id || sale.clienteConvenioId || sale.clientId || 0);
   const requestedClientConvenioId = Number.isInteger(clientId) && clientId > 0 ? clientId : null;
   const consumerName = normalizeText(
-    sale.consumerName || sale.nome_consumidor || sale.nomeConsumidor || payload.consumerName,
+    sale.consumerName ||
+      sale.nome_consumidor ||
+      sale.nomeConsumidor ||
+      payload.consumerName ||
+      installmentPlan?.customerName,
     120
   ) || null;
   const consumerObservation = normalizeText(
-    sale.consumerObservation || sale.observacao || sale.observation || payload.consumerObservation,
+    sale.consumerObservation ||
+      sale.observacao ||
+      sale.observation ||
+      payload.consumerObservation ||
+      installmentPlan?.observation,
     1000
   ) || null;
   let clientConvenioId = null;
@@ -975,11 +1053,12 @@ async function processSaleCompleted(pdv, payload, transaction) {
       canal: 'pdv',
       itens: items,
       quantidade_itens: quantity,
-      subtotal_centavos: totalCents,
+      subtotal_centavos: subtotalCents,
       total_centavos: totalCents,
-      desconto_pagamento_centavos: 0,
+      desconto_pagamento_centavos: discountCents,
       metodo_pagamento: paymentMethod,
       metodo_pagamento_recebimento: null,
+      parcelamento: installmentPlan,
       caixa_recebimento_id: null,
       situacao: isConvenioPayment ? 'convenio' : 'paga',
       status_convenio: isConvenioPayment ? 'pendente' : null,
@@ -1106,6 +1185,82 @@ async function processConvenioReceived(pdv, payload, transaction) {
       metodo_pagamento_recebimento: paymentMethod,
       caixa_recebimento_id: cashierSession?.id || payload.session?.id || null,
       recebido_em: parseDate(receipt.receivedAt || receipt.recebido_em || payload.receivedAt || new Date()),
+    },
+    { transaction }
+  );
+
+  return venda;
+}
+
+async function processInstallmentReceived(pdv, payload, transaction) {
+  const sale = payload.sale || payload.venda || {};
+  const saleId = normalizeText(
+    sale.id || payload.saleId || payload.venda_id || payload.id,
+    64
+  );
+  const paymentMethod = normalizeKey(
+    payload.paymentMethod ||
+      payload.metodo_pagamento ||
+      payload.forma_pagamento ||
+      payload.entries?.[0]?.paymentMethod ||
+      payload.parcelas?.[0]?.paymentMethod
+  );
+
+  if (!saleId) {
+    throw new Error('Evento de recebimento de parcelamento sem venda.');
+  }
+
+  if (!['dinheiro', 'pix', 'cartao'].includes(paymentMethod)) {
+    throw new Error('Informe a forma de pagamento do recebimento do parcelamento.');
+  }
+
+  let cashierSession = null;
+
+  if (payload.session) {
+    cashierSession = await upsertCashierSession({
+      pdv,
+      session: payload.session,
+      status: 'aberto',
+      transaction,
+    });
+  }
+
+  const venda = await Venda.findOne({
+    where: {
+      id: saleId,
+      usuario_id: pdv.usuario_id,
+      situacao: {
+        [Op.notIn]: ['cancelada', 'cancelled', 'canceled'],
+      },
+      [Op.or]: [
+        { metodo_pagamento: 'parcelamento' },
+        { parcelamento: { [Op.ne]: null } },
+      ],
+    },
+    transaction,
+  });
+
+  if (!venda) {
+    throw new Error('Venda parcelada não encontrada para este PDV.');
+  }
+
+  const installmentPlan = normalizeInstallmentPlan(
+    sale.installmentPlan ||
+      sale.parcelamento ||
+      payload.installmentPlan ||
+      payload.parcelamento ||
+      venda.parcelamento
+  );
+
+  if (!installmentPlan || installmentPlan.entries.length === 0) {
+    throw new Error('Parcelamento inválido para recebimento.');
+  }
+
+  await venda.update(
+    {
+      parcelamento: installmentPlan,
+      metodo_pagamento_recebimento: paymentMethod,
+      caixa_recebimento_id: cashierSession?.id || payload.session?.id || null,
     },
     { transaction }
   );
@@ -1281,6 +1436,8 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
       await processSaleCanceled(pdv, event.payload, transaction);
     } else if (event.eventType === 'convenio_recebido') {
       await processConvenioReceived(pdv, event.payload, transaction);
+    } else if (event.eventType === 'parcelamento_recebido') {
+      await processInstallmentReceived(pdv, event.payload, transaction);
     } else if (event.eventType === 'despesa_lancada') {
       await processExpenseCreated(pdv, event.payload, transaction);
     } else if (event.eventType === 'despesa_atualizada') {

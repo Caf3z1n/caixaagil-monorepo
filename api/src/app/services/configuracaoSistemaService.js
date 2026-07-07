@@ -4,12 +4,14 @@ const { Arquivo, ConfiguracaoSistema, Nf } = require('../models');
 const { decryptSecret, encryptSecret } = require('./secretService');
 const { toAbsolutePath } = require('./fileStorageService');
 
-const paymentMethodKeys = ['dinheiro', 'pix', 'cartao', 'convenio'];
+const operationalPaymentMethodKeys = ['dinheiro', 'pix', 'cartao', 'parcelamento'];
+const paymentMethodKeys = [...operationalPaymentMethodKeys, 'convenio'];
 
 const defaultPaymentMethods = {
   dinheiro: true,
   pix: true,
   cartao: true,
+  parcelamento: false,
   convenio: false,
 };
 
@@ -275,11 +277,21 @@ function normalizePaymentMethods(value = {}) {
     return settings;
   }, {});
 
-  if (!paymentMethodKeys.some(key => nextPaymentMethods[key])) {
+  if (!operationalPaymentMethodKeys.some(key => nextPaymentMethods[key])) {
     return { ...defaultPaymentMethods };
   }
 
   return nextPaymentMethods;
+}
+
+function normalizePaymentMethodUpdate(value = {}, currentValue = {}) {
+  const currentPaymentMethods = normalizePaymentMethods(currentValue);
+
+  return paymentMethodKeys.reduce((settings, key) => {
+    const hasValue = Object.prototype.hasOwnProperty.call(value || {}, key);
+    settings[key] = hasValue ? normalizeBoolean(value[key], currentPaymentMethods[key]) : currentPaymentMethods[key];
+    return settings;
+  }, {});
 }
 
 function normalizeExpenseSettings(value = {}) {
@@ -937,16 +949,15 @@ async function deactivateFiscalEmission(usuarioId, options = {}) {
 }
 
 async function updatePaymentMethods(usuarioId, paymentMethods) {
-  const nextPaymentMethods = normalizePaymentMethods(paymentMethods);
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextPaymentMethods = normalizePaymentMethodUpdate(paymentMethods, configuracao.formas_pagamento);
 
-  if (!paymentMethodKeys.some(key => paymentMethods?.[key] === true)) {
-    const error = new Error('Mantenha pelo menos uma forma de pagamento ativa.');
+  if (!operationalPaymentMethodKeys.some(key => nextPaymentMethods[key])) {
+    const error = new Error('Mantenha pelo menos uma forma de pagamento operacional ativa.');
     error.code = 'PAYMENT_METHOD_REQUIRED';
     error.status = 400;
     throw error;
   }
-
-  const configuracao = await getOrCreateConfiguracao(usuarioId);
 
   configuracao.formas_pagamento = nextPaymentMethods;
   await configuracao.save();

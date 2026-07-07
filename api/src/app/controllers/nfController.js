@@ -1,13 +1,18 @@
 const { ulid } = require('ulid');
 const { Op } = require('sequelize');
+const archiver = require('archiver');
+const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const {
   Arquivo,
   Caixa,
+  CategoriaProduto,
+  GrupoFiscal,
   Nf,
   NfEvento,
   Pdv,
+  Produto,
   Venda,
 } = require('../models');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
@@ -17,6 +22,7 @@ const {
   buildStoredFileName,
   ensureDirectory,
   removePhysicalFile,
+  toAbsolutePath,
   toRelativePath,
 } = require('../services/fileStorageService');
 
@@ -33,6 +39,15 @@ const allowedStatuses = new Set([
   'erro_tecnico',
   'duplicidade',
 ]);
+const reportableFiscalStatuses = new Set(['autorizada', 'contingencia']);
+const nonTaxedPisCofinsCsts = new Set(['04', '05', '06', '07', '08', '09']);
+const fiscalNatureByNcmPrefix = [
+  { prefix: '22011000', nature: '415' },
+  { prefix: '2201', nature: '415' },
+  { prefix: '22030000', nature: '423' },
+  { prefix: '2203', nature: '423' },
+  { prefix: '21069090', nature: '651' },
+];
 
 function getPlain(record) {
   return record?.get ? record.get({ plain: true }) : record;
@@ -536,97 +551,1046 @@ function handleNfError(res, error, defaultMessage) {
   });
 }
 
+function buildNfWhereFromQuery(usuarioId, query = {}) {
+  const where = {
+    usuario_id: usuarioId,
+  };
+  const status = normalizeText(query.status, 32);
+  const modelo = normalizeModelo(query.modelo, '');
+  const ambiente = normalizeText(query.ambiente, 20);
+  const termo = normalizeText(query.q, 80);
+  const dataInicio = sanitizeDateFilter(query.data_inicio || query.dataInicio, 'start');
+  const dataFim = sanitizeDateFilter(query.data_fim || query.dataFim, 'end');
+  const andConditions = [];
+
+  if (status && allowedStatuses.has(status)) {
+    where.status = status;
+  }
+
+  if (modelo) {
+    where.modelo = modelo;
+  }
+
+  if (ambiente === 'homologacao' || ambiente === 'producao') {
+    where.ambiente = ambiente;
+  }
+
+  if (termo) {
+    const numero = Number(termo);
+    const searchConditions = [
+      { chave_acesso: { [Op.iLike]: `%${termo}%` } },
+      { protocolo_autorizacao: { [Op.iLike]: `%${termo}%` } },
+    ];
+
+    if (Number.isInteger(numero)) {
+      searchConditions.push({ numero });
+    }
+
+    andConditions.push({ [Op.or]: searchConditions });
+  }
+
+  if (dataInicio || dataFim) {
+    const dateRange = {};
+
+    if (dataInicio) {
+      dateRange[Op.gte] = dataInicio;
+    }
+
+    if (dataFim) {
+      dateRange[Op.lte] = dataFim;
+    }
+
+    andConditions.push({
+      [Op.or]: [
+        { emitida_em: dateRange },
+        { emitida_em: null, created_at: dateRange },
+      ],
+    });
+  }
+
+  if (andConditions.length > 0) {
+    where[Op.and] = andConditions;
+  }
+
+  return where;
+}
+
+function buildReportWhereFromQuery(usuarioId, query = {}) {
+  const where = buildNfWhereFromQuery(usuarioId, query);
+
+  if (where.status) {
+    return reportableFiscalStatuses.has(where.status) ? where : null;
+  }
+
+  where.status = { [Op.in]: [...reportableFiscalStatuses] };
+  return where;
+}
+
+async function findFilteredNfs(usuarioId, query = {}, options = {}) {
+  const where = options.reportOnly
+    ? buildReportWhereFromQuery(usuarioId, query)
+    : buildNfWhereFromQuery(usuarioId, query);
+
+  if (!where) {
+    return [];
+  }
+
+  const include = options.includeHistorico
+    ? [...getNfArquivoIncludes(), getNfEventoInclude()]
+    : getNfArquivoIncludes();
+  const rows = await Nf.findAll({
+    where,
+    include,
+    order: [['created_at', 'DESC']],
+  });
+  const materializedXml = await Promise.all(rows.map(nf => ensureNfXmlArquivos(nf).catch(() => false)));
+
+  if (!materializedXml.some(Boolean)) {
+    return rows;
+  }
+
+  return Nf.findAll({
+    where,
+    include,
+    order: [['created_at', 'DESC']],
+  });
+}
+
+function sanitizeFilePart(value, fallback = 'arquivo') {
+  const normalized = String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 140);
+
+  return normalized || fallback;
+}
+
+function buildFilteredExportName(prefix, query = {}, extension = 'zip') {
+  const start = normalizeText(query.data_inicio || query.dataInicio, 10) || 'inicio';
+  const end = normalizeText(query.data_fim || query.dataFim, 10) || 'fim';
+  const status = normalizeText(query.status, 32) || 'todos';
+
+  return `${prefix}-${sanitizeFilePart(status)}-${sanitizeFilePart(start)}-${sanitizeFilePart(end)}.${extension}`;
+}
+
+function getNfArchiveBaseName(nf) {
+  const data = getPlain(nf);
+  const model = data.modelo === '55' ? 'nfe' : 'nfce';
+  const serie = String(data.serie || '0').padStart(3, '0');
+  const numero = String(data.numero || '0').padStart(9, '0');
+  const key = data.chave_acesso ? `-${data.chave_acesso}` : '';
+
+  return `${model}-serie-${serie}-${numero}${key}`;
+}
+
+function collectNfXmlFiles(nf) {
+  const data = getPlain(nf);
+  const files = [];
+  const seen = new Set();
+
+  function addFile(kind, arquivo) {
+    const file = getPlain(arquivo);
+
+    if (!file?.id || seen.has(file.id)) {
+      return;
+    }
+
+    seen.add(file.id);
+    files.push({ kind, file });
+  }
+
+  if (data.status === 'cancelada' || data.status === 'inutilizada') {
+    for (const event of data.historico || []) {
+      addFile(normalizeText(event.tipo, 40) || data.status, event.arquivo_xml);
+    }
+  }
+
+  addFile('autorizado', data.xml_autorizado);
+  addFile('enviado', data.xml_enviado);
+
+  if (data.status !== 'cancelada' && data.status !== 'inutilizada') {
+    for (const event of data.historico || []) {
+      addFile(normalizeText(event.tipo, 40) || 'evento', event.arquivo_xml);
+    }
+  }
+
+  return files;
+}
+
+function sendZipResponse(res, fileName) {
+  const archive = archiver('zip', { zlib: { level: 9 } });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${sanitizeFilePart(fileName, 'exportacao.zip')}"`);
+
+  archive.on('error', error => {
+    if (!res.headersSent) {
+      res.status(500).json({
+        message: 'Não foi possível gerar o arquivo compactado.',
+        detail: error.message,
+      });
+      return;
+    }
+
+    res.destroy(error);
+  });
+
+  archive.pipe(res);
+  return archive;
+}
+
+function getFirstObject(...values) {
+  for (const value of values) {
+    const objectValue = asObject(value);
+
+    if (Object.keys(objectValue).length > 0) {
+      return objectValue;
+    }
+  }
+
+  return {};
+}
+
+function getArrayItems(value) {
+  if (Array.isArray(value)) {
+    return value.filter(item => item && typeof item === 'object' && !Array.isArray(item));
+  }
+
+  return [];
+}
+
+function getPayloadItemsForReport(payload = {}) {
+  const directItems = getArrayItems(payload.itens);
+
+  if (directItems.length > 0) {
+    return directItems;
+  }
+
+  const sale = asObject(payload.venda);
+  return getArrayItems(sale.itens).concat(getArrayItems(sale.items));
+}
+
+function firstTextFromObject(object, keys, maxLength = 255) {
+  for (const key of keys) {
+    const value = object?.[key];
+
+    if (typeof value === 'string' && value.trim()) {
+      return normalizeText(value, maxLength);
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value).slice(0, maxLength);
+    }
+  }
+
+  return '';
+}
+
+function firstNumberFromObject(object, keys, fallback = null) {
+  for (const key of keys) {
+    const value = object?.[key];
+
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+
+    const numberValue = Number(value);
+
+    if (Number.isFinite(numberValue)) {
+      return numberValue;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeDigits(value, maxLength = 20) {
+  return String(value ?? '').replace(/\D/g, '').slice(0, maxLength);
+}
+
+function normalizeDecimal(value, fallback = 0) {
+  const numberValue = Number(value);
+
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
+function getProductIdFromLine(line) {
+  const rawId = firstTextFromObject(line, ['produto_id', 'produtoId', 'productId', 'id'], 32);
+  const numericId = Number(rawId);
+
+  return Number.isInteger(numericId) && numericId > 0 ? numericId : null;
+}
+
+async function fetchReportProductMap(usuarioId, nfs) {
+  const productIds = [
+    ...new Set(
+      nfs
+        .flatMap(nf => getPayloadItemsForReport(getPlain(nf).payload))
+        .map(getProductIdFromLine)
+        .filter(Boolean)
+    ),
+  ];
+
+  if (productIds.length === 0) {
+    return new Map();
+  }
+
+  const products = await Produto.findAll({
+    where: {
+      usuario_id: usuarioId,
+      id: { [Op.in]: productIds },
+    },
+    include: [
+      { model: CategoriaProduto, as: 'categoria', required: false },
+      { model: GrupoFiscal, as: 'grupo_fiscal', required: false },
+    ],
+  });
+
+  return new Map(products.map(product => [product.id, getPlain(product)]));
+}
+
+function resolveFiscalNature(ncm, pisCst, cofinsCst) {
+  const normalizedNcm = normalizeDigits(ncm, 8);
+  const hasNonTaxedPisCofins =
+    nonTaxedPisCofinsCsts.has(normalizeDigits(pisCst, 2).padStart(2, '0')) ||
+    nonTaxedPisCofinsCsts.has(normalizeDigits(cofinsCst, 2).padStart(2, '0'));
+
+  if (!hasNonTaxedPisCofins) {
+    return '999';
+  }
+
+  const matchedRule = fiscalNatureByNcmPrefix.find(rule => normalizedNcm.startsWith(rule.prefix));
+  return matchedRule?.nature || '999';
+}
+
+function calculateTaxCents(baseCents, rate, cst, options = {}) {
+  const normalizedRate = normalizeDecimal(rate, 0);
+  const normalizedCst = normalizeDigits(cst, 2).padStart(2, '0');
+
+  if (options.skipNonTaxedPisCofins && nonTaxedPisCofinsCsts.has(normalizedCst)) {
+    return 0;
+  }
+
+  if (normalizedRate <= 0 || baseCents <= 0) {
+    return 0;
+  }
+
+  return Math.round(baseCents * (normalizedRate / 100));
+}
+
+function buildEmptyReportTotals() {
+  return {
+    quantidade_total: 0,
+    valor_total_centavos: 0,
+    icms_total_centavos: 0,
+    pis_total_centavos: 0,
+    cofins_total_centavos: 0,
+  };
+}
+
+function addProductTotals(totals, line) {
+  totals.quantidade_total += line.quantidade;
+  totals.valor_total_centavos += line.valor_centavos;
+  totals.icms_total_centavos += line.icms.valor_centavos;
+  totals.pis_total_centavos += line.pis.valor_centavos;
+  totals.cofins_total_centavos += line.cofins.valor_centavos;
+}
+
+function mergeProductReportLine(currentLine, nextLine) {
+  currentLine.quantidade += nextLine.quantidade;
+  currentLine.valor_centavos += nextLine.valor_centavos;
+  currentLine.icms.valor_centavos += nextLine.icms.valor_centavos;
+  currentLine.pis.valor_centavos += nextLine.pis.valor_centavos;
+  currentLine.cofins.valor_centavos += nextLine.cofins.valor_centavos;
+}
+
+function buildReportLine({ line, index, product }) {
+  const fiscal = getFirstObject(line.fiscal, line.grupo_fiscal, line.perfil_fiscal, product?.grupo_fiscal);
+  const quantity = firstNumberFromObject(line, ['quantidade', 'quantity', 'qtd'], 1) || 1;
+  const directTotalCents = firstNumberFromObject(line, [
+    'total_centavos',
+    'totalCents',
+    'totalPriceCents',
+    'total_price_cents',
+    'valor_total_centavos',
+    'valorTotalCentavos',
+  ]);
+  const unitPriceCents = firstNumberFromObject(line, [
+    'preco_unitario_centavos',
+    'priceCents',
+    'preco_venda_centavos',
+    'valor_unitario_centavos',
+    'unitPriceCents',
+  ]);
+  const totalCents = Number.isFinite(directTotalCents)
+    ? Math.round(directTotalCents)
+    : Math.round((unitPriceCents || product?.preco_venda_centavos || 0) * quantity);
+  const description =
+    firstTextFromObject(line, ['nome', 'name', 'descricao', 'produto_nome'], 120) ||
+    product?.nome ||
+    `Item ${index + 1}`;
+  const ncm = normalizeDigits(
+    firstTextFromObject(line, ['ncm'], 8) ||
+      firstTextFromObject(fiscal, ['ncm'], 8) ||
+      product?.ncm,
+    8
+  );
+  const cfop = normalizeDigits(firstTextFromObject(fiscal, ['cfop'], 4) || firstTextFromObject(line, ['cfop'], 4), 4);
+  const icmsCode = normalizeDigits(
+    firstTextFromObject(fiscal, ['cst_icms', 'cstIcms', 'csosn'], 3) ||
+      firstTextFromObject(line, ['cst_icms', 'cstIcms', 'csosn'], 3),
+    3
+  );
+  const pisCst = normalizeDigits(
+    firstTextFromObject(fiscal, ['cst_pis', 'pisCst'], 2) || firstTextFromObject(line, ['cst_pis', 'pisCst'], 2),
+    2
+  );
+  const cofinsCst = normalizeDigits(
+    firstTextFromObject(fiscal, ['cst_cofins', 'cofinsCst'], 2) || firstTextFromObject(line, ['cst_cofins', 'cofinsCst'], 2),
+    2
+  );
+  const icmsRate = normalizeDecimal(fiscal.aliquota_icms ?? fiscal.aliquotaIcms ?? fiscal.icmsRate, 0);
+  const pisRate = normalizeDecimal(fiscal.aliquota_pis ?? fiscal.aliquotaPis ?? fiscal.pisRate, 0);
+  const cofinsRate = normalizeDecimal(fiscal.aliquota_cofins ?? fiscal.aliquotaCofins ?? fiscal.cofinsRate, 0);
+
+  return {
+    produto_id: product?.id || getProductIdFromLine(line),
+    codigo:
+      firstTextFromObject(line, ['codigo_barras', 'barcode', 'codigo'], 32) ||
+      (product?.codigo_barras ? String(product.codigo_barras) : '') ||
+      String(product?.id || getProductIdFromLine(line) || index + 1),
+    descricao: description,
+    categoria_id: product?.categoria?.id || null,
+    categoria_nome:
+      product?.categoria?.nome ||
+      firstTextFromObject(line, ['categoria_nome', 'categoryName'], 80) ||
+      'Sem categoria',
+    quantidade: quantity,
+    valor_centavos: totalCents,
+    cfop,
+    icms: {
+      cst: icmsCode,
+      aliquota: icmsRate,
+      valor_centavos: calculateTaxCents(totalCents, icmsRate, icmsCode),
+    },
+    pis: {
+      cst: pisCst,
+      aliquota: pisRate,
+      valor_centavos: calculateTaxCents(totalCents, pisRate, pisCst, { skipNonTaxedPisCofins: true }),
+    },
+    cofins: {
+      cst: cofinsCst,
+      aliquota: cofinsRate,
+      valor_centavos: calculateTaxCents(totalCents, cofinsRate, cofinsCst, { skipNonTaxedPisCofins: true }),
+    },
+    ncm,
+    natureza: resolveFiscalNature(ncm, pisCst, cofinsCst),
+  };
+}
+
+function getFiscalReportPeriod(query = {}) {
+  const start = normalizeText(query.data_inicio || query.dataInicio, 10);
+  const end = normalizeText(query.data_fim || query.dataFim, 10);
+
+  return {
+    data_inicio: start || 'Todo o periodo',
+    data_fim: end || 'Todo o periodo',
+  };
+}
+
+function formatReportDate(value) {
+  if (!value || value === 'Todo o periodo') {
+    return value || 'Todo o periodo';
+  }
+
+  const date = sanitizeDateFilter(value, 'start');
+  return date ? new Intl.DateTimeFormat('pt-BR').format(date) : value;
+}
+
+function resolveReportCompanyName(configuracao) {
+  const emitente = configuracao?.fiscal?.emitente || {};
+
+  return normalizeText(emitente.razao_social, 160) ||
+    normalizeText(emitente.nome_fantasia, 160) ||
+    'Empresa';
+}
+
+function buildProductFiscalReport({ configuracao, nfs, productMap, query }) {
+  const groupsByKey = new Map();
+  const totals = buildEmptyReportTotals();
+  const warnings = new Set([
+    'A coluna NAT. usa regra padrao por NCM/CST porque o cadastro atual ainda nao possui um campo especifico de natureza da receita.',
+  ]);
+  let processedItemCount = 0;
+
+  for (const nf of nfs) {
+    const payloadItems = getPayloadItemsForReport(getPlain(nf).payload);
+
+    payloadItems.forEach((line, index) => {
+      const productId = getProductIdFromLine(line);
+      const product = productId ? productMap.get(productId) : null;
+      const reportLine = buildReportLine({ line, index, product });
+      const groupKey = reportLine.categoria_id || reportLine.categoria_nome;
+      const productKey = [
+        reportLine.produto_id || reportLine.codigo,
+        reportLine.descricao,
+        reportLine.cfop,
+        reportLine.icms.cst,
+        reportLine.pis.cst,
+        reportLine.cofins.cst,
+        reportLine.ncm,
+        reportLine.natureza,
+      ].join('|');
+      const existingGroup = groupsByKey.get(groupKey) || {
+        categoria_id: reportLine.categoria_id,
+        categoria_nome: reportLine.categoria_nome,
+        ...buildEmptyReportTotals(),
+        itens: [],
+        itemMap: new Map(),
+      };
+      const existingLine = existingGroup.itemMap.get(productKey);
+
+      if (existingLine) {
+        mergeProductReportLine(existingLine, reportLine);
+      } else {
+        existingGroup.itemMap.set(productKey, reportLine);
+        existingGroup.itens.push(reportLine);
+      }
+
+      addProductTotals(existingGroup, reportLine);
+      addProductTotals(totals, reportLine);
+      groupsByKey.set(groupKey, existingGroup);
+      processedItemCount += 1;
+    });
+  }
+
+  const grupos = [...groupsByKey.values()]
+    .map(({ itemMap: _itemMap, ...group }) => ({
+      ...group,
+      itens: group.itens.sort((firstItem, secondItem) => firstItem.descricao.localeCompare(secondItem.descricao, 'pt-BR')),
+    }))
+    .sort((firstGroup, secondGroup) => firstGroup.categoria_nome.localeCompare(secondGroup.categoria_nome, 'pt-BR'));
+
+  return {
+    relatorio: 'produtos',
+    titulo: 'Resumo de Vendas por Produto',
+    gerado_em: new Date().toISOString(),
+    periodo: getFiscalReportPeriod(query),
+    empresa: {
+      nome_relatorio: resolveReportCompanyName(configuracao),
+      cnpj: configuracao?.fiscal?.emitente?.cnpj_cpf || '',
+    },
+    resumo: {
+      documentos_fiscais_considerados: nfs.length,
+      itens_vendidos_total: processedItemCount,
+      produtos_total: grupos.reduce((total, group) => total + group.itens.length, 0),
+      grupos_total: grupos.length,
+      ...totals,
+    },
+    grupos,
+    avisos: [...warnings],
+  };
+}
+
+function buildCfopFiscalReport(productReport) {
+  const itemsByCfop = new Map();
+  const totals = {
+    quantidade_total: 0,
+    valor_item_centavos: 0,
+    valor_icms_centavos: 0,
+    valor_pis_centavos: 0,
+    valor_cofins_centavos: 0,
+  };
+
+  for (const group of productReport.grupos) {
+    for (const item of group.itens) {
+      const cfop = normalizeText(item.cfop, 4) || 'Sem CFOP';
+      const existingItem = itemsByCfop.get(cfop) || {
+        cfop,
+        quantidade_total: 0,
+        valor_item_centavos: 0,
+        valor_icms_centavos: 0,
+        valor_pis_centavos: 0,
+        valor_cofins_centavos: 0,
+      };
+
+      existingItem.quantidade_total += item.quantidade;
+      existingItem.valor_item_centavos += item.valor_centavos;
+      existingItem.valor_icms_centavos += item.icms.valor_centavos;
+      existingItem.valor_pis_centavos += item.pis.valor_centavos;
+      existingItem.valor_cofins_centavos += item.cofins.valor_centavos;
+      totals.quantidade_total += item.quantidade;
+      totals.valor_item_centavos += item.valor_centavos;
+      totals.valor_icms_centavos += item.icms.valor_centavos;
+      totals.valor_pis_centavos += item.pis.valor_centavos;
+      totals.valor_cofins_centavos += item.cofins.valor_centavos;
+      itemsByCfop.set(cfop, existingItem);
+    }
+  }
+
+  const itens = [...itemsByCfop.values()].sort((firstItem, secondItem) => {
+    if (firstItem.cfop === 'Sem CFOP') return 1;
+    if (secondItem.cfop === 'Sem CFOP') return -1;
+    return firstItem.cfop.localeCompare(secondItem.cfop, 'pt-BR', { numeric: true });
+  });
+
+  return {
+    relatorio: 'cfop',
+    titulo: 'Resumo de Vendas por CFOP',
+    gerado_em: productReport.gerado_em,
+    periodo: productReport.periodo,
+    empresa: productReport.empresa,
+    resumo: {
+      ...productReport.resumo,
+      cfops_total: itens.length,
+      ...totals,
+    },
+    itens,
+    avisos: productReport.avisos.filter(warning => !warning.includes('NAT.')),
+  };
+}
+
+function formatPdfMoneyFromCents(value) {
+  return new Intl.NumberFormat('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format((Number(value) || 0) / 100);
+}
+
+function formatPdfQuantity(value) {
+  return new Intl.NumberFormat('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value) || 0);
+}
+
+function formatPdfRate(value) {
+  return new Intl.NumberFormat('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value) || 0);
+}
+
+function truncatePdfText(value, maxLength) {
+  const text = String(value || '');
+
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}.` : text;
+}
+
+function createPdfBuffer(build) {
+  return new Promise((resolve, reject) => {
+    const doc = build();
+    const chunks = [];
+
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.end();
+  });
+}
+
+function drawReportHeader(doc, report, pageNumber) {
+  const pageWidth = doc.page.width;
+  const period = `${formatReportDate(report.periodo.data_inicio)} - ${formatReportDate(report.periodo.data_fim)}`;
+
+  doc.font('Helvetica-BoldOblique').fontSize(12).fillColor('#141414');
+  doc.text(report.empresa.nome_relatorio.toUpperCase(), 24, 28, {
+    align: 'center',
+    width: pageWidth - 48,
+  });
+  doc.font('Helvetica-Oblique').fontSize(11);
+  doc.text(report.titulo, 24, 44, { align: 'center', width: pageWidth - 48 });
+  doc.text(period, 24, 60, { align: 'center', width: pageWidth - 48 });
+  doc.font('Helvetica').fontSize(7);
+  doc.text(String(pageNumber), pageWidth - 58, doc.page.height - 28, { align: 'right', width: 34 });
+  doc.text(new Intl.DateTimeFormat('pt-BR').format(new Date(report.gerado_em)), pageWidth - 112, doc.page.height - 14, {
+    align: 'right',
+    width: 88,
+  });
+}
+
+function drawTableCell(doc, text, x, y, width, height, options = {}) {
+  if (options.fillColor) {
+    doc.rect(x, y, width, height).fill(options.fillColor);
+  }
+
+  doc.rect(x, y, width, height).strokeColor('#141414').lineWidth(0.45).stroke();
+  doc.fillColor(options.color || '#0f172a')
+    .font(options.bold ? 'Helvetica-Bold' : 'Helvetica')
+    .fontSize(options.fontSize || 7)
+    .text(String(text ?? ''), x + 3, y + 4, {
+      width: Math.max(1, width - 6),
+      height: Math.max(1, height - 6),
+      align: options.align || 'left',
+      lineBreak: false,
+    });
+}
+
+function buildProductReportPdf(report) {
+  return createPdfBuffer(() => {
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 18 });
+    const columns = [
+      ['CODIGO', 48, 'right'],
+      ['DESCRICAO DO ITEM', 153, 'left'],
+      ['QUANT.', 42, 'right'],
+      ['VALOR', 48, 'right'],
+      ['CFOP', 36, 'center'],
+      ['CST', 28, 'center'],
+      ['ALIQ.', 36, 'right'],
+      ['VLR', 42, 'right'],
+      ['CST', 28, 'center'],
+      ['ALIQ.', 36, 'right'],
+      ['VLR', 42, 'right'],
+      ['CST', 28, 'center'],
+      ['ALIQ.', 36, 'right'],
+      ['VLR', 42, 'right'],
+      ['NCM', 52, 'center'],
+      ['NAT', 32, 'center'],
+    ];
+    const startX = 18;
+    const rowHeight = 18;
+    let pageNumber = 1;
+    let y = 82;
+
+    function drawHeader() {
+      drawReportHeader(doc, report, pageNumber);
+      let x = startX;
+
+      for (const [label, width, align] of columns) {
+        drawTableCell(doc, label, x, y, width, rowHeight, {
+          align,
+          bold: true,
+          color: '#141414',
+          fillColor: '#ffffff',
+        });
+        x += width;
+      }
+
+      y += rowHeight;
+    }
+
+    function ensureSpace(height = rowHeight) {
+      if (y + height <= doc.page.height - 42) {
+        return;
+      }
+
+      doc.addPage();
+      pageNumber += 1;
+      y = 82;
+      drawHeader();
+    }
+
+    function drawDataRow(values, options = {}) {
+      ensureSpace(options.height || rowHeight);
+      let x = startX;
+
+      values.forEach((value, index) => {
+        drawTableCell(doc, value, x, y, columns[index][1], options.height || rowHeight, {
+          align: columns[index][2],
+          bold: options.bold,
+          fillColor: options.fillColor,
+        });
+        x += columns[index][1];
+      });
+      y += options.height || rowHeight;
+    }
+
+    drawHeader();
+
+    for (const group of report.grupos) {
+      ensureSpace(rowHeight);
+      drawTableCell(doc, group.categoria_nome.toUpperCase(), startX, y, columns.reduce((total, column) => total + column[1], 0), rowHeight, {
+        bold: true,
+        color: '#141414',
+        fillColor: '#f8fafc',
+      });
+      y += rowHeight;
+
+      for (const item of group.itens) {
+        drawDataRow([
+          truncatePdfText(item.codigo || '-', 14),
+          truncatePdfText(item.descricao.toUpperCase(), 42),
+          formatPdfQuantity(item.quantidade),
+          formatPdfMoneyFromCents(item.valor_centavos),
+          item.cfop || '-',
+          item.icms.cst || '-',
+          formatPdfRate(item.icms.aliquota),
+          formatPdfMoneyFromCents(item.icms.valor_centavos),
+          item.pis.cst || '-',
+          formatPdfRate(item.pis.aliquota),
+          formatPdfMoneyFromCents(item.pis.valor_centavos),
+          item.cofins.cst || '-',
+          formatPdfRate(item.cofins.aliquota),
+          formatPdfMoneyFromCents(item.cofins.valor_centavos),
+          item.ncm || '-',
+          item.natureza || '-',
+        ]);
+      }
+
+      drawDataRow([
+        '',
+        'Total Grupo',
+        formatPdfQuantity(group.quantidade_total),
+        formatPdfMoneyFromCents(group.valor_total_centavos),
+        '',
+        '',
+        '',
+        formatPdfMoneyFromCents(group.icms_total_centavos),
+        '',
+        '',
+        formatPdfMoneyFromCents(group.pis_total_centavos),
+        '',
+        '',
+        formatPdfMoneyFromCents(group.cofins_total_centavos),
+        '',
+        '',
+      ], { bold: true, fillColor: '#ffffff' });
+    }
+
+    drawDataRow([
+      '',
+      'Total Geral',
+      formatPdfQuantity(report.resumo.quantidade_total),
+      formatPdfMoneyFromCents(report.resumo.valor_total_centavos),
+      '',
+      '',
+      '',
+      formatPdfMoneyFromCents(report.resumo.icms_total_centavos),
+      '',
+      '',
+      formatPdfMoneyFromCents(report.resumo.pis_total_centavos),
+      '',
+      '',
+      formatPdfMoneyFromCents(report.resumo.cofins_total_centavos),
+      '',
+      '',
+    ], { bold: true, fillColor: '#f8fafc' });
+
+    if (report.grupos.length === 0) {
+      drawDataRow(['', 'Sem itens fiscais para o filtro selecionado.', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    }
+
+    return doc;
+  });
+}
+
+function buildCfopReportPdf(report) {
+  return createPdfBuffer(() => {
+    const doc = new PDFDocument({ size: 'A4', layout: 'portrait', margin: 36 });
+    const columns = [
+      ['CFOP', 43, 160, 'left'],
+      ['QUANT', 178, 72, 'right'],
+      ['VL_ITEM', 270, 72, 'right'],
+      ['VL_ICMS', 360, 58, 'right'],
+      ['VL_PIS', 432, 60, 'right'],
+      ['VL_COFINS', 505, 60, 'right'],
+    ];
+    let pageNumber = 1;
+    let y = 104;
+
+    function drawHeader() {
+      drawReportHeader(doc, report, pageNumber);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#141414');
+
+      for (const [label, x, width, align] of columns) {
+        doc.text(label, x, y, { width, align });
+      }
+
+      y += 28;
+    }
+
+    function ensureSpace() {
+      if (y <= doc.page.height - 58) {
+        return;
+      }
+
+      doc.addPage();
+      pageNumber += 1;
+      y = 104;
+      drawHeader();
+    }
+
+    function drawValueLine(start, end, lineY) {
+      doc.strokeColor('#141414').lineWidth(0.9).moveTo(start, lineY).lineTo(end, lineY).stroke();
+    }
+
+    function drawRow(values, bold = true) {
+      ensureSpace();
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor('#141414');
+
+      values.forEach((value, index) => {
+        const [, x, width, align] = columns[index];
+        doc.text(String(value), x, y, { width, align });
+      });
+
+      for (const [, x, width] of columns.slice(1)) {
+        drawValueLine(x, x + width, y + 7);
+      }
+
+      y += 28;
+    }
+
+    drawHeader();
+
+    for (const item of report.itens) {
+      drawRow([
+        item.cfop,
+        formatPdfQuantity(item.quantidade_total),
+        formatPdfMoneyFromCents(item.valor_item_centavos),
+        formatPdfMoneyFromCents(item.valor_icms_centavos),
+        formatPdfMoneyFromCents(item.valor_pis_centavos),
+        formatPdfMoneyFromCents(item.valor_cofins_centavos),
+      ]);
+    }
+
+    drawRow([
+      'Total:',
+      formatPdfQuantity(report.resumo.quantidade_total),
+      formatPdfMoneyFromCents(report.resumo.valor_item_centavos),
+      formatPdfMoneyFromCents(report.resumo.valor_icms_centavos),
+      formatPdfMoneyFromCents(report.resumo.valor_pis_centavos),
+      formatPdfMoneyFromCents(report.resumo.valor_cofins_centavos),
+    ]);
+
+    if (report.itens.length === 0) {
+      drawRow(['Sem CFOP', '0,00', '0,00', '0,00', '0,00', '0,00'], false);
+    }
+
+    return doc;
+  });
+}
+
+function buildReportFileName(report) {
+  const prefix = report.relatorio === 'cfop' ? 'relatorio-fiscal-cfop' : 'relatorio-fiscal-produtos';
+  const company = sanitizeFilePart(report.empresa.nome_relatorio, 'empresa');
+  const start = sanitizeFilePart(report.periodo.data_inicio, 'inicio');
+  const end = sanitizeFilePart(report.periodo.data_fim, 'fim');
+
+  return `${prefix}-${company}-${start}-${end}.pdf`;
+}
+
 module.exports = {
   async list(req, res) {
     try {
       await ensureFeature(req.user.id, 'emissao_fiscal');
 
-    const limit = normalizeInteger(req.query.limit, 50, { min: 1, max: 100 });
-    const offset = normalizeInteger(req.query.offset, 0, { min: 0, max: 1000000 });
-    const where = {
-      usuario_id: req.user.id,
-    };
-
-    const status = normalizeText(req.query.status, 32);
-    const modelo = normalizeModelo(req.query.modelo, '');
-    const ambiente = normalizeText(req.query.ambiente, 20);
-    const termo = normalizeText(req.query.q, 80);
-    const dataInicio = sanitizeDateFilter(req.query.data_inicio || req.query.dataInicio, 'start');
-    const dataFim = sanitizeDateFilter(req.query.data_fim || req.query.dataFim, 'end');
-    const andConditions = [];
-
-    if (status && allowedStatuses.has(status)) {
-      where.status = status;
-    }
-
-    if (modelo) {
-      where.modelo = modelo;
-    }
-
-    if (ambiente === 'homologacao' || ambiente === 'producao') {
-      where.ambiente = ambiente;
-    }
-
-    if (termo) {
-      const numero = Number(termo);
-      const searchConditions = [
-        { chave_acesso: { [Op.iLike]: `%${termo}%` } },
-        { protocolo_autorizacao: { [Op.iLike]: `%${termo}%` } },
-      ];
-
-      if (Number.isInteger(numero)) {
-        searchConditions.push({ numero });
-      }
-
-      andConditions.push({ [Op.or]: searchConditions });
-    }
-
-    if (dataInicio || dataFim) {
-      const dateRange = {};
-
-      if (dataInicio) {
-        dateRange[Op.gte] = dataInicio;
-      }
-
-      if (dataFim) {
-        dateRange[Op.lte] = dataFim;
-      }
-
-      andConditions.push({
-        [Op.or]: [
-          { emitida_em: dateRange },
-          { emitida_em: null, created_at: dateRange },
-        ],
+      const limit = normalizeInteger(req.query.limit, 50, { min: 1, max: 100 });
+      const offset = normalizeInteger(req.query.offset, 0, { min: 0, max: 1000000 });
+      const where = buildNfWhereFromQuery(req.user.id, req.query);
+      const { rows, count } = await Nf.findAndCountAll({
+        where,
+        include: getNfArquivoIncludes(),
+        order: [['created_at', 'DESC']],
+        limit,
+        offset,
       });
-    }
+      const materializedXml = await Promise.all(rows.map(nf => ensureNfXmlArquivos(nf).catch(() => false)));
 
-    if (andConditions.length > 0) {
-      where[Op.and] = andConditions;
-    }
+      if (materializedXml.some(Boolean)) {
+        await Promise.all(rows.map(nf => nf.reload({ include: getNfArquivoIncludes() })));
+      }
 
-    const { rows, count } = await Nf.findAndCountAll({
-      where,
-      include: getNfArquivoIncludes(),
-      order: [['created_at', 'DESC']],
-      limit,
-      offset,
-    });
-    const materializedXml = await Promise.all(rows.map(nf => ensureNfXmlArquivos(nf).catch(() => false)));
+      await attachHistoricoToNfs(rows, req.user.id);
 
-    if (materializedXml.some(Boolean)) {
-      await Promise.all(rows.map(nf => nf.reload({ include: getNfArquivoIncludes() })));
-    }
-
-    await attachHistoricoToNfs(rows, req.user.id);
-
-    return res.json({
-      items: rows.map(nf => sanitizeNf(nf)),
-      total: count,
-      limit,
-      offset,
-    });
+      return res.json({
+        items: rows.map(nf => sanitizeNf(nf)),
+        total: count,
+        limit,
+        offset,
+      });
     } catch (error) {
       return handleNfError(res, error, 'Erro ao listar documentos fiscais.');
+    }
+  },
+
+  async downloadXmls(req, res) {
+    try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
+      const nfs = await findFilteredNfs(req.user.id, req.query, { includeHistorico: true });
+      const manifest = [
+        'Documento;Status;Arquivo;Situacao',
+      ];
+      const entries = [];
+
+      for (const nf of nfs) {
+        const baseName = getNfArchiveBaseName(nf);
+        const data = getPlain(nf);
+
+        for (const { kind, file } of collectNfXmlFiles(nf)) {
+          const absolutePath = toAbsolutePath(file.caminho_relativo);
+          const fallbackName = `${baseName}-${sanitizeFilePart(kind, 'xml')}.xml`;
+          const originalName = sanitizeFilePart(file.nome_original || fallbackName, fallbackName);
+          const zipPath = `${baseName}/${originalName}`;
+
+          if (!absolutePath || !fs.existsSync(absolutePath)) {
+            manifest.push(`${baseName};${data.status};${originalName};arquivo fisico nao encontrado`);
+            continue;
+          }
+
+          entries.push({ absolutePath, zipPath });
+          manifest.push(`${baseName};${data.status};${zipPath};incluido`);
+        }
+      }
+
+      const archive = sendZipResponse(res, buildFilteredExportName('documentos-fiscais-xml', req.query));
+
+      for (const entry of entries) {
+        archive.file(entry.absolutePath, { name: entry.zipPath });
+      }
+
+      if (entries.length === 0) {
+        archive.append('Nenhum XML encontrado para os filtros selecionados.\n', { name: 'sem-xmls.txt' });
+      }
+
+      archive.append(`${manifest.join('\n')}\n`, { name: 'manifesto.csv' });
+      await archive.finalize();
+    } catch (error) {
+      return handleNfError(res, error, 'Não foi possível baixar os documentos fiscais.');
+    }
+  },
+
+  async downloadReports(req, res) {
+    try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
+      const [configuracao, nfs] = await Promise.all([
+        configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id),
+        findFilteredNfs(req.user.id, req.query, { reportOnly: true }),
+      ]);
+      const productMap = await fetchReportProductMap(req.user.id, nfs);
+      const productReport = buildProductFiscalReport({
+        configuracao,
+        nfs,
+        productMap,
+        query: req.query,
+      });
+      const cfopReport = buildCfopFiscalReport(productReport);
+      const [productsPdf, cfopPdf] = await Promise.all([
+        buildProductReportPdf(productReport),
+        buildCfopReportPdf(cfopReport),
+      ]);
+      const archive = sendZipResponse(res, buildFilteredExportName('relatorios-fiscais', req.query));
+
+      archive.append(productsPdf, { name: buildReportFileName(productReport) });
+      archive.append(cfopPdf, { name: buildReportFileName(cfopReport) });
+      archive.append(JSON.stringify({
+        filtros: {
+          status: normalizeText(req.query.status, 32) || 'todos',
+          modelo: normalizeModelo(req.query.modelo, ''),
+          ambiente: normalizeText(req.query.ambiente, 20) || 'todos',
+          data_inicio: normalizeText(req.query.data_inicio || req.query.dataInicio, 10) || null,
+          data_fim: normalizeText(req.query.data_fim || req.query.dataFim, 10) || null,
+          busca: normalizeText(req.query.q, 80) || null,
+        },
+        documentos_considerados: nfs.length,
+        avisos: productReport.avisos,
+      }, null, 2), { name: 'manifesto-relatorios.json' });
+      await archive.finalize();
+    } catch (error) {
+      return handleNfError(res, error, 'Não foi possível baixar os relatórios fiscais.');
     }
   },
 

@@ -1469,6 +1469,25 @@ a {
   color: var(--orange-deep);
 }
 
+.admin-subscription-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.admin-subscription-actions button:disabled:hover {
+  border-color: var(--line-cool);
+  background: var(--surface);
+  color: var(--ink-deep);
+}
+
+.admin-subscription-actions .admin-account-action-verified,
+.admin-subscription-actions .admin-account-action-verified:disabled {
+  border-color: oklch(0.82 0.1 151);
+  background: oklch(0.95 0.045 151);
+  color: oklch(0.35 0.13 151);
+  opacity: 1;
+}
+
 .admin-subscription-actions .admin-subscription-action-danger {
   border-color: oklch(0.84 0.08 28);
   color: oklch(0.48 0.14 28);

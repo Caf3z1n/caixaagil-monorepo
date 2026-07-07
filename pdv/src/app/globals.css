@@ -11,6 +11,9 @@
   --success: var(--green);
   --danger: oklch(0.58 0.2 29);
   --button-shadow: none;
+  --pdv-list-hover-bg: transparent;
+  --pdv-list-hover-border: 2px solid var(--orange);
+  --pdv-list-hover-shadow: none;
   --pdv-app-scale: 1;
   --pdv-app-scale-inverse: 1;
 }
@@ -373,13 +376,13 @@ button {
   position: relative;
   z-index: 20;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 22px;
+  gap: clamp(10px, 1.1vw, 18px);
   width: 100%;
   height: 86px;
   min-height: 86px;
-  padding: 0 clamp(16px, 1.8vw, 36px);
+  padding: 0 clamp(14px, 1.3vw, 28px);
   border-bottom: 0;
   background: var(--orange);
   color: var(--surface);
@@ -442,14 +445,14 @@ button {
 
 .pdv-system-header-actions {
   justify-self: end;
-  gap: 12px;
+  gap: 8px;
 }
 
 .pdv-primary-nav {
-  justify-self: center;
-  width: min(100%, 980px);
+  justify-self: stretch;
+  width: 100%;
   min-width: 0;
-  max-width: min(64vw, 980px);
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 0 1px 3px;
@@ -463,8 +466,8 @@ button {
 .pdv-primary-nav-track {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
+  justify-content: center;
+  gap: 6px;
   width: max-content;
   min-width: min-content;
   margin-inline: auto;
@@ -497,9 +500,9 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
   min-height: 48px;
-  padding: 0 16px;
+  padding: 0 12px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -570,9 +573,9 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 42px;
-  height: 30px;
-  padding: 0 9px;
+  min-width: 38px;
+  height: 28px;
+  padding: 0 8px;
   border: 1px solid oklch(1 0 0 / 0.22);
   border-radius: 7px;
   background: oklch(1 0 0 / 0.11);
@@ -612,7 +615,7 @@ button {
   border: 0;
   background: var(--surface);
   color: oklch(0.59 0.22 29);
-  padding: 0 20px;
+  padding: 0 18px;
   box-shadow: var(--button-shadow);
   transition:
     transform 220ms ease-out,
@@ -649,7 +652,7 @@ button {
 }
 
 .pdv-header-settings-button {
-  width: 52px;
+  width: 48px;
   border: 0;
   background: transparent;
   color: var(--surface);
@@ -1069,9 +1072,9 @@ button {
 
 .pdv-cashier-action:hover,
 .pdv-cashier-action:focus-visible {
-  border-color: oklch(0.86 0.07 45);
-  background: oklch(0.992 0.008 62);
-  box-shadow: 0 18px 32px -28px oklch(0.16 0.03 255 / 0.34);
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
   transform: translateY(-1px);
 }
 
@@ -1352,6 +1355,7 @@ button {
   min-height: 360px;
   align-content: start;
   overflow: hidden;
+  padding: 4px;
   border: 1px solid var(--line-cool);
   border-radius: 16px;
   background: var(--surface);
@@ -1367,6 +1371,7 @@ button {
   min-height: 360px;
   align-content: start;
   overflow: hidden;
+  padding: 4px;
   border: 1px solid var(--line-cool);
   border-radius: 16px;
   background: var(--surface);
@@ -1440,7 +1445,7 @@ button {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: oklch(0.98 0.024 49);
+  background: transparent;
   opacity: 0;
   transform: scaleX(0.96);
   transform-origin: center;
@@ -1454,7 +1459,7 @@ button {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: oklch(0.98 0.024 49);
+  background: transparent;
   opacity: 0;
   transform: scaleX(0.96);
   transform-origin: center;
@@ -1466,14 +1471,14 @@ button {
 .pdv-command-line:hover,
 .pdv-command-line:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 1px oklch(0.86 0.07 45);
+  box-shadow: var(--pdv-list-hover-shadow);
   transform: translateY(-1px);
 }
 
 .pdv-history-line:hover,
 .pdv-history-line:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 1px oklch(0.86 0.07 45);
+  box-shadow: var(--pdv-list-hover-shadow);
   transform: translateY(-1px);
 }
 
@@ -1505,7 +1510,7 @@ button {
 }
 
 .pdv-history-line-agreement::before {
-  background: oklch(0.985 0.026 49);
+  background: transparent;
 }
 
 .pdv-record-copy .pdv-history-title.pdv-history-title-agreement {
@@ -1616,6 +1621,23 @@ button {
 .pdv-history-fiscal,
 .pdv-history-line-total {
   gap: 3px;
+}
+
+.pdv-command-line-total {
+  display: grid;
+  justify-items: end;
+  text-align: right;
+}
+
+.pdv-command-line-total strong {
+  order: 1;
+}
+
+.pdv-command-line-total em {
+  order: 2;
+  max-width: min(190px, 100%);
+  line-height: 1.18;
+  white-space: normal;
 }
 
 .pdv-history-line-total {
@@ -1952,7 +1974,8 @@ button {
 }
 
 .pdv-cart-line.pdv-sale-item-line:hover {
-  background: oklch(0.992 0.006 62);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
 }
 
 .pdv-sale-item-meta {
@@ -2347,12 +2370,12 @@ button {
 .pdv-product-picker-row::before {
   position: absolute;
   inset: 0;
-  border: 3px solid var(--pdv-category-accent);
+  border: 2px solid var(--pdv-category-accent, var(--orange));
   border-radius: inherit;
   content: "";
   opacity: 0;
   pointer-events: none;
-  transform: scale(0.992);
+  transform: scale(0.996);
   transition:
     opacity 140ms ease-out,
     transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -2527,9 +2550,9 @@ button {
 .pdv-product-row:focus-visible,
 .pdv-record-row:hover,
 .pdv-record-row:focus-visible {
-  border-color: oklch(0.86 0.07 45);
-  background: oklch(0.992 0.008 62);
-  box-shadow: 0 18px 32px -28px oklch(0.16 0.03 255 / 0.34);
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
   transform: translateY(-1px);
 }
 
@@ -2543,8 +2566,8 @@ button {
 .pdv-product-picker-shell-pointer .pdv-product-row.pdv-product-picker-row:hover,
 .pdv-product-picker-shell-keyboard .pdv-product-row.pdv-product-picker-row:focus-visible,
 .pdv-product-row.pdv-product-picker-row-active {
-  border-color: color-mix(in srgb, var(--pdv-category-accent) 72%, var(--line-cool));
-  background: color-mix(in srgb, var(--pdv-category-accent) 5%, var(--surface));
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
   box-shadow: none;
   transform: none;
 }
@@ -3887,6 +3910,15 @@ button {
   border: 1px solid oklch(0.88 0.007 75);
   border-radius: 12px;
   background: var(--surface);
+  transition:
+    background-color 180ms ease-out,
+    box-shadow 180ms ease-out;
+}
+
+.pdv-fiscal-history-item:hover,
+.pdv-fiscal-history-item:focus-within {
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
 }
 
 .pdv-fiscal-history-main {
@@ -4124,7 +4156,8 @@ button {
 }
 
 .pdv-checkout-item:hover {
-  background: oklch(0.992 0.006 62);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
 }
 
 .pdv-checkout-product {
@@ -4253,6 +4286,26 @@ button {
   transform-origin: left center;
 }
 
+.pdv-payment-method:not(.pdv-payment-method-active)::before {
+  position: absolute;
+  inset: 0;
+  border: var(--pdv-list-hover-border);
+  border-radius: inherit;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.996);
+  transition:
+    opacity 140ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pdv-payment-method:not(.pdv-payment-method-active):hover::before,
+.pdv-payment-method:not(.pdv-payment-method-active):focus-visible::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
 .pdv-payment-method svg {
   justify-self: center;
   color: var(--orange);
@@ -4309,8 +4362,9 @@ button {
 
 .pdv-payment-method:hover,
 .pdv-payment-method:focus-visible {
-  border-color: oklch(0.82 0.09 45);
-  box-shadow: 0 18px 32px -28px oklch(0.16 0.03 255 / 0.34);
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
   transform: translateY(-1px);
 }
 
@@ -4318,6 +4372,7 @@ button {
 .pdv-payment-method-active:focus-visible {
   border-color: var(--orange);
   background: var(--orange);
+  box-shadow: var(--pdv-list-hover-shadow);
 }
 
 .pdv-agreement-payment {
@@ -4399,9 +4454,9 @@ button {
 .pdv-agreement-client-row-active,
 .pdv-agreement-client-row:hover,
 .pdv-agreement-client-row:focus-visible {
-  border-color: oklch(0.84 0.08 45);
-  background: oklch(0.99 0.017 55);
-  box-shadow: 0 18px 32px -28px oklch(0.16 0.03 255 / 0.34);
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
   outline: none;
   transform: translateY(-1px);
 }
@@ -4586,6 +4641,7 @@ button {
 .pdv-agreement-note-list {
   display: grid;
   overflow: hidden;
+  padding: 4px;
   border: 1px solid var(--line-cool);
   border-radius: 14px;
   background: var(--surface);
@@ -4615,10 +4671,85 @@ button {
 
 .pdv-agreement-note-row:hover,
 .pdv-agreement-note-row:focus-visible,
+.pdv-installment-note-row:has(.pdv-installment-note-select:focus-visible),
+.pdv-installment-note-row:has(.pdv-installment-sale-button:focus-visible),
 .pdv-agreement-note-row-selected {
-  background: oklch(0.99 0.017 55);
-  box-shadow: inset 0 0 0 1px oklch(0.86 0.07 45);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
   outline: none;
+}
+
+.pdv-installment-overdue-text {
+  color: var(--danger) !important;
+  font-weight: 950;
+}
+
+.pdv-installment-note-row-overdue:not(.pdv-agreement-note-row-selected) {
+  background: transparent;
+}
+
+.pdv-installment-note-row-overdue:not(.pdv-agreement-note-row-selected):hover,
+.pdv-installment-note-row-overdue:not(.pdv-agreement-note-row-selected):focus-visible {
+  background: transparent;
+}
+
+.pdv-installment-note-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 0;
+  cursor: default;
+}
+
+.pdv-installment-note-select {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 190px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 70px;
+  padding: 10px 0 10px 14px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.pdv-installment-note-select:focus-visible,
+.pdv-installment-sale-button:focus-visible {
+  outline: none;
+}
+
+.pdv-installment-sale-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 92px;
+  min-height: 40px;
+  margin: 15px 14px 15px 0;
+  border: 1px solid oklch(0.89 0.052 45);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--orange);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 950;
+  transition:
+    border-color 180ms ease-out,
+    background-color 180ms ease-out,
+    color 180ms ease-out,
+    transform 180ms ease-out;
+}
+
+.pdv-installment-sale-button:hover,
+.pdv-installment-sale-button:focus-visible {
+  border-color: var(--orange);
+  background: var(--orange);
+  color: var(--surface);
+  transform: translateY(-1px);
 }
 
 .pdv-agreement-note-check {
@@ -4924,9 +5055,224 @@ button {
   color: oklch(0.55 0.2 29);
 }
 
+.pdv-installment-payment {
+  display: grid;
+  gap: 16px;
+}
+
+.pdv-installment-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 58px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.pdv-installment-total span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.pdv-installment-total span svg {
+  color: var(--orange);
+}
+
+.pdv-installment-total strong {
+  color: var(--orange);
+  font-size: 1.8rem;
+  font-weight: 950;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.pdv-installment-select {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pdv-installment-select > span {
+  color: var(--ink-deep);
+  font-size: 0.82rem;
+  font-weight: 950;
+}
+
+.pdv-installment-select .pdv-platform-select-control {
+  height: 50px;
+  border-radius: 10px;
+}
+
+.pdv-installment-select .pdv-platform-select-control:focus-visible,
+.pdv-installment-select .pdv-platform-select[data-open="true"] .pdv-platform-select-control {
+  box-shadow: none;
+}
+
+.pdv-installment-range {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.pdv-installment-range-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-deep);
+  font-size: 0.82rem;
+  font-weight: 950;
+}
+
+.pdv-installment-range-head em {
+  color: var(--orange);
+  font-size: 0.92rem;
+  font-style: normal;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.pdv-installment-range input[type="range"] {
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      oklch(0.66 0.16 153 / 0.74) 0%,
+      oklch(0.91 0.018 78) var(--pdv-installment-adjustment-position, 50%),
+      oklch(0.91 0.018 78) var(--pdv-installment-adjustment-position, 50%),
+      oklch(0.68 0.18 42 / 0.82) 100%
+    );
+  cursor: pointer;
+  outline: 0;
+}
+
+.pdv-installment-range input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border: 3px solid var(--surface);
+  border-radius: 999px;
+  background: var(--orange);
+  box-shadow: 0 2px 8px -5px oklch(0.24 0.07 42 / 0.7);
+}
+
+.pdv-installment-range input[type="range"]::-moz-range-track {
+  height: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.pdv-installment-range input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--surface);
+  border-radius: 999px;
+  background: var(--orange);
+  box-shadow: 0 2px 8px -5px oklch(0.24 0.07 42 / 0.7);
+}
+
+.pdv-installment-range-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+}
+
+.pdv-installment-range-labels small {
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.pdv-installment-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-cool);
+}
+
+.pdv-installment-summary span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+}
+
+.pdv-installment-summary small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.pdv-installment-summary strong {
+  overflow: hidden;
+  color: var(--ink-deep);
+  font-size: 1.05rem;
+  font-weight: 950;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-installment-summary span:last-child {
+  justify-items: end;
+  text-align: right;
+}
+
+.pdv-installment-summary span:last-child strong {
+  color: var(--orange);
+}
+
+.pdv-installment-preview {
+  display: grid;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.pdv-installment-preview span {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 9px 14px;
+}
+
+.pdv-installment-preview span + span {
+  border-top: 1px solid var(--line-cool);
+}
+
+.pdv-installment-preview strong,
+.pdv-installment-preview b {
+  color: var(--ink-deep);
+  font-weight: 950;
+}
+
+.pdv-installment-preview em {
+  overflow: hidden;
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pdv-sale-success {
   display: grid;
-  gap: 18px;
+  gap: 16px;
   padding-top: 2px;
 }
 
@@ -4936,7 +5282,7 @@ button {
   align-items: center;
   gap: 14px;
   min-height: 0;
-  padding: 0 0 18px;
+  padding: 0 0 16px;
   border-bottom: 1px solid var(--line-cool);
   background: transparent;
 }
@@ -4981,11 +5327,15 @@ button {
   padding: 0;
 }
 
+.pdv-sale-success-details-compact {
+  padding-top: 2px;
+}
+
 .pdv-sale-success-details div {
   display: grid;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
-  padding: 0 16px;
+  padding: 0 14px;
 }
 
 .pdv-sale-success-details div:first-child {
@@ -4999,9 +5349,8 @@ button {
 .pdv-sale-success-details dt {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  color: var(--orange);
-  font-size: 0.78rem;
+  color: var(--muted);
+  font-size: 0.76rem;
   font-weight: 950;
   line-height: 1;
 }
@@ -5103,7 +5452,7 @@ button {
 
 .pdv-fiscal-emission-status strong {
   color: var(--ink-deep);
-  font-size: 1.02rem;
+  font-size: 1rem;
   font-weight: 950;
   line-height: 1.28;
 }
@@ -5613,9 +5962,9 @@ button {
 }
 
 .pdv-sync-failure-row:hover {
-  border-color: oklch(0.86 0.045 55);
-  background: oklch(0.995 0.006 62);
-  box-shadow: 0 14px 30px -28px oklch(0.31 0.14 38 / 0.26);
+  border-color: var(--line-cool);
+  background: var(--pdv-list-hover-bg);
+  box-shadow: var(--pdv-list-hover-shadow);
 }
 
 .pdv-sync-failure-icon {
@@ -6186,6 +6535,36 @@ button {
     gap: 8px;
   }
 
+  .pdv-installment-total {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pdv-installment-summary {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .pdv-installment-summary span + span {
+    padding-top: 10px;
+    border-top: 1px solid var(--line-cool);
+  }
+
+  .pdv-installment-summary span:last-child {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .pdv-installment-preview span {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .pdv-installment-preview b {
+    grid-column: 2;
+    justify-self: start;
+  }
+
   .pdv-agreement-summary-total {
     align-items: flex-start;
     flex-direction: column;
@@ -6227,10 +6606,26 @@ button {
     grid-template-columns: 38px minmax(0, 1fr);
   }
 
+  .pdv-installment-note-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .pdv-installment-note-select {
+    grid-template-columns: 38px minmax(0, 1fr);
+    padding-right: 14px;
+  }
+
   .pdv-agreement-note-row .pdv-command-line-total {
     grid-column: 2;
     justify-items: start;
     text-align: left;
+  }
+
+  .pdv-installment-sale-button {
+    justify-self: start;
+    min-height: 36px;
+    margin: 0 14px 12px 64px;
   }
 
   .pdv-agreement-receive-footer {
@@ -6241,6 +6636,7 @@ button {
 
   .pdv-cash-payment-total strong,
   .pdv-cash-payment-balance strong,
+  .pdv-installment-total strong,
   .pdv-agreement-summary-total strong,
   .pdv-sale-success-main strong {
     font-size: 1.55rem;
@@ -6362,4 +6758,102 @@ button {
 :where(*):focus-within {
   outline: none !important;
   box-shadow: none !important;
+}
+
+:where(
+  .pdv-cashier-action:not(.pdv-cashier-action-disabled),
+  .pdv-command-line,
+  .pdv-history-line,
+  .pdv-cart-line.pdv-sale-item-line,
+  .pdv-record-row,
+  .pdv-checkout-item,
+  .pdv-agreement-client-row,
+  .pdv-agreement-line,
+  .pdv-agreement-note-row,
+  .pdv-fiscal-history-item,
+  .pdv-sync-failure-row,
+  .pdv-platform-select-option
+) {
+  position: relative;
+  overflow: hidden;
+}
+
+:where(
+  .pdv-command-line,
+  .pdv-history-line,
+  .pdv-agreement-line,
+  .pdv-agreement-note-row,
+  .pdv-checkout-item,
+  .pdv-fiscal-history-item,
+  .pdv-sync-failure-row,
+  .pdv-platform-select-option
+) {
+  border-radius: 12px;
+}
+
+:where(
+  .pdv-cashier-action:not(.pdv-cashier-action-disabled),
+  .pdv-command-line,
+  .pdv-history-line,
+  .pdv-cart-line.pdv-sale-item-line,
+  .pdv-record-row,
+  .pdv-checkout-item,
+  .pdv-agreement-client-row,
+  .pdv-agreement-line,
+  .pdv-agreement-note-row,
+  .pdv-fiscal-history-item,
+  .pdv-sync-failure-row,
+  .pdv-platform-select-option
+)::after {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border: var(--pdv-list-hover-border);
+  border-radius: inherit;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.996);
+  transition:
+    opacity 140ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:where(
+  .pdv-cashier-action:not(.pdv-cashier-action-disabled),
+  .pdv-command-line,
+  .pdv-history-line,
+  .pdv-cart-line.pdv-sale-item-line,
+  .pdv-record-row,
+  .pdv-checkout-item,
+  .pdv-agreement-client-row,
+  .pdv-agreement-line,
+  .pdv-agreement-note-row,
+  .pdv-fiscal-history-item,
+  .pdv-sync-failure-row,
+  .pdv-platform-select-option
+):where(:hover, :focus-visible, :focus-within)::after,
+.pdv-agreement-client-row-active::after,
+.pdv-agreement-note-row-selected::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+:where(
+  .pdv-cashier-action:not(.pdv-cashier-action-disabled),
+  .pdv-command-line,
+  .pdv-history-line:not(.pdv-history-line-canceled),
+  .pdv-cart-line.pdv-sale-item-line,
+  .pdv-record-row,
+  .pdv-checkout-item,
+  .pdv-agreement-client-row,
+  .pdv-agreement-line,
+  .pdv-agreement-note-row:not(.pdv-installment-note-row-overdue),
+  .pdv-fiscal-history-item,
+  .pdv-sync-failure-row,
+  .pdv-platform-select-option
+):where(:hover, :focus-visible, :focus-within),
+.pdv-agreement-client-row-active,
+.pdv-agreement-note-row-selected:not(.pdv-installment-note-row-overdue) {
+  background: transparent !important;
 }

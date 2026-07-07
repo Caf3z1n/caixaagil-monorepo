@@ -11,6 +11,7 @@ export type PromissorySaleData = AgreementSaleAdditionalData & {
   totalCents: number;
   clientName?: string | null;
   originCommandTitle?: string | null;
+  installmentPlan?: InstallmentPaymentPlan | null;
   items: Array<{
     id: string;
     name: string;
@@ -32,6 +33,27 @@ export type PromissoryFiscalDocument = {
   chave?: string | null;
 };
 
+export type InstallmentPaymentEntry = {
+  number: number;
+  dueDate: string;
+  amountCents: number;
+  paid?: boolean;
+  paidAt?: string | null;
+  paymentMethod?: string | null;
+  receivedSessionId?: string | null;
+};
+
+export type InstallmentPaymentPlan = {
+  installmentCount: number;
+  adjustmentPercent: number;
+  originalTotalCents: number;
+  adjustmentCents: number;
+  adjustedTotalCents: number;
+  customerName?: string | null;
+  observation?: string | null;
+  entries: InstallmentPaymentEntry[];
+};
+
 type PromissoryPayloadInput = {
   fiscalSettings?: Record<string, unknown> | null;
   pdvIdentity: string;
@@ -39,6 +61,15 @@ type PromissoryPayloadInput = {
   sale: PromissorySaleData;
   agreementClient?: PromissoryAgreementClient | null;
   fiscalDocument?: PromissoryFiscalDocument | null;
+};
+
+type SaleReceiptPayloadInput = {
+  fiscalSettings?: Record<string, unknown> | null;
+  paymentLabel: string;
+  pdvIdentity: string;
+  printerName?: string;
+  sale: PromissorySaleData;
+  sellerName?: string | null;
 };
 
 const promissoryLineWidth = 34;
@@ -116,6 +147,36 @@ function formatDateTime(value: string) {
   }).format(date);
 }
 
+function formatDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  const date = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Não informado";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR").format(date);
+}
+
+function formatShortDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || "").trim());
+  const date = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit"
+  }).format(date);
+}
+
 function formatQuantity(value: number) {
   return new Intl.NumberFormat("pt-BR", {
     minimumFractionDigits: value % 1 === 0 ? 0 : 2,
@@ -146,6 +207,67 @@ function buildReceiptLine(label: string, value: string) {
   }
 
   return `${left}${" ".repeat(promissoryLineWidth - left.length - right.length)}${right}`;
+}
+
+function buildFixedReceiptLine(label: string, value: string, width = 32) {
+  const left = compactText(label);
+  const right = compactText(value);
+
+  if (!left) {
+    return right.slice(0, width);
+  }
+
+  if (!right) {
+    return left.slice(0, width);
+  }
+
+  if (left.length + right.length + 1 >= width) {
+    return `${left.slice(0, width)}\n${right.slice(0, width).padStart(width, " ")}`;
+  }
+
+  return `${left}${" ".repeat(width - left.length - right.length)}${right}`;
+}
+
+function wrapReceiptText(value: string, width = 32) {
+  const text = compactText(value);
+
+  if (!text) {
+    return [""];
+  }
+
+  const words = text.split(" ");
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    if (word.length > width) {
+      if (currentLine) {
+        lines.push(currentLine);
+        currentLine = "";
+      }
+
+      for (let index = 0; index < word.length; index += width) {
+        lines.push(word.slice(index, index + width));
+      }
+
+      continue;
+    }
+
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+
+    if (nextLine.length > width) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = nextLine;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [text.slice(0, width)];
 }
 
 function getNestedRecord(source: Record<string, unknown> | null | undefined, key: string) {
@@ -192,11 +314,13 @@ function getCompanyDisplayName(fiscalSettings: Record<string, unknown> | null | 
 function buildCompanyLines(fiscalSettings: Record<string, unknown> | null | undefined, pdvIdentity: string) {
   const emitente = asRecord(fiscalSettings?.emitente);
   const document = formatDocument(emitente?.cnpj_cpf ?? emitente?.cnpjCpf ?? emitente?.cnpj);
+  const companyName = getCompanyDisplayName(fiscalSettings, pdvIdentity).toLowerCase();
+  const identity = compactText(pdvIdentity);
 
   return [
     document ? `CNPJ ${document}` : "",
-    compactText(pdvIdentity)
-  ].filter(Boolean);
+    document ? "" : identity
+  ].filter((line) => line && line.toLowerCase() !== companyName);
 }
 
 function buildFiscalReference(fiscalDocument: PromissoryFiscalDocument | null | undefined, saleId: string) {
@@ -262,6 +386,79 @@ function buildItemsText(items: PromissorySaleData["items"]) {
   return [header, divider, ...rows].join("\n");
 }
 
+function buildSaleReceiptItemsText(items: PromissorySaleData["items"]) {
+  const divider = "-".repeat(32);
+  const rows = items.flatMap((item, index) => {
+    const totalCents = Math.max(0, Math.round(item.priceCents * item.quantity));
+    const itemName = compactText(item.name).toUpperCase() || "ITEM";
+    const quantityLabel = `${formatQuantity(item.quantity)} x ${formatMoney(item.priceCents)}`;
+    const lines = [
+      ...wrapReceiptText(itemName, 32),
+      buildFixedReceiptLine(quantityLabel, formatMoney(totalCents), 32)
+    ];
+
+    return index > 0 ? [divider, ...lines] : lines;
+  });
+
+  return rows.join("\n");
+}
+
+function formatAdjustmentPercent(value: number) {
+  const formatted = new Intl.NumberFormat("pt-BR", {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0
+  }).format(Math.abs(value));
+
+  return `${value > 0 ? "+" : "-"}${formatted}%`;
+}
+
+function getInstallmentAdjustmentField(plan: InstallmentPaymentPlan | null) {
+  if (!plan || plan.adjustmentCents === 0) {
+    return null;
+  }
+
+  const isFee = plan.adjustmentCents > 0;
+  const label = isFee ? "Juros" : "Desconto";
+  const prefix = isFee ? "+" : "-";
+  const percent = plan.adjustmentPercent !== 0 ? ` (${formatAdjustmentPercent(plan.adjustmentPercent)})` : "";
+
+  return {
+    label,
+    value: `${prefix}${formatMoney(Math.abs(plan.adjustmentCents))}${percent}`
+  };
+}
+
+function buildInstallmentScheduleText(plan: InstallmentPaymentPlan) {
+  const header = `${padColumn("PARC", 4)} ${padColumn("VENC", 8)} ${padColumn("VALOR", 8, "right")} ${padColumn("PAGO", 8)}`;
+  const divider = "-".repeat(header.length);
+  const rows = plan.entries.map((entry, index) => {
+    const numberLabel = `${entry.number || index + 1}/${plan.installmentCount}`;
+    const paidLabel = entry.paid ? formatShortDateOnly(entry.paidAt || "") : "-";
+
+    return `${padColumn(numberLabel, 4)} ${padColumn(formatShortDateOnly(entry.dueDate), 8)} ${padColumn(formatMoney(entry.amountCents), 8, "right")} ${padColumn(paidLabel, 8)}`;
+  });
+
+  return [header, divider, ...rows].join("\n");
+}
+
+function buildSaleReceiptInstallmentScheduleText(plan: InstallmentPaymentPlan, saleCreatedAt: string) {
+  const entries = plan.entries.map((entry, index) => {
+    if (!entry.paid || entry.paidAt) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      paidAt: index === 0 ? saleCreatedAt : entry.paidAt
+    };
+  });
+
+  return buildInstallmentScheduleText({
+    ...plan,
+    entries
+  });
+}
+
 export function buildPromissoryNoteReceiptPayload({
   fiscalSettings,
   pdvIdentity,
@@ -302,6 +499,64 @@ export function buildPromissoryNoteReceiptPayload({
     footerNote: "Reconheco o debito acima e me comprometo a efetuar o pagamento nas condicoes ajustadas com o emitente.",
     signatureLabel: "Assinatura do cliente",
     signatureName: consumerName || debtorName,
+    printerName,
+    preferredPrinterPatterns: [
+      "TANCA TP-550 (copy 1)",
+      "TANCA TP-550",
+      "TANCA",
+      "POS-80",
+      "POS-",
+      "EPSON TM",
+      "BEMATECH",
+      "ELGIN",
+      "DARUMA",
+      "TERMICA",
+      "THERMAL"
+    ]
+  };
+}
+
+export function buildSaleReceiptPayload({
+  fiscalSettings,
+  paymentLabel,
+  pdvIdentity,
+  printerName,
+  sale,
+  sellerName
+}: SaleReceiptPayloadInput): NonFiscalReceiptPayload {
+  const installmentPlan = sale.installmentPlan ?? null;
+  const receiptPaymentLabel = installmentPlan
+    ? `Parcelamento ${installmentPlan.installmentCount}x`
+    : paymentLabel;
+  const adjustmentField = getInstallmentAdjustmentField(installmentPlan);
+  const fields = [
+    { label: "Emissão", value: formatDateTime(sale.createdAt) },
+    { label: "Pagamento", value: receiptPaymentLabel },
+    ...(adjustmentField ? [adjustmentField] : []),
+    ...(compactText(sellerName) ? [{ label: "Vendedor", value: compactText(sellerName, 80) }] : [])
+  ];
+  const sections = [
+    {
+      title: "Itens",
+      kind: "preformatted" as const,
+      content: buildSaleReceiptItemsText(sale.items)
+    },
+    ...(installmentPlan ? [{
+      title: "Parcelas",
+      kind: "preformatted" as const,
+      content: buildSaleReceiptInstallmentScheduleText(installmentPlan, sale.createdAt)
+    }] : [])
+  ];
+
+  return {
+    type: "comprovante-venda",
+    title: "COMPROVANTE DE VENDA",
+    companyName: getCompanyDisplayName(fiscalSettings, pdvIdentity),
+    companyLines: buildCompanyLines(fiscalSettings, pdvIdentity),
+    highlightLabel: "Total",
+    highlightValue: formatMoney(sale.totalCents),
+    fields,
+    sections,
     printerName,
     preferredPrinterPatterns: [
       "TANCA TP-550 (copy 1)",

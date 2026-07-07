@@ -208,6 +208,10 @@
           type: Sequelize.STRING(20),
           allowNull: true,
         },
+        parcelamento: {
+          type: Sequelize.JSONB,
+          allowNull: true,
+        },
         caixa_recebimento_id: {
           type: Sequelize.STRING(64),
           allowNull: true,
@@ -394,6 +398,11 @@
           defaultValue: 0,
         },
         pix_confirmado_centavos: {
+          type: Sequelize.INTEGER,
+          allowNull: false,
+          defaultValue: 0,
+        },
+        parcelamento_confirmado_centavos: {
           type: Sequelize.INTEGER,
           allowNull: false,
           defaultValue: 0,

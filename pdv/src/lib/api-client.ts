@@ -14,6 +14,10 @@ export function getApiBaseUrl() {
   return (process.env.NEXT_PUBLIC_API_URL ?? fallbackApiUrl).replace(/\/+$/, "");
 }
 
+function isLocalApiUrl(url: string) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(url);
+}
+
 function parseJsonResponse<TResponse>(text: string) {
   if (!text) {
     return null;
@@ -27,13 +31,26 @@ function parseJsonResponse<TResponse>(text: string) {
 }
 
 export async function apiPost<TResponse>(path: string, body: unknown) {
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
-    body: JSON.stringify(body),
-    headers: {
-      "Content-Type": "application/json"
-    },
-    method: "POST"
-  });
+  const apiBaseUrl = getApiBaseUrl();
+  let response: Response;
+
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      body: JSON.stringify(body),
+      headers: {
+        "Content-Type": "application/json"
+      },
+      method: "POST"
+    });
+  } catch {
+    throw new ApiError(
+      isLocalApiUrl(apiBaseUrl)
+        ? "API local indisponível. Inicie o backend em localhost:3333 e sincronize novamente."
+        : "Não foi possível conectar à API. Verifique a internet e tente novamente.",
+      0
+    );
+  }
+
   const text = await response.text().catch(() => "");
   const result = parseJsonResponse<TResponse>(text);
 

@@ -883,8 +883,11 @@ function createFiscalWorkerService(app, localStore, printJobQueue = null) {
         response = await printJobQueue.enqueuePrintJob({
           printerName: getFiscalPrintPrinterName(effectiveConfig),
           beforeTimeoutMs: 30_000,
-          afterTimeoutMs: 90_000,
+          afterTimeoutMs: 5_000,
           afterSettleMs: 1500,
+          clearBeforeTimeout: false,
+          clearAfterTimeout: false,
+          failAfterTimeout: false,
           shouldWaitAfterResult: (result) => Boolean(result?.success)
         }, runRequest);
       } catch (error) {

@@ -147,11 +147,47 @@ function createQueueBusyError(printerName, idleState, phase) {
   const status = normalizeOptionalText(String(firstJob.JobStatus || firstJob.Status || ""));
   const detail = [documentName, status].filter(Boolean).join(" - ");
   const phaseLabel = phase === "after"
-    ? "O Windows recebeu a impressão, mas não confirmou a conclusão do trabalho."
+    ? "O Windows recebeu a impressão, mas a fila ainda não foi concluída."
     : "A impressora ainda possui um trabalho pendente na fila.";
   const suffix = detail ? ` Trabalho atual: ${detail}.` : "";
 
-  return new Error(`${phaseLabel} Limpe a fila da impressora ${printerName} e tente novamente.${suffix}`);
+  return new Error(`${phaseLabel} Aguarde a impressora terminar ou limpe a fila da impressora ${printerName} antes de tentar novamente.${suffix}`);
+}
+
+function normalizePrintQueueJobs(jobs) {
+  return (Array.isArray(jobs) ? jobs : []).map(job => ({
+    id: job.ID ?? job.Id ?? job.JobId ?? null,
+    documentName: normalizeOptionalText(job.DocumentName || job.Name),
+    status: normalizeOptionalText(String(job.JobStatus || job.Status || "")),
+    submittedTime: job.SubmittedTime || null,
+    size: job.Size ?? null,
+    totalPages: job.TotalPages ?? null,
+    pagesPrinted: job.PagesPrinted ?? null
+  }));
+}
+
+function attachPrintQueueWarning(result, printerName, idleState, message) {
+  if (!result || typeof result !== "object") {
+    return result;
+  }
+
+  const resultData = result.data && typeof result.data === "object" ? result.data : {};
+  const technicalMessage = [result.technicalMessage, message].filter(Boolean).join(" | ");
+
+  return {
+    ...result,
+    technicalMessage: technicalMessage || result.technicalMessage || null,
+    data: {
+      ...resultData,
+      printQueue: {
+        status: "pending_after_timeout",
+        printerName,
+        waitedMs: idleState?.waitedMs ?? null,
+        pendingJobs: idleState?.pendingJobs ?? 0,
+        jobs: normalizePrintQueueJobs(idleState?.jobs)
+      }
+    }
+  };
 }
 
 function createPrintJobQueue() {
@@ -162,6 +198,9 @@ function createPrintJobQueue() {
     const beforeTimeoutMs = Number(options?.beforeTimeoutMs ?? 30_000);
     const afterTimeoutMs = Number(options?.afterTimeoutMs ?? 0);
     const afterSettleMs = Number(options?.afterSettleMs ?? 1200);
+    const clearBeforeTimeout = options?.clearBeforeTimeout !== false;
+    const clearAfterTimeout = options?.clearAfterTimeout !== false;
+    const failAfterTimeout = options?.failAfterTimeout !== false;
     const shouldWaitAfterResult = typeof options?.shouldWaitAfterResult === "function"
       ? options.shouldWaitAfterResult
       : () => afterTimeoutMs > 0;
@@ -173,6 +212,10 @@ function createPrintJobQueue() {
       });
 
       if (beforeState.status !== "idle") {
+        if (!clearBeforeTimeout) {
+          throw createQueueBusyError(printerName, beforeState, "before");
+        }
+
         await clearPrinterJobs(printerName);
 
         const recoveredState = await waitForPrinterQueueIdle(printerName, {
@@ -195,12 +238,21 @@ function createPrintJobQueue() {
       });
 
       if (afterState.status !== "idle") {
-        await clearPrinterJobs(printerName);
-        await waitForPrinterQueueIdle(printerName, {
-          timeoutMs: 10_000,
-          settleMs: 250
-        }).catch(() => null);
-        throw createQueueBusyError(printerName, afterState, "after");
+        const error = createQueueBusyError(printerName, afterState, "after");
+
+        if (clearAfterTimeout) {
+          await clearPrinterJobs(printerName);
+          await waitForPrinterQueueIdle(printerName, {
+            timeoutMs: 10_000,
+            settleMs: 250
+          }).catch(() => null);
+        }
+
+        if (failAfterTimeout) {
+          throw error;
+        }
+
+        return attachPrintQueueWarning(result, printerName, afterState, error.message);
       }
     } else if (afterSettleMs > 0) {
       await delay(afterSettleMs);

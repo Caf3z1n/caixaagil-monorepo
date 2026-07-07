@@ -5995,6 +5995,7 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 
 .configuration-flow-card-fiscal {
   padding: 28px;
+  overflow: visible;
 }
 
 .configuration-fiscal-panel {
@@ -6222,6 +6223,11 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 .fiscal-settings-form .platform-select-control {
   min-height: 42px;
   border-radius: 12px;
+}
+
+.fiscal-settings-section-tax .platform-select[data-open="true"] .platform-select-menu {
+  position: static;
+  margin-top: 6px;
 }
 
 .fiscal-certificate-row,
@@ -10254,6 +10260,24 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   gap: 10px;
 }
 
+.fiscal-documents-export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.fiscal-documents-export-actions .platform-primary-button,
+.fiscal-documents-export-actions .platform-secondary-button {
+  min-height: 42px;
+  padding-inline: 14px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
 .fiscal-documents-search {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
@@ -11658,6 +11682,16 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
     grid-template-columns: 1fr;
   }
 
+  .fiscal-documents-export-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fiscal-documents-export-actions .platform-primary-button,
+  .fiscal-documents-export-actions .platform-secondary-button {
+    width: 100%;
+  }
+
   .fiscal-documents-refresh-button {
     width: 100%;
   }
@@ -12219,7 +12253,8 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 }
 
 .fiscal-company-grid,
-.fiscal-address-grid {
+.fiscal-address-grid,
+.fiscal-tax-grid {
   grid-template-columns: repeat(12, minmax(0, 1fr));
   align-items: start;
 }
@@ -12242,6 +12277,10 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .fiscal-field-span-6 {
   grid-column: span 6;
+}
+
+.fiscal-field-span-7 {
+  grid-column: span 7;
 }
 
 .fiscal-field-span-8 {
@@ -19028,6 +19067,7 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   .fiscal-form-grid-five,
   .fiscal-company-grid,
   .fiscal-address-grid,
+  .fiscal-tax-grid,
   .fiscal-form-grid-advanced {
     grid-template-columns: 1fr;
   }
@@ -19037,6 +19077,7 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
   .fiscal-field-span-4,
   .fiscal-field-span-5,
   .fiscal-field-span-6,
+  .fiscal-field-span-7,
   .fiscal-field-span-8,
   .fiscal-field-span-12 {
     grid-column: 1 / -1;
@@ -21624,4 +21665,188 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 :where(*):focus-within {
   outline: none !important;
   box-shadow: none !important;
+}
+
+/* Shared operational-list hover, based on the PDV product picker row. */
+:where(
+  .platform-action-row,
+  .platform-access-row,
+  .platform-account-record-row,
+  .platform-payment-history-row,
+  .platform-pdv-row,
+  .platform-subaccount-action-card,
+  .configuration-payment-method,
+  .convenio-row,
+  .convenio-charge-note,
+  .convenio-charge-paid-row,
+  .convenio-charge-selected-row,
+  .convenio-charge-payment-method,
+  .cash-session-card,
+  .cash-payment-confirm-row,
+  .cash-movement-row,
+  .fiscal-document-row,
+  .fiscal-document-file-item,
+  .fiscal-group-row,
+  .product-catalog-row,
+  .product-category-order-row,
+  .stock-location-row,
+  .stock-history-row-action,
+  .stock-operation-product-row,
+  .stock-product-picker-row,
+  .stock-cart-item-row,
+  .stock-transfer-item-row,
+  .stock-movement-item-row
+):not([class*="skeleton"]):not(:disabled) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transition:
+    border-color 170ms ease-out,
+    background-color 170ms ease-out,
+    color 150ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 150ms ease-out;
+}
+
+:where(
+  .platform-action-row,
+  .platform-access-row,
+  .platform-account-record-row,
+  .platform-payment-history-row,
+  .platform-pdv-row,
+  .platform-subaccount-action-card,
+  .configuration-payment-method,
+  .convenio-row,
+  .convenio-charge-note,
+  .convenio-charge-paid-row,
+  .convenio-charge-selected-row,
+  .convenio-charge-payment-method,
+  .cash-session-card,
+  .cash-payment-confirm-row,
+  .cash-movement-row,
+  .fiscal-document-row,
+  .fiscal-document-file-item,
+  .fiscal-group-row,
+  .product-catalog-row,
+  .product-category-order-row,
+  .stock-location-row,
+  .stock-history-row-action,
+  .stock-operation-product-row,
+  .stock-product-picker-row,
+  .stock-cart-item-row,
+  .stock-transfer-item-row,
+  .stock-movement-item-row
+):not([class*="skeleton"]):not(:disabled)::after {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 2px solid var(--orange);
+  border-radius: inherit;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.992);
+  transition:
+    opacity 140ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:where(
+  .platform-action-row,
+  .platform-access-row,
+  .platform-account-record-row,
+  .platform-payment-history-row,
+  .platform-pdv-row,
+  .platform-subaccount-action-card,
+  .configuration-payment-method,
+  .convenio-row,
+  .convenio-charge-note,
+  .convenio-charge-paid-row,
+  .convenio-charge-selected-row,
+  .convenio-charge-payment-method,
+  .cash-session-card,
+  .cash-payment-confirm-row,
+  .cash-movement-row,
+  .fiscal-document-row,
+  .fiscal-document-file-item,
+  .fiscal-group-row,
+  .product-catalog-row,
+  .product-category-order-row,
+  .stock-location-row,
+  .stock-history-row-action,
+  .stock-operation-product-row,
+  .stock-product-picker-row,
+  .stock-cart-item-row,
+  .stock-transfer-item-row,
+  .stock-movement-item-row
+):not([class*="skeleton"]):not(:disabled) > * {
+  position: relative;
+  z-index: 1;
+}
+
+:where(
+  .platform-action-row,
+  .platform-access-row,
+  .platform-account-record-row,
+  .platform-payment-history-row,
+  .platform-pdv-row,
+  .platform-subaccount-action-card,
+  .configuration-payment-method,
+  .convenio-row,
+  .convenio-charge-note,
+  .convenio-charge-paid-row,
+  .convenio-charge-selected-row,
+  .convenio-charge-payment-method,
+  .cash-session-card,
+  .cash-payment-confirm-row,
+  .cash-movement-row,
+  .fiscal-document-row,
+  .fiscal-document-file-item,
+  .fiscal-group-row,
+  .product-catalog-row,
+  .product-category-order-row,
+  .stock-location-row,
+  .stock-history-row-action,
+  .stock-operation-product-row,
+  .stock-product-picker-row,
+  .stock-cart-item-row,
+  .stock-transfer-item-row,
+  .stock-movement-item-row
+):not([class*="skeleton"]):not(:disabled):is(:hover, :focus-visible, :focus-within) {
+  border-color: color-mix(in srgb, var(--orange) 72%, var(--line-cool));
+  background: color-mix(in srgb, var(--orange) 4%, var(--surface));
+  transform: translateY(-1px);
+}
+
+:where(
+  .platform-action-row,
+  .platform-access-row,
+  .platform-account-record-row,
+  .platform-payment-history-row,
+  .platform-pdv-row,
+  .platform-subaccount-action-card,
+  .configuration-payment-method,
+  .convenio-row,
+  .convenio-charge-note,
+  .convenio-charge-paid-row,
+  .convenio-charge-selected-row,
+  .convenio-charge-payment-method,
+  .cash-session-card,
+  .cash-payment-confirm-row,
+  .cash-movement-row,
+  .fiscal-document-row,
+  .fiscal-document-file-item,
+  .fiscal-group-row,
+  .product-catalog-row,
+  .product-category-order-row,
+  .stock-location-row,
+  .stock-history-row-action,
+  .stock-operation-product-row,
+  .stock-product-picker-row,
+  .stock-cart-item-row,
+  .stock-transfer-item-row,
+  .stock-movement-item-row
+):not([class*="skeleton"]):not(:disabled):is(:hover, :focus-visible, :focus-within)::after {
+  opacity: 1;
+  transform: scale(1);
 }

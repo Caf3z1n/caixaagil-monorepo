@@ -683,6 +683,8 @@ function New-ReceiptThermalText {
   $title = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'title')
   $subtitle = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'subtitle')
   $companyName = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'companyName')
+  $payloadType = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'type')
+  $isSaleReceipt = $payloadType -ieq 'comprovante-venda'
 
   if (-not [string]::IsNullOrWhiteSpace($companyName)) {
     Add-ThermalTextLine -Lines $lines -Text $companyName.ToUpperInvariant() -Width $width -Align 'center'
@@ -706,10 +708,12 @@ function New-ReceiptThermalText {
 
   if (-not [string]::IsNullOrWhiteSpace($highlightValue)) {
     [void]$lines.Add('')
-    Add-ThermalTextLine -Lines $lines -Text ($highlightLabel.ToUpperInvariant()) -Width $width -Align 'center'
-    Add-ThermalTextLine -Lines $lines -Text $highlightValue -Width $width -Align 'center'
+    $highlightAlign = if ($isSaleReceipt) { 'left' } else { 'center' }
+    Add-ThermalTextLine -Lines $lines -Text ($highlightLabel.ToUpperInvariant()) -Width $width -Align $highlightAlign
+    Add-ThermalTextLine -Lines $lines -Text $highlightValue -Width $width -Align $highlightAlign
   }
 
+  $saleFieldIndex = 0
   foreach ($field in @($Payload.fields)) {
     $fieldLabel = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $field -Name 'label')
     $fieldValue = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $field -Name 'value')
@@ -718,9 +722,19 @@ function New-ReceiptThermalText {
       continue
     }
 
-    [void]$lines.Add('')
-    Add-ThermalTextLine -Lines $lines -Text ($fieldLabel.ToUpperInvariant() + ':') -Width $width -Align 'center'
-    Add-ThermalTextLine -Lines $lines -Text $fieldValue -Width $width -Align 'center'
+    if ($isSaleReceipt) {
+      if ($saleFieldIndex -eq 0) {
+        [void]$lines.Add('')
+      }
+
+      Add-ThermalTextLine -Lines $lines -Text ($fieldLabel.ToUpperInvariant() + ': ' + $fieldValue) -Width $width -Align 'left'
+      $saleFieldIndex += 1
+    }
+    else {
+      [void]$lines.Add('')
+      Add-ThermalTextLine -Lines $lines -Text ($fieldLabel.ToUpperInvariant() + ':') -Width $width -Align 'center'
+      Add-ThermalTextLine -Lines $lines -Text $fieldValue -Width $width -Align 'center'
+    }
   }
 
   foreach ($section in @($Payload.sections)) {
@@ -839,7 +853,7 @@ try {
 
   $payloadType = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $payload -Name 'type')
 
-  if (($payloadType -ieq 'promissoria') -or ($payloadType -ieq 'resumo-turno')) {
+  if (($payloadType -ieq 'promissoria') -or ($payloadType -ieq 'resumo-turno') -or ($payloadType -ieq 'comprovante-venda')) {
     $thermalWidth = 32
     $thermalText = New-ReceiptThermalText -Payload $payload -Width $thermalWidth
     $thermalLines = @($thermalText -split "`r?`n")
@@ -850,17 +864,26 @@ try {
     elseif ($payloadType -ieq 'resumo-turno') {
       'RESUMO DO TURNO'
     }
+    elseif ($payloadType -ieq 'comprovante-venda') {
+      'COMPROVANTE DE VENDA'
+    }
     else {
       'NOTA PROMISSORIA'
     }
     $thermalPaperName = if ($payloadType -ieq 'resumo-turno') {
       'CaixaAgil Resumo Turno 72mm'
     }
+    elseif ($payloadType -ieq 'comprovante-venda') {
+      'CaixaAgil Comprovante Venda 72mm'
+    }
     else {
       'CaixaAgil Promissoria 72mm'
     }
     $thermalMessage = if ($payloadType -ieq 'resumo-turno') {
       'Resumo do turno enviado em modo texto termico.'
+    }
+    elseif ($payloadType -ieq 'comprovante-venda') {
+      'Comprovante de venda enviado em modo texto termico.'
     }
     else {
       'Promissoria enviada em modo texto termico.'

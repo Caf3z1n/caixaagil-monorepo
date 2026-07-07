@@ -92,6 +92,9 @@ Venda.init(
     metodo_pagamento_recebimento: {
       type: DataTypes.STRING(20),
     },
+    parcelamento: {
+      type: DataTypes.JSONB,
+    },
     caixa_recebimento_id: {
       type: DataTypes.STRING(64),
     },
