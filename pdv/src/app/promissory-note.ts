@@ -270,35 +270,6 @@ function wrapReceiptText(value: string, width = 32) {
   return lines.length > 0 ? lines : [text.slice(0, width)];
 }
 
-function getNestedRecord(source: Record<string, unknown> | null | undefined, key: string) {
-  return asRecord(source?.[key]);
-}
-
-function getFiscalAddress(source: Record<string, unknown> | null | undefined) {
-  return getNestedRecord(source, "endereco") ?? getNestedRecord(source, "address") ?? {};
-}
-
-function buildAddressLine(address: Record<string, unknown> | null | undefined) {
-  return [
-    compactText(address?.logradouro ?? address?.rua ?? address?.street),
-    compactText(address?.numero ?? address?.number),
-    compactText(address?.complemento ?? address?.details)
-  ].filter(Boolean).join(", ");
-}
-
-function buildRegionLine(address: Record<string, unknown> | null | undefined) {
-  const city = compactText(address?.municipio ?? address?.cidade ?? address?.city);
-  const state = compactText(address?.uf ?? address?.estado ?? address?.state).toUpperCase();
-  const cityState = city && state ? `${city}/${state}` : city || state;
-  const postalCode = formatPostalCode(address?.cep ?? address?.zip ?? address?.code);
-
-  return [
-    compactText(address?.bairro ?? address?.district),
-    cityState,
-    postalCode ? `CEP ${postalCode}` : ""
-  ].filter(Boolean).join(" - ");
-}
-
 function getCompanyDisplayName(fiscalSettings: Record<string, unknown> | null | undefined, pdvIdentity: string) {
   const emitente = asRecord(fiscalSettings?.emitente);
 
@@ -335,39 +306,6 @@ function buildFiscalReference(fiscalDocument: PromissoryFiscalDocument | null | 
   const serie = compactText(fiscalDocument?.serie);
 
   return [`${model} ${fiscalNumber}`, serie ? `Série ${serie}` : ""].filter(Boolean).join(" | ");
-}
-
-function buildDebtorSection(client: PromissoryAgreementClient | null | undefined) {
-  const fiscalData = asRecord(client?.fiscalData);
-
-  if (!fiscalData) {
-    return null;
-  }
-
-  const address = getFiscalAddress(fiscalData);
-  const document = formatDocument(fiscalData.cnpj_cpf ?? fiscalData.cnpjCpf ?? fiscalData.cnpj ?? fiscalData.documento);
-  const stateRegistration = compactText(fiscalData.inscricao_estadual ?? fiscalData.inscricaoEstadual);
-  const legalName = compactText(fiscalData.razao_social ?? fiscalData.razaoSocial ?? fiscalData.nome ?? client?.name, 58);
-  const documentLine = [
-    document ? `${document.length > 14 ? "CNPJ" : "CPF"} ${document}` : "",
-    stateRegistration ? `IE ${stateRegistration}` : ""
-  ].filter(Boolean).join(" | ");
-  const content = [
-    legalName,
-    compactText(documentLine, 58),
-    compactText(buildAddressLine(address), 58),
-    compactText(buildRegionLine(address), 58)
-  ].filter(Boolean).join("\n");
-
-  if (!content) {
-    return null;
-  }
-
-  return {
-    title: "Dados do devedor",
-    kind: "text" as const,
-    content
-  };
 }
 
 function buildItemsText(items: PromissorySaleData["items"]) {
@@ -467,18 +405,17 @@ export function buildPromissoryNoteReceiptPayload({
   agreementClient,
   fiscalDocument
 }: PromissoryPayloadInput): NonFiscalReceiptPayload {
-  const debtorName = compactText(sale.clientName ?? agreementClient?.name) || "Cliente não informado";
+  const clientName = compactText(sale.clientName ?? agreementClient?.name) || "Cliente não informado";
   const consumerName = compactText(sale.consumerName);
   const consumerObservation = compactText(sale.consumerObservation, 500);
-  const debtorSection = buildDebtorSection(agreementClient);
   const fields = [
-    { label: "Referencia fiscal", value: buildFiscalReference(fiscalDocument, sale.id) },
-    { label: "Devedor", value: debtorName },
+    { label: "Emissão", value: formatDateTime(sale.createdAt) },
+    { label: "Cliente", value: clientName },
+    { label: "Referência fiscal", value: buildFiscalReference(fiscalDocument, sale.id) },
     ...(consumerName ? [{ label: "Nome informado", value: consumerName }] : []),
-    ...(consumerObservation ? [{ label: "Observacoes", value: consumerObservation }] : [])
+    ...(consumerObservation ? [{ label: "Observações", value: consumerObservation }] : [])
   ];
   const sections = [
-    ...(debtorSection ? [debtorSection] : []),
     {
       title: "Itens da venda",
       kind: "preformatted" as const,
@@ -488,17 +425,16 @@ export function buildPromissoryNoteReceiptPayload({
 
   return {
     type: "promissoria",
-    title: "NOTA PROMISSORIA",
-    subtitle: `Emitida em ${formatDateTime(sale.createdAt)}`,
+    title: "NOTA PROMISSÓRIA",
     companyName: getCompanyDisplayName(fiscalSettings, pdvIdentity),
     companyLines: buildCompanyLines(fiscalSettings, pdvIdentity),
     highlightLabel: "Valor total",
     highlightValue: formatMoney(sale.totalCents),
     fields,
     sections,
-    footerNote: "Reconheco o debito acima e me comprometo a efetuar o pagamento nas condicoes ajustadas com o emitente.",
+    footerNote: "Reconheço o débito acima e me comprometo a efetuar o pagamento nas condições ajustadas com o emitente.",
     signatureLabel: "Assinatura do cliente",
-    signatureName: consumerName || debtorName,
+    signatureName: consumerName || clientName,
     printerName,
     preferredPrinterPatterns: [
       "TANCA TP-550 (copy 1)",

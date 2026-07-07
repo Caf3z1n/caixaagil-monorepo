@@ -1,6 +1,7 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { performance } = require("node:perf_hooks");
 
 const workerProjectPath = path.join(
   __dirname,
@@ -223,6 +224,53 @@ function tryReadWorkerResponse(command, rawOutput, rawErrorOutput) {
   return normalizeWorkerResponse(command, rawOutput, rawErrorOutput);
 }
 
+function createBridgeTiming(source) {
+  const startedAt = new Date().toISOString();
+  const start = performance.now();
+  const steps = [];
+
+  return {
+    mark(label) {
+      steps.push({
+        label,
+        elapsedMs: Number((performance.now() - start).toFixed(2))
+      });
+    },
+    snapshot() {
+      return {
+        source,
+        startedAt,
+        totalMs: Number((performance.now() - start).toFixed(2)),
+        steps
+      };
+    }
+  };
+}
+
+function appendBridgeTiming(response, timing) {
+  const data = response?.data && typeof response.data === "object" && !Array.isArray(response.data)
+    ? { ...response.data }
+    : {};
+
+  return {
+    ...response,
+    data: {
+      ...data,
+      bridgeTimings: timing.snapshot()
+    }
+  };
+}
+
+function getWorkerTimeoutMs(command) {
+  const timeoutMs = Number(
+    isFiscalPrintCommand(command)
+      ? process.env.CAIXA_AGIL_FISCAL_PRINT_TIMEOUT_MS || process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 60000
+      : process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 120000
+  );
+
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120000;
+}
+
 function killProcessTree(child) {
   if (!child?.pid) {
     return;
@@ -253,10 +301,13 @@ function killProcessTree(child) {
 }
 
 function runWorker(app, input) {
+  const timing = createBridgeTiming("electron_spawn_worker");
+  timing.mark("resolve_worker_start");
   const worker = resolveWorkerCommand(app);
+  timing.mark("resolve_worker_done");
 
   if (!worker) {
-    return Promise.resolve({
+    return Promise.resolve(appendBridgeTiming({
       success: false,
       command: input.command,
       status: "worker_nao_encontrado",
@@ -265,14 +316,16 @@ function runWorker(app, input) {
       data: {
         candidates: getWorkerCandidates(app)
       }
-    });
+    }, timing));
   }
 
   return new Promise((resolve) => {
+    timing.mark("spawn_start");
     const child = spawn(worker.command, worker.args, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
+    timing.mark("spawn_done");
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -296,13 +349,10 @@ function runWorker(app, input) {
         killProcessTree(child);
       }
 
-      resolve(response);
+      timing.mark("settled");
+      resolve(appendBridgeTiming(response, timing));
     };
-    const timeoutMs = Number(
-      isFiscalPrintCommand(input.command)
-        ? process.env.CAIXA_AGIL_FISCAL_PRINT_TIMEOUT_MS || process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 60000
-        : process.env.CAIXA_AGIL_FISCAL_WORKER_TIMEOUT_MS || 120000
-    );
+    const timeoutMs = getWorkerTimeoutMs(input.command);
     const timeout = setTimeout(() => {
       settle({
         success: false,
@@ -312,14 +362,19 @@ function runWorker(app, input) {
         technicalMessage: stderr || stdout || "Timeout aguardando processo fiscal.",
         data: null
       }, { killTree: true });
-    }, Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120000);
+    }, timeoutMs);
 
     child.stdout.on("data", chunk => {
+      if (!stdout) {
+        timing.mark("stdout_first_chunk");
+      }
+
       stdout += chunk.toString("utf8");
 
       const response = tryReadWorkerResponse(input.command, stdout, stderr);
 
       if (response) {
+        timing.mark("json_response_parsed");
         settle(response, { killTree: isFiscalPrintCommand(input.command) && response.success === false });
       }
     });
@@ -339,11 +394,14 @@ function runWorker(app, input) {
       });
     });
     child.once("close", code => {
+      timing.mark("process_closed");
       const response = normalizeWorkerResponse(input.command, stdout, stderr);
       settle(response, { exitCode: code });
     });
 
+    timing.mark("stdin_write_start");
     child.stdin.end(JSON.stringify(input), "utf8");
+    timing.mark("stdin_write_done");
   });
 }
 
@@ -709,6 +767,204 @@ async function advanceFiscalNumber(localStore, scope, config, command, payload, 
 function createFiscalWorkerService(app, localStore, printJobQueue = null) {
   const emissionLocks = new Map();
   let warmupPromise = null;
+  let persistentWorker = null;
+  let persistentQueue = Promise.resolve();
+
+  function shouldUsePersistentWorker(command) {
+    return [
+      "validar-configuracao",
+      "consultar-status-sefaz",
+      "emitir-nfce",
+      "emitir-nfce-contingencia",
+      "transmitir-nfce-contingencia",
+      "emitir-nfe",
+      "emitir-nfe-contingencia",
+      "transmitir-nfe-contingencia",
+      "cancelar",
+      "inutilizar"
+    ].includes(command);
+  }
+
+  function stopPersistentWorker() {
+    if (!persistentWorker?.child) {
+      persistentWorker = null;
+      return;
+    }
+
+    killProcessTree(persistentWorker.child);
+    persistentWorker = null;
+  }
+
+  function settlePersistentPending(session, response) {
+    const pending = session.pending;
+
+    if (!pending) {
+      return;
+    }
+
+    session.pending = null;
+    pending.settle(response);
+  }
+
+  function handlePersistentWorkerLine(session, line) {
+    const trimmed = String(line || "").trim();
+
+    if (!trimmed) {
+      return;
+    }
+
+    const pending = session.pending;
+
+    if (!pending) {
+      return;
+    }
+
+    pending.timing.mark("stdout_response_line");
+    const response = normalizeWorkerResponse(pending.input.command, trimmed, session.stderr);
+    settlePersistentPending(session, response);
+  }
+
+  function createPersistentWorkerSession() {
+    const worker = resolveWorkerCommand(app);
+
+    if (!worker) {
+      return null;
+    }
+
+    const child = spawn(worker.command, [...worker.args, "--server"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+    const session = {
+      child,
+      stdoutBuffer: "",
+      stderr: "",
+      pending: null
+    };
+
+    child.stdout.on("data", chunk => {
+      session.stdoutBuffer += chunk.toString("utf8");
+
+      let lineBreakIndex = session.stdoutBuffer.search(/\r?\n/);
+
+      while (lineBreakIndex >= 0) {
+        const line = session.stdoutBuffer.slice(0, lineBreakIndex);
+        session.stdoutBuffer = session.stdoutBuffer.slice(
+          session.stdoutBuffer[lineBreakIndex] === "\r" &&
+            session.stdoutBuffer[lineBreakIndex + 1] === "\n"
+            ? lineBreakIndex + 2
+            : lineBreakIndex + 1
+        );
+        handlePersistentWorkerLine(session, line);
+        lineBreakIndex = session.stdoutBuffer.search(/\r?\n/);
+      }
+    });
+
+    child.stderr.on("data", chunk => {
+      session.stderr += chunk.toString("utf8");
+    });
+
+    child.once("error", error => {
+      settlePersistentPending(session, {
+        success: false,
+        command: session.pending?.input?.command || "desconhecido",
+        status: "worker_spawn_error",
+        friendlyMessage: "Não foi possível iniciar o worker fiscal.",
+        technicalMessage: error.message,
+        data: null
+      });
+      persistentWorker = null;
+    });
+
+    child.once("close", code => {
+      settlePersistentPending(session, {
+        success: false,
+        command: session.pending?.input?.command || "desconhecido",
+        status: "worker_encerrado",
+        friendlyMessage: "O worker fiscal foi encerrado antes de responder.",
+        technicalMessage: session.stderr || `Processo encerrado com código ${code}.`,
+        data: null,
+        exitCode: code
+      });
+      persistentWorker = null;
+    });
+
+    return session;
+  }
+
+  function getPersistentWorkerSession() {
+    if (persistentWorker?.child && !persistentWorker.child.killed) {
+      return persistentWorker;
+    }
+
+    persistentWorker = createPersistentWorkerSession();
+    return persistentWorker;
+  }
+
+  function runPersistentWorker(input) {
+    if (!shouldUsePersistentWorker(input.command)) {
+      return runWorker(app, input);
+    }
+
+    persistentQueue = persistentQueue.catch(() => null).then(() => new Promise((resolve) => {
+      const timing = createBridgeTiming("electron_persistent_worker");
+      timing.mark("session_resolve_start");
+      const session = getPersistentWorkerSession();
+      timing.mark("session_resolve_done");
+
+      if (!session) {
+        runWorker(app, input).then(resolve);
+        return;
+      }
+
+      session.stderr = "";
+      const timeout = setTimeout(() => {
+        settle({
+          success: false,
+          command: input.command,
+          status: "worker_timeout",
+          friendlyMessage: "O worker fiscal demorou demais para responder.",
+          technicalMessage: session.stderr || "Timeout aguardando processo fiscal persistente.",
+          data: null
+        }, { resetWorker: true });
+      }, getWorkerTimeoutMs(input.command));
+
+      function settle(response, options = {}) {
+        clearTimeout(timeout);
+        session.pending = null;
+
+        if (!response.technicalMessage && session.stderr) {
+          response.technicalMessage = session.stderr.trim();
+        }
+
+        if (options.resetWorker) {
+          stopPersistentWorker();
+        }
+
+        timing.mark("settled");
+        resolve(appendBridgeTiming(response, timing));
+      }
+
+      session.pending = {
+        input,
+        timing,
+        settle
+      };
+
+      timing.mark("stdin_write_start");
+      session.child.stdin.write(`${JSON.stringify(input)}\n`, "utf8", () => {
+        timing.mark("stdin_write_done");
+      });
+    }));
+
+    return persistentQueue;
+  }
+
+  function runFiscalWorkerRequest(input) {
+    return runPersistentWorker(input);
+  }
+
+  app.once?.("before-quit", stopPersistentWorker);
 
   async function withEmissionLock(scope, command, payload, task) {
     if (!isFiscalSerializedCommand(command)) {
@@ -821,7 +1077,7 @@ function createFiscalWorkerService(app, localStore, printJobQueue = null) {
       config,
       payload: invalidationPayload
     };
-    const invalidationResponse = await runWorker(app, invalidationRequest);
+    const invalidationResponse = await runFiscalWorkerRequest(invalidationRequest);
     const recorded = await recordFiscalResponse(
       scope,
       "inutilizar",
@@ -888,7 +1144,7 @@ function createFiscalWorkerService(app, localStore, printJobQueue = null) {
     async function runRequest() {
       return command === "registrar-pendente"
         ? createQueuedFiscalResponse(command, effectivePayload, documentId)
-        : runWorker(app, request);
+        : runFiscalWorkerRequest(request);
     }
 
     let response = null;
@@ -939,7 +1195,7 @@ function createFiscalWorkerService(app, localStore, printJobQueue = null) {
 
       effectiveConfig = preparedRetry.config;
       effectivePayload = preparedRetry.payload;
-      response = await runWorker(app, {
+      response = await runFiscalWorkerRequest({
         ...request,
         correlationId: createId("fiscal-correlation"),
         config: effectiveConfig,
@@ -1086,14 +1342,14 @@ function createFiscalWorkerService(app, localStore, printJobQueue = null) {
       return warmupPromise;
     }
 
-    warmupPromise = runWorker(app, {
-      command: "listar-impressoras-disponiveis",
+    warmupPromise = runFiscalWorkerRequest({
+      command: "validar-configuracao",
       correlationId: createId("fiscal-warmup"),
       config: {},
       payload: {}
     }).catch(error => ({
       success: false,
-      command: "listar-impressoras-disponiveis",
+      command: "validar-configuracao",
       status: "warmup_error",
       friendlyMessage: "Aquecimento do worker fiscal falhou.",
       technicalMessage: error instanceof Error ? error.message : String(error),

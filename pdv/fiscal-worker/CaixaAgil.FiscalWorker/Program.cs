@@ -45,57 +45,122 @@ internal static class Program
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false
     };
+    private static readonly Dictionary<string, X509Certificate2> CertificateCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static FiscalTiming? CurrentTiming;
 
     [STAThread]
-    public static int Main()
+    public static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
+        if (args.Any(arg => string.Equals(arg, "--server", StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunServerMode();
+        }
+
         try
         {
+            CurrentTiming = FiscalTiming.Start("worker_process");
             var rawRequest = Console.In.ReadToEnd();
             rawRequest = rawRequest.TrimStart('\uFEFF');
+            MarkTiming("stdin_read");
 
             if (string.IsNullOrWhiteSpace(rawRequest))
             {
-                WriteResponse(FiscalResponse.Fail(
+                WriteResponse(AttachTiming(FiscalResponse.Fail(
                     command: "desconhecido",
                     status: "entrada_invalida",
                     friendlyMessage: "O worker fiscal não recebeu dados para processar.",
-                    technicalMessage: "STDIN vazio."));
+                    technicalMessage: "STDIN vazio.")));
                 return 1;
             }
 
             var request = JsonSerializer.Deserialize<FiscalRequest>(rawRequest, SerializerOptions);
+            MarkTiming("request_parsed");
 
             if (request is null || string.IsNullOrWhiteSpace(request.Command))
             {
-                WriteResponse(FiscalResponse.Fail(
+                WriteResponse(AttachTiming(FiscalResponse.Fail(
                     command: request?.Command ?? "desconhecido",
                     status: "entrada_invalida",
                     friendlyMessage: "Comando fiscal inválido.",
-                    technicalMessage: "Campo command ausente ou vazio."));
+                    technicalMessage: "Campo command ausente ou vazio.")));
                 return 1;
             }
 
             var response = Execute(request);
-            WriteResponse(response);
+            WriteResponse(AttachTiming(response));
             return response.Success ? 0 : 2;
         }
         catch (Exception error)
         {
-            WriteResponse(FiscalResponse.Fail(
+            WriteResponse(AttachTiming(FiscalResponse.Fail(
                 command: "desconhecido",
                 status: "erro_inesperado",
                 friendlyMessage: "Falha inesperada no worker fiscal.",
-                technicalMessage: error.ToString()));
+                technicalMessage: error.ToString())));
             return 1;
+        }
+    }
+
+    private static int RunServerMode()
+    {
+        while (true)
+        {
+            var rawRequest = Console.In.ReadLine();
+
+            if (rawRequest is null)
+            {
+                return 0;
+            }
+
+            if (string.IsNullOrWhiteSpace(rawRequest))
+            {
+                continue;
+            }
+
+            CurrentTiming = FiscalTiming.Start("worker_server_request");
+            MarkTiming("stdin_read");
+
+            try
+            {
+                var request = JsonSerializer.Deserialize<FiscalRequest>(rawRequest.TrimStart('\uFEFF'), SerializerOptions);
+                MarkTiming("request_parsed");
+
+                if (request is null || string.IsNullOrWhiteSpace(request.Command))
+                {
+                    WriteResponse(AttachTiming(FiscalResponse.Fail(
+                        command: request?.Command ?? "desconhecido",
+                        status: "entrada_invalida",
+                        friendlyMessage: "Comando fiscal inválido.",
+                        technicalMessage: "Campo command ausente ou vazio.")));
+                    continue;
+                }
+
+                var response = Execute(request);
+                WriteResponse(AttachTiming(response));
+            }
+            catch (Exception error)
+            {
+                WriteResponse(AttachTiming(FiscalResponse.Fail(
+                    command: "desconhecido",
+                    status: "erro_inesperado",
+                    friendlyMessage: "Falha inesperada no worker fiscal.",
+                    technicalMessage: error.ToString())));
+            }
+            finally
+            {
+                CurrentTiming = null;
+            }
         }
     }
 
     private static FiscalResponse Execute(FiscalRequest request)
     {
+        MarkTiming($"command:{NormalizeCommand(request.Command)}");
+
         return NormalizeCommand(request.Command) switch
         {
             "validar-configuracao" => ValidateConfiguration(request),
@@ -215,7 +280,9 @@ internal static class Program
 
     private static FiscalResponse EmitirDocumento(FiscalRequest request, string modelo)
     {
+        MarkTiming("validate_config_start");
         var validation = ValidateConfiguration(request);
+        MarkTiming("validate_config_done");
 
         if (!validation.Success)
         {
@@ -228,14 +295,23 @@ internal static class Program
 
         try
         {
+            MarkTiming("load_config_start");
             var config = FiscalConfig.FromJson(request.Config);
+            MarkTiming("load_config_done");
+            MarkTiming("build_emission_start");
             var emission = BuildNfceEmission(config, request.Payload, modelo);
+            MarkTiming("build_emission_done");
+            MarkTiming("build_xml_start");
             var xml = BuildNfceXml(emission);
+            MarkTiming("build_xml_done");
             var xmlPath = Path.Combine(config.Diretorios.Xml!, $"{emission.Chave}-nfe.xml");
 
+            MarkTiming("write_xml_start");
             Directory.CreateDirectory(config.Diretorios.Xml!);
             File.WriteAllText(xmlPath, xml, Encoding.UTF8);
+            MarkTiming("write_xml_done");
 
+            MarkTiming("prepare_unimake_xml_start");
             var nfe = new NFe().LoadFromXML(xml);
             var enviNFe = new EnviNFe
             {
@@ -245,11 +321,15 @@ internal static class Program
                 NFe = new List<NFe> { nfe }
             };
             var serviceConfig = BuildUnimakeNfceConfig(config, emission);
+            MarkTiming("prepare_unimake_xml_done");
+            MarkTiming("sefaz_authorization_start");
             var authorization = ExecuteAuthorization(emission, enviNFe, serviceConfig);
+            MarkTiming("sefaz_authorization_done");
 
             var signedXmlPath = Path.Combine(config.Diretorios.Xml!, $"{emission.Chave}-assinado.xml");
             var signedXml = authorization.SignedXml;
 
+            MarkTiming("write_authorization_files_start");
             if (!string.IsNullOrWhiteSpace(signedXml))
             {
                 File.WriteAllText(signedXmlPath, signedXml, Encoding.UTF8);
@@ -264,6 +344,7 @@ internal static class Program
             {
                 File.WriteAllText(procPath, procXml, Encoding.UTF8);
             }
+            MarkTiming("write_authorization_files_done");
 
             var responseData = new Dictionary<string, object?>
             {
@@ -1512,12 +1593,48 @@ internal static class Program
         return BuildUnimakeFiscalServiceConfig(config, emission.Modelo, emission.CodigoUf, emission.TipoEmissao);
     }
 
+    private static X509Certificate2 LoadCertificate(FiscalConfig config)
+    {
+        var path = config.Certificado.PfxPath!;
+        var password = config.Certificado.PfxPassword ?? string.Empty;
+        var lastWriteTicks = File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0;
+        var passwordHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(password)))[..16];
+        var cacheKey = $"{path}|{lastWriteTicks.ToString(CultureInfo.InvariantCulture)}|{passwordHash}";
+
+        if (CertificateCache.TryGetValue(cacheKey, out var cachedCertificate))
+        {
+            MarkTiming("certificate_cache_hit");
+            return cachedCertificate;
+        }
+
+        MarkTiming("certificate_cache_miss");
+        var certificate = new X509Certificate2(
+            path,
+            password,
+            X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
+
+        CertificateCache[cacheKey] = certificate;
+        return certificate;
+    }
+
+    private static int ResolveSefazTimeoutMs()
+    {
+        var raw = Environment.GetEnvironmentVariable("CAIXA_AGIL_SEFAZ_TIMEOUT_MS") ??
+            Environment.GetEnvironmentVariable("CAIXA_AGIL_FISCAL_SEFAZ_TIMEOUT_MS");
+
+        if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return Math.Clamp(parsed, 5000, 120000);
+        }
+
+        return 30000;
+    }
+
     private static Unimake.Business.DFe.Servicos.Configuracao BuildUnimakeFiscalServiceConfig(FiscalConfig config, string modelo, int codigoUf, string? tipoEmissao)
     {
-        var certificado = new X509Certificate2(
-            config.Certificado.PfxPath!,
-            config.Certificado.PfxPassword ?? string.Empty,
-            X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
+        MarkTiming("load_certificate_start");
+        var certificado = LoadCertificate(config);
+        MarkTiming("load_certificate_done");
 
         return new Unimake.Business.DFe.Servicos.Configuracao
         {
@@ -1533,16 +1650,14 @@ internal static class Program
             CSCIDToken = ParseInt(config.Nfce.CscId, 1),
             CSC = config.Nfce.CscToken,
             VersaoQRCodeNFCe = 2,
-            TimeOutWebServiceConnect = 120000
+            TimeOutWebServiceConnect = ResolveSefazTimeoutMs()
         };
     }
 
     private static string SignNfceXmlOffline(string xml, FiscalConfig config, NfceEmission emission)
     {
-        var certificado = new X509Certificate2(
-            config.Certificado.PfxPath!,
-            config.Certificado.PfxPassword ?? string.Empty,
-            X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.Exportable);
+        MarkTiming("offline_sign_start");
+        var certificado = LoadCertificate(config);
         var document = new XmlDocument
         {
             PreserveWhitespace = true
@@ -1586,6 +1701,7 @@ internal static class Program
         }
         MoveNfceSignatureToSchemaPosition(document);
 
+        MarkTiming("offline_sign_done");
         return document.OuterXml;
     }
 
@@ -5085,6 +5201,50 @@ internal static class Program
         return value as JsonObject;
     }
 
+    private static void MarkTiming(string label)
+    {
+        CurrentTiming?.Mark(label);
+    }
+
+    private static FiscalResponse AttachTiming(FiscalResponse response)
+    {
+        if (CurrentTiming is null)
+        {
+            return response;
+        }
+
+        CurrentTiming.Mark("response_ready");
+        var data = ToJsonObjectData(response.Data);
+        data["timings"] = JsonSerializer.SerializeToNode(CurrentTiming.Snapshot(), SerializerOptions);
+
+        return response with { Data = data };
+    }
+
+    private static JsonObject ToJsonObjectData(object? data)
+    {
+        if (data is JsonObject jsonObject)
+        {
+            return jsonObject;
+        }
+
+        if (data is null)
+        {
+            return new JsonObject();
+        }
+
+        var node = JsonSerializer.SerializeToNode(data, SerializerOptions);
+
+        if (node is JsonObject serializedObject)
+        {
+            return serializedObject;
+        }
+
+        return new JsonObject
+        {
+            ["value"] = node
+        };
+    }
+
     private static void WriteResponse(FiscalResponse response)
     {
         Console.WriteLine(JsonSerializer.Serialize(response, SerializerOptions));
@@ -5196,6 +5356,47 @@ internal static class Program
     private sealed record DanfeConfig(string? ConfigName, string? ExecutablePath, bool PreferExternal, bool UseNativeFallback);
 
     private sealed record DirectoryConfig(string? Xml, string? Logs, string? Pdf);
+
+    private sealed class FiscalTiming
+    {
+        private readonly Stopwatch _stopwatch;
+        private readonly List<TimingStep> _steps = new();
+
+        private FiscalTiming(string source)
+        {
+            Source = source;
+            StartedAt = DateTimeOffset.Now;
+            _stopwatch = Stopwatch.StartNew();
+            Mark("process_ready");
+        }
+
+        public string Source { get; }
+
+        public DateTimeOffset StartedAt { get; }
+
+        public static FiscalTiming Start(string source)
+        {
+            return new FiscalTiming(source);
+        }
+
+        public void Mark(string label)
+        {
+            _steps.Add(new TimingStep(label, Math.Round(_stopwatch.Elapsed.TotalMilliseconds, 2)));
+        }
+
+        public object Snapshot()
+        {
+            return new
+            {
+                source = Source,
+                startedAt = StartedAt,
+                totalMs = Math.Round(_stopwatch.Elapsed.TotalMilliseconds, 2),
+                steps = _steps
+            };
+        }
+    }
+
+    private sealed record TimingStep(string Label, double ElapsedMs);
 
     private sealed record FiscalResponse(
         bool Success,

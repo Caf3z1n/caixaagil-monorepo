@@ -685,6 +685,7 @@ function New-ReceiptThermalText {
   $companyName = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'companyName')
   $payloadType = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $Payload -Name 'type')
   $isSaleReceipt = $payloadType -ieq 'comprovante-venda'
+  $usesCompactFields = $isSaleReceipt -or ($payloadType -ieq 'promissoria')
 
   if (-not [string]::IsNullOrWhiteSpace($companyName)) {
     Add-ThermalTextLine -Lines $lines -Text $companyName.ToUpperInvariant() -Width $width -Align 'center'
@@ -708,12 +709,11 @@ function New-ReceiptThermalText {
 
   if (-not [string]::IsNullOrWhiteSpace($highlightValue)) {
     [void]$lines.Add('')
-    $highlightAlign = if ($isSaleReceipt) { 'left' } else { 'center' }
-    Add-ThermalTextLine -Lines $lines -Text ($highlightLabel.ToUpperInvariant()) -Width $width -Align $highlightAlign
-    Add-ThermalTextLine -Lines $lines -Text $highlightValue -Width $width -Align $highlightAlign
+    Add-ThermalTextLine -Lines $lines -Text ($highlightLabel.ToUpperInvariant()) -Width $width -Align 'center'
+    Add-ThermalTextLine -Lines $lines -Text $highlightValue -Width $width -Align 'center'
   }
 
-  $saleFieldIndex = 0
+  $compactFieldIndex = 0
   foreach ($field in @($Payload.fields)) {
     $fieldLabel = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $field -Name 'label')
     $fieldValue = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $field -Name 'value')
@@ -722,13 +722,13 @@ function New-ReceiptThermalText {
       continue
     }
 
-    if ($isSaleReceipt) {
-      if ($saleFieldIndex -eq 0) {
+    if ($usesCompactFields) {
+      if ($compactFieldIndex -eq 0) {
         [void]$lines.Add('')
       }
 
       Add-ThermalTextLine -Lines $lines -Text ($fieldLabel.ToUpperInvariant() + ': ' + $fieldValue) -Width $width -Align 'left'
-      $saleFieldIndex += 1
+      $compactFieldIndex += 1
     }
     else {
       [void]$lines.Add('')
