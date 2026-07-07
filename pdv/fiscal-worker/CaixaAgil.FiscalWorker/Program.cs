@@ -1389,7 +1389,7 @@ internal static class Program
 
         return Regex.IsMatch(
             message,
-            "host n[aã]o .*conhecido|no such host|name or service not known|could not resolve|remote name could not be resolved|timeout|timed out|tempo limite|connection refused|conex[aã]o recusada|network is unreachable|rede .*inacess|unable to connect|falha .*conex|erro .*conex|webservice .*indispon",
+            "host n[aã]o .*conhecido|no such host|name or service not known|could not resolve|remote name could not be resolved|timeout|timed out|tempo limite|connection refused|conex[aã]o recusada|network is unreachable|rede .*inacess|unable to connect|falha .*conex|erro .*conex|webservice .*indispon|nferesultmsg|doctype html|<html|403\\s*-\\s*forbidden|access is denied|xml retornado pelo web-service",
             RegexOptions.IgnoreCase);
     }
 

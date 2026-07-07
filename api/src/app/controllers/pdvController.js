@@ -1536,11 +1536,11 @@ function normalizeFiscalStatus(document, rawResult, data) {
     return 'autorizada';
   }
 
-  if (status.includes('cancel')) {
+  if (success && (status.includes('cancel') || ['101', '135', '155'].includes(cStat))) {
     return 'cancelada';
   }
 
-  if (status.includes('inutil')) {
+  if (success && (status.includes('inutil') || cStat === '102')) {
     return 'inutilizada';
   }
 

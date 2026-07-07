@@ -617,6 +617,20 @@ function isDuplicateFiscalNumberResponse(response) {
   return status.includes("duplicidade") || code === 204 || code === 539 || /duplicidade\s+de\s+nf-e/i.test(message);
 }
 
+function isFiscalCommunicationFailureResponse(response) {
+  const data = getResponseData(response);
+  const text = [
+    response?.status,
+    response?.friendlyMessage,
+    response?.technicalMessage,
+    response?.mensagemSefaz,
+    data.xMotivo,
+    data.mensagemOperador
+  ].filter(Boolean).join(" ");
+
+  return /nferesultmsg|doctype html|<html|403\s*-\s*forbidden|access is denied|xml retornado pelo web-service|timeout|timed out|tempo limite|connection refused|webservice\s+indispon/i.test(text);
+}
+
 function isAutoInutilizationEligible(command, response, payload) {
   if (!isFiscalEmissionCommand(command) || response?.success) {
     return false;
@@ -633,6 +647,7 @@ function isAutoInutilizationEligible(command, response, payload) {
   }
 
   if (
+    isFiscalCommunicationFailureResponse(response) ||
     status.includes("contingencia") ||
     status.includes("duplicidade") ||
     status.includes("denegada") ||
