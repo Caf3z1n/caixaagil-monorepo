@@ -5496,6 +5496,8 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 
 .configuration-payment-methods {
   display: grid;
+  gap: 0;
+  padding: 4px;
   overflow: hidden;
   border: 1px solid var(--line-cool);
   border-radius: 14px;
@@ -5511,12 +5513,14 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   padding: 10px 12px;
   border: 0;
   border-top: 1px solid var(--line-cool);
+  border-radius: 10px;
   background: transparent;
   color: var(--ink);
   cursor: pointer;
   text-align: left;
   transition:
     background-color 180ms ease-out,
+    box-shadow 180ms ease-out,
     color 180ms ease-out;
 }
 
@@ -5524,13 +5528,28 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   border-top: 0;
 }
 
-.configuration-payment-method:hover,
-.configuration-payment-method:focus-visible {
+.configuration-payment-method:not(:disabled):hover,
+.configuration-payment-method:not(:disabled):focus-visible {
+  outline: 0;
   background: oklch(0.982 0.016 62);
+  box-shadow: inset 0 0 0 2px oklch(0.72 0.19 45 / 0.86);
 }
 
 .configuration-payment-method:disabled {
   cursor: not-allowed;
+}
+
+.configuration-payment-method-locked {
+  color: var(--muted);
+}
+
+.configuration-payment-method-locked .configuration-payment-method-icon,
+.configuration-payment-method-locked .configuration-switch {
+  opacity: 0.58;
+}
+
+.configuration-payment-method-locked .configuration-payment-method-copy strong {
+  color: var(--ink-muted);
 }
 
 .configuration-payment-method-icon {
@@ -5645,6 +5664,9 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 }
 
 .configuration-setting-list {
+  display: grid;
+  gap: 0;
+  padding: 4px;
   overflow: hidden;
   border: 1px solid var(--line-cool);
   border-radius: 14px;
@@ -5660,6 +5682,7 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   min-height: 62px;
   padding: 10px 14px;
   border-top: 1px solid var(--line-cool);
+  border-radius: 10px;
   isolation: isolate;
   overflow: hidden;
 }
@@ -6805,6 +6828,17 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   max-width: 13ch;
 }
 
+.convenio-receipt-page-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.convenio-receipt-page-head > span {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 .convenio-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -7284,6 +7318,27 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   color: var(--orange);
 }
 
+.convenio-empty small {
+  max-width: 32ch;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 780;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.convenio-row-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.convenio-overdue-text {
+  color: var(--danger);
+  font-style: normal;
+  font-weight: 950;
+}
+
 .convenio-row-skeleton {
   height: 70px;
   border: 1px solid var(--line-cool);
@@ -7507,32 +7562,65 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   margin-top: 14px;
 }
 
+.convenio-charge-client-summary {
+  margin-top: 18px;
+}
+
+.convenio-charge-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.convenio-charge-status-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pdv-status-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line-cool);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 950;
+  transition:
+    background-color 180ms ease-out,
+    border-color 180ms ease-out,
+    color 180ms ease-out;
+}
+
+.pdv-status-filter-chip span {
+  color: inherit;
+  font-size: 0.72rem;
+  font-weight: 950;
+}
+
+.pdv-status-filter-chip:hover,
+.pdv-status-filter-chip:focus-visible,
+.pdv-status-filter-chip-active {
+  border-color: oklch(0.9 0.052 45);
+  background: oklch(0.982 0.016 62);
+  color: var(--orange);
+  outline: 0;
+}
+
 .convenio-charge-stage {
   display: grid;
   gap: 16px;
   margin-top: 18px;
-  min-height: 312px;
   animation: convenio-receipt-content-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.convenio-charge-stage-head {
-  display: grid;
-  gap: 6px;
-}
-
-.convenio-charge-stage-head h3 {
-  margin: 0;
-  color: var(--ink-deep);
-  font-size: 1.08rem;
-  font-weight: 950;
-  line-height: 1.15;
-}
-
-.convenio-charge-stage-head p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
-  font-weight: 650;
 }
 
 .convenio-charge-section {
@@ -7610,7 +7698,15 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
     background-color 180ms ease-out,
     border-color 180ms ease-out,
     box-shadow 180ms ease-out,
-    transform 180ms ease-out;
+  transform 180ms ease-out;
+}
+
+.convenio-charge-note-simple {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.convenio-charge-installment-note {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .convenio-charge-note:hover,
@@ -7638,6 +7734,10 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   cursor: pointer;
   font: inherit;
   text-align: left;
+}
+
+.convenio-charge-note-main:disabled {
+  cursor: default;
 }
 
 .convenio-charge-check {
@@ -7675,6 +7775,18 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   white-space: nowrap;
 }
 
+.convenio-charge-note-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 820;
+  line-height: 1.25;
+}
+
 .convenio-charge-note-copy small,
 .convenio-charge-selected-row small,
 .convenio-charge-paid-row small {
@@ -7694,7 +7806,38 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   white-space: nowrap;
 }
 
+.convenio-charge-note-status {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 118px;
+}
+
+.convenio-charge-note-status em {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1.15;
+  text-align: right;
+}
+
+.convenio-charge-note-status .convenio-overdue-text {
+  color: var(--danger);
+}
+
+.convenio-charge-note-status strong {
+  color: var(--ink-deep);
+  font-size: 0.98rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
 .convenio-charge-detail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   align-self: center;
   min-height: 32px;
   margin-right: 10px;
@@ -7714,48 +7857,24 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
 }
 
 .convenio-charge-detail-button:hover,
-.convenio-charge-detail-button:focus-visible,
-.convenio-charge-detail-button[aria-expanded="true"] {
+.convenio-charge-detail-button:focus-visible {
   border-color: var(--orange);
   background: var(--orange);
   color: var(--surface);
   outline: 0;
 }
 
-.convenio-charge-note-detail {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  padding: 12px;
-  border-top: 1px solid var(--line-cool);
-  background: oklch(0.985 0.006 78);
-  animation: convenio-receipt-content-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.convenio-charge-note-detail span,
 .convenio-charge-payment-summary span {
   display: grid;
   gap: 4px;
   min-width: 0;
 }
 
-.convenio-charge-note-detail small,
 .convenio-charge-payment-summary small {
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 900;
   line-height: 1;
-}
-
-.convenio-charge-note-detail strong {
-  overflow: hidden;
-  color: var(--ink-deep);
-  font-size: 0.78rem;
-  font-weight: 900;
-  line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .convenio-charge-empty {
@@ -7853,6 +7972,119 @@ html[data-platform-flow-fallback="true"][data-platform-flow-motion="backward"] .
   color: var(--green);
   font-size: 1.06rem;
   font-weight: 950;
+  white-space: nowrap;
+}
+
+.platform-modal-backdrop.convenio-sale-detail-backdrop {
+  z-index: 130;
+}
+
+.platform-modal.convenio-sale-detail-modal {
+  width: min(520px, calc(100vw - 40px));
+  padding: 30px;
+}
+
+.convenio-sale-detail-head {
+  gap: 6px;
+}
+
+.convenio-sale-detail-total {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  margin: 22px 0 16px;
+  padding: 18px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: oklch(0.985 0.008 75);
+  text-align: center;
+}
+
+.convenio-sale-detail-total small,
+.convenio-sale-detail-list dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.convenio-sale-detail-total strong {
+  color: var(--ink-deep);
+  font-size: 1.65rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.convenio-sale-detail-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.convenio-sale-detail-list div {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-cool);
+}
+
+.convenio-sale-detail-list div:last-child {
+  border-bottom: 0;
+}
+
+.convenio-sale-detail-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 900;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.convenio-sale-detail-actions {
+  grid-template-columns: auto;
+  justify-content: end;
+}
+
+.convenio-charge-receive-footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line-cool);
+}
+
+.convenio-charge-receive-footer span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.convenio-charge-receive-footer em {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.convenio-charge-receive-footer strong {
+  color: var(--ink-deep);
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+.convenio-charge-receive-footer > strong {
+  color: var(--green);
+  font-size: 1.18rem;
   white-space: nowrap;
 }
 
@@ -20348,16 +20580,26 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
     margin: 0 0 12px 52px;
   }
 
-  .convenio-charge-note-detail {
-    grid-template-columns: 1fr;
-    padding-left: 52px;
-  }
-
   .convenio-charge-paid-row,
   .convenio-charge-selected-row,
   .convenio-charge-payment-summary {
     grid-template-columns: 1fr;
     justify-items: start;
+  }
+
+  .convenio-sale-detail-list div {
+    grid-template-columns: 1fr;
+    align-items: start;
+    gap: 5px;
+  }
+
+  .convenio-sale-detail-list dd {
+    text-align: left;
+  }
+
+  .convenio-sale-detail-actions {
+    grid-template-columns: 1fr;
+    justify-content: stretch;
   }
 
   .convenio-charge-payment-methods {

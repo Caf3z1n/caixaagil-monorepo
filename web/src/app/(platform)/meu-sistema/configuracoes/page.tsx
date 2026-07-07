@@ -23,6 +23,7 @@ import {
   QrCode,
   ReceiptText,
   Settings2,
+  UsersRound,
   WalletCards
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -47,8 +48,8 @@ import {
 } from "@/lib/subscription-entitlements";
 
 type PaymentMethodKey = "dinheiro" | "pix" | "cartao" | "parcelamento" | "convenio";
-type OperationalPaymentMethodKey = "dinheiro" | "pix" | "cartao" | "parcelamento";
-type ConfigurablePaymentMethodKey = Exclude<PaymentMethodKey, "convenio">;
+type OperationalPaymentMethodKey = "dinheiro" | "pix" | "cartao";
+type ConfigurablePaymentMethodKey = PaymentMethodKey;
 type PaymentSettings = Record<PaymentMethodKey, boolean>;
 type CommandSettings = {
   ativo: boolean;
@@ -99,7 +100,7 @@ type ConfigurationArea = {
   title: string;
   description: string;
   icon: LucideIcon;
-  feature?: "convenios" | "employees" | "expenses";
+  feature?: "customers" | "employees" | "expenses";
   step?: ConfigurationFlowStep;
 };
 
@@ -145,7 +146,7 @@ const defaultIntegrationSettings: IntegrationSettings = {
   }
 };
 
-const operationalPaymentMethodKeys: OperationalPaymentMethodKey[] = ["dinheiro", "pix", "cartao", "parcelamento"];
+const operationalPaymentMethodKeys: OperationalPaymentMethodKey[] = ["dinheiro", "pix", "cartao"];
 
 const paymentMethodOptions: Array<{
   id: ConfigurablePaymentMethodKey;
@@ -172,9 +173,15 @@ const paymentMethodOptions: Array<{
     icon: CreditCard
   },
   {
+    id: "convenio",
+    title: "Convênios",
+    description: "Receba depois com cliente cadastrado.",
+    icon: HandCoins
+  },
+  {
     id: "parcelamento",
     title: "Parcelamento",
-    description: "Venda em parcelas no PDV.",
+    description: "Venda em parcelas para clientes.",
     icon: ReceiptText
   }
 ];
@@ -194,7 +201,7 @@ function normalizePaymentSettings(value?: Partial<PaymentSettings> | null): Paym
     ...value
   };
 
-  if (!Object.values(nextSettings).some(Boolean)) {
+  if (!operationalPaymentMethodKeys.some(method => nextSettings[method])) {
     return defaultPaymentSettings;
   }
 
@@ -242,6 +249,14 @@ function countActiveOperationalPaymentMethods(settings: PaymentSettings) {
   return operationalPaymentMethodKeys.filter(method => settings[method]).length;
 }
 
+function isCustomerPaymentFeatureActive(settings: PaymentSettings) {
+  return settings.convenio || settings.parcelamento;
+}
+
+function isCustomerPaymentMethod(method: PaymentMethodKey) {
+  return method === "convenio" || method === "parcelamento";
+}
+
 function withFiscalEmissionStatus(settings: FiscalSettings, active: boolean) {
   const normalizedSettings = normalizeFiscalSettings(settings);
   const activeEnvironment = {
@@ -269,10 +284,6 @@ function getFlowStepIndex(step: ConfigurationFlowStep) {
   }
 
   return 2;
-}
-
-function getFlowStepCount(step: ConfigurationFlowStep) {
-  return Math.max(getFlowStepIndex(step) + 1, 3);
 }
 
 function isFiscalFlowStep(step: ConfigurationFlowStep) {
@@ -517,8 +528,11 @@ export default function MeuSistemaConfiguracoesPage() {
     () => countActiveOperationalPaymentMethods(paymentSettings),
     [paymentSettings]
   );
-  const activeProgressIndex = getFlowStepIndex(flowStep);
-  const progressStepCount = getFlowStepCount(flowStep);
+  const isCustomerPaymentEnabled = useMemo(
+    () => isCustomerPaymentFeatureActive(paymentSettings),
+    [paymentSettings]
+  );
+  const visiblePaymentMethodOptions = paymentMethodOptions;
   const fiscalDeactivationPresence = useModalPresence(pendingFiscalDeactivation);
   const hasVisibleModal = fiscalDeactivationPresence.isPresent;
   const flowPanelClassName = `platform-flow-panel platform-flow-panel-${flowMotion}`;
@@ -545,7 +559,7 @@ export default function MeuSistemaConfiguracoesPage() {
         },
         {
           title: "Formas de pagamento",
-          description: "Recebimentos habilitados no PDV.",
+          description: "Dinheiro, Pix, Cartão e opções de cliente.",
           icon: CreditCard,
           step: "payments"
         },
@@ -562,10 +576,10 @@ export default function MeuSistemaConfiguracoesPage() {
           feature: "expenses"
         },
         {
-          title: "Convênios",
-          description: "Clientes para receber depois.",
-          icon: HandCoins,
-          feature: "convenios"
+          title: "Clientes",
+          description: "Convênios e parcelamento no PDV.",
+          icon: UsersRound,
+          feature: "customers"
         },
         {
           title: "APIs externas",
@@ -781,6 +795,71 @@ export default function MeuSistemaConfiguracoesPage() {
               : method === "parcelamento"
                 ? "Não foi possível alterar parcelamento."
                 : "Não foi possível salvar as formas de pagamento."
+      });
+    } finally {
+      setSavingMethod(null);
+    }
+  }
+
+  async function updateCustomerPaymentFeature(active: boolean) {
+    if (savingMethod) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const nextSettings: PaymentSettings = {
+      ...paymentSettings,
+      convenio: active,
+      parcelamento: active
+    };
+
+    if (countActiveOperationalPaymentMethods(nextSettings) === 0) {
+      setFeedback({
+        tone: "warning",
+        message: "Mantenha pelo menos uma forma operacional ativa para o PDV."
+      });
+      return;
+    }
+
+    const previousSettings = paymentSettings;
+
+    setPaymentSettings(nextSettings);
+    setSavingMethod("convenio");
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/formas-pagamento",
+        {
+          formas_pagamento: nextSettings
+        },
+        { token }
+      );
+
+      setPaymentSettings(normalizePaymentSettings(configuracao.formas_pagamento));
+      setFeedback({
+        tone: "success",
+        message: active
+          ? "Clientes ativados. Convênios e parcelamento foram liberados."
+          : "Clientes desativados."
+      });
+    } catch (error) {
+      setPaymentSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível alterar clientes."
       });
     } finally {
       setSavingMethod(null);
@@ -1153,7 +1232,7 @@ export default function MeuSistemaConfiguracoesPage() {
                           const targetStep = area.step;
                           const isEmployeesArea = area.feature === "employees";
                           const isExpensesArea = area.feature === "expenses";
-                          const isConveniosArea = area.feature === "convenios";
+                          const isCustomersArea = area.feature === "customers";
                           const isFiscalIssuanceArea = targetStep === "fiscalIssuance";
                           const isFiscalArea = targetStep === "fiscalCompany" || targetStep === "fiscalIssuance";
 
@@ -1314,14 +1393,29 @@ export default function MeuSistemaConfiguracoesPage() {
                             );
                           }
 
-                          if (isConveniosArea) {
-                            const isConvenioActive = paymentSettings.convenio;
-                            const isSavingConvenio = savingMethod === "convenio";
+                          if (isCustomersArea) {
+                            const isCustomersActive = isCustomerPaymentFeatureActive(paymentSettings);
+                            const isSavingCustomers = savingMethod === "convenio";
+                            const customersEntryClassName = isCustomersActive
+                              ? "configuration-setting-fiscal-entry"
+                              : "configuration-setting-fiscal-entry configuration-setting-fiscal-entry-disabled";
+                            const customersEntryContent = (
+                              <>
+                                <span className="configuration-setting-icon" aria-hidden="true">
+                                  <Icon size={19} />
+                                </span>
+
+                                <span className="configuration-setting-copy">
+                                  <strong>{area.title}</strong>
+                                  <small>{area.description}</small>
+                                </span>
+                              </>
+                            );
 
                             return (
                               <article
                                 className={
-                                  isConvenioActive
+                                  isCustomersActive
                                     ? "configuration-setting-row configuration-setting-fiscal-option"
                                     : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
                                 }
@@ -1330,35 +1424,34 @@ export default function MeuSistemaConfiguracoesPage() {
                                 onPointerEnter={startConfigurationPointerWave}
                                 onPointerLeave={stopConfigurationWave}
                               >
-                                <Link
-                                  className="configuration-setting-fiscal-entry"
-                                  href={buildPlatformReturnHref("/meu-sistema/convenios", "/meu-sistema/configuracoes")}
-                                >
-                                  <span className="configuration-setting-icon" aria-hidden="true">
-                                    <Icon size={19} />
+                                {isCustomersActive ? (
+                                  <Link
+                                    className={customersEntryClassName}
+                                    href={buildPlatformReturnHref("/meu-sistema/convenios", "/meu-sistema/configuracoes")}
+                                  >
+                                    {customersEntryContent}
+                                  </Link>
+                                ) : (
+                                  <span className={`${customersEntryClassName} configuration-setting-fiscal-entry-static`}>
+                                    {customersEntryContent}
                                   </span>
-
-                                  <span className="configuration-setting-copy">
-                                    <strong>{area.title}</strong>
-                                    <small>{area.description}</small>
-                                  </span>
-                                </Link>
+                                )}
 
                                 <button
-                                  aria-checked={isConvenioActive}
-                                  aria-label={isConvenioActive ? "Desativar convênios" : "Ativar convênios"}
+                                  aria-checked={isCustomersActive}
+                                  aria-label={isCustomersActive ? "Desativar clientes" : "Ativar clientes"}
                                   className={
-                                    isConvenioActive
+                                    isCustomersActive
                                       ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
                                       : "configuration-setting-fiscal-toggle"
                                   }
                                   disabled={isLoading || Boolean(savingMethod)}
                                   role="switch"
                                   type="button"
-                                  onClick={() => void updatePaymentMethod("convenio", !isConvenioActive)}
+                                  onClick={() => void updateCustomerPaymentFeature(!isCustomersActive)}
                                 >
                                   <span className="configuration-switch" aria-hidden="true">
-                                    {isSavingConvenio ? (
+                                    {isSavingCustomers ? (
                                       <LoaderCircle className="configuration-switch-loader" size={15} />
                                     ) : (
                                       <span />
@@ -1619,7 +1712,7 @@ export default function MeuSistemaConfiguracoesPage() {
                 </header>
 
                 <div className="configuration-payment-toolbar" aria-label="Resumo das formas de pagamento">
-                  <span className="configuration-payment-toolbar-title">Recebimentos</span>
+                  <span className="configuration-payment-toolbar-title">Formas disponíveis</span>
                   <span className="configuration-setting-badge configuration-setting-badge-active">
                     {activePaymentCount} {activePaymentCount === 1 ? "ativa" : "ativas"}
                   </span>
@@ -1640,30 +1733,46 @@ export default function MeuSistemaConfiguracoesPage() {
                   </div>
                 ) : null}
 
+                {!isLoading && !isCustomerPaymentEnabled ? (
+                  <div className="auth-feedback auth-feedback-warning configuration-feedback" role="status">
+                    <span className="auth-feedback-marker">
+                      <AlertTriangle aria-hidden="true" size={17} />
+                    </span>
+                    <span className="auth-feedback-copy">
+                      <strong>Ative Clientes para usar Convênios e Parcelamento no PDV.</strong>
+                    </span>
+                  </div>
+                ) : null}
+
                 {isLoading ? (
                   <div className="configuration-payment-skeleton" aria-live="polite">
-                    {paymentMethodOptions.map(option => (
+                    {visiblePaymentMethodOptions.map(option => (
                       <span key={option.id} />
                     ))}
                   </div>
                 ) : (
                   <div className="configuration-payment-methods">
-                    {paymentMethodOptions.map(option => {
+                    {visiblePaymentMethodOptions.map(option => {
                       const Icon = option.icon;
                       const isActive = paymentSettings[option.id];
                       const isOperationalMethod = operationalPaymentMethodKeys.includes(option.id as OperationalPaymentMethodKey);
                       const isLastActive = isOperationalMethod && isActive && activeOperationalPaymentCount === 1;
+                      const isCustomerMethodLocked = isCustomerPaymentMethod(option.id) && !isCustomerPaymentEnabled;
                       const isSaving = savingMethod === option.id;
 
                       return (
                         <button
                           aria-checked={isActive}
                           className={
-                            isActive
-                              ? "configuration-payment-method configuration-payment-method-active"
-                              : "configuration-payment-method"
+                            [
+                              "configuration-payment-method",
+                              isActive ? "configuration-payment-method-active" : "",
+                              isCustomerMethodLocked ? "configuration-payment-method-locked" : ""
+                            ]
+                              .filter(Boolean)
+                              .join(" ")
                           }
-                          disabled={Boolean(savingMethod) || isLastActive}
+                          disabled={Boolean(savingMethod) || isLastActive || isCustomerMethodLocked}
                           key={option.id}
                           onClick={() => updatePaymentMethod(option.id, !isActive)}
                           role="switch"
@@ -1674,7 +1783,13 @@ export default function MeuSistemaConfiguracoesPage() {
                           </span>
                           <span className="configuration-payment-method-copy">
                             <strong>{option.title}</strong>
-                            <small>{isLastActive ? "Última operacional." : option.description}</small>
+                            <small>
+                              {isLastActive
+                                ? "Última operacional."
+                                : isCustomerMethodLocked
+                                  ? "Ative Clientes para liberar."
+                                  : option.description}
+                            </small>
                           </span>
                           <span className="configuration-switch" aria-hidden="true">
                             {isSaving ? <LoaderCircle className="configuration-switch-loader" size={15} /> : <span />}
@@ -1792,20 +1907,6 @@ export default function MeuSistemaConfiguracoesPage() {
             </div>
             ) : null}
 
-            <div className="platform-flow-progress" aria-label={`Etapa ${activeProgressIndex + 1} de ${progressStepCount}`}>
-              {Array.from({ length: progressStepCount }, (_, index) => (
-                <span
-                  className={
-                    index === activeProgressIndex
-                      ? "platform-flow-progress-bar platform-flow-progress-bar-active"
-                      : index < activeProgressIndex
-                        ? "platform-flow-progress-bar platform-flow-progress-bar-done"
-                        : "platform-flow-progress-bar"
-                  }
-                  key={index}
-                />
-              ))}
-            </div>
           </section>
         </div>
       </main>

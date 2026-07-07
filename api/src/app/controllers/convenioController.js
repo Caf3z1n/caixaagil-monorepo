@@ -27,6 +27,16 @@ function sanitizeCents(value) {
   return Math.max(0, Math.round(parsed));
 }
 
+function sanitizeSignedCents(value) {
+  const parsed = Number(value || 0);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.round(parsed);
+}
+
 function parseBoolean(value) {
   if (typeof value === 'boolean') {
     return value;
@@ -170,6 +180,20 @@ function toIso(value) {
   return date.toISOString();
 }
 
+function toIsoDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString().slice(0, 10);
+}
+
 function sanitizeCliente(cliente, extra = {}) {
   const data = cliente.get ? cliente.get({ plain: true }) : cliente;
   const registrosVinculados = Number(extra.registros_vinculados ?? data.registros_vinculados ?? 0);
@@ -231,9 +255,72 @@ function normalizeRecebimentoPaymentMethod(value) {
   return null;
 }
 
+function normalizePercent(value) {
+  const parsed = Number(value || 0);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Math.max(-100, Math.min(100, Math.round(parsed)));
+}
+
+function normalizeInstallmentPlan(value) {
+  if (!isObject(value)) {
+    return null;
+  }
+
+  const installmentCount = Math.max(
+    2,
+    Math.min(12, Math.floor(Number(value.installmentCount || value.parcelas || value.quantidade_parcelas || 2)))
+  );
+  const entriesSource = Array.isArray(value.entries)
+    ? value.entries
+    : Array.isArray(value.parcelasDetalhes)
+      ? value.parcelasDetalhes
+      : Array.isArray(value.parcelas_detalhes)
+        ? value.parcelas_detalhes
+        : [];
+  const entries = entriesSource.slice(0, 12).map((entry, index) => {
+    const paidAt = normalizeText(entry.paidAt || entry.pago_em || entry.recebido_em, 40) || null;
+    const paymentMethod = normalizeRecebimentoPaymentMethod(
+      entry.paymentMethod || entry.metodo_pagamento || entry.forma_pagamento
+    );
+
+    return {
+      number: Math.max(1, Math.floor(Number(entry.number || entry.numero || index + 1))),
+      dueDate: normalizeText(entry.dueDate || entry.vencimento || entry.data_vencimento, 20) || null,
+      amountCents: sanitizeCents(entry.amountCents || entry.valorCentavos || entry.valor_centavos),
+      paid: Boolean(entry.paid || entry.pago || paidAt),
+      paidAt,
+      paymentMethod,
+      receivedSessionId: normalizeText(entry.receivedSessionId || entry.caixa_recebimento_id || entry.sessionId, 64) || null,
+    };
+  });
+
+  return {
+    installmentCount,
+    adjustmentPercent: normalizePercent(value.adjustmentPercent || value.percentual_ajuste),
+    originalTotalCents: sanitizeCents(value.originalTotalCents || value.valorOriginalCentavos || value.valor_original_centavos),
+    adjustmentCents: sanitizeSignedCents(value.adjustmentCents || value.ajusteCentavos || value.ajuste_centavos),
+    adjustedTotalCents: sanitizeCents(value.adjustedTotalCents || value.valorFinalCentavos || value.valor_final_centavos),
+    customerName: normalizeText(value.customerName || value.nomeCliente || value.nome_cliente, 120) || null,
+    observation: normalizeText(value.observation || value.observacao, 1000) || null,
+    entries,
+  };
+}
+
 function getConvenioClienteNome(venda) {
   return normalizeText(venda.cliente_convenio?.nome, 160) ||
     normalizeText(venda.nome_cliente, 160) ||
+    normalizeText(venda.nome_consumidor, 160) ||
+    'Cliente não informado';
+}
+
+function getParcelamentoClienteNome(venda, installmentPlan) {
+  return normalizeText(venda.cliente_convenio?.nome, 160) ||
+    normalizeText(venda.nome_cliente, 160) ||
+    normalizeText(installmentPlan?.customerName, 160) ||
     normalizeText(venda.nome_consumidor, 160) ||
     'Cliente não informado';
 }
@@ -264,6 +351,42 @@ function sanitizeRecebimento(venda) {
     caixa_recebimento: sanitizeCaixaReferencia(data.caixa_recebimento),
     registrado_em: toIso(data.registrado_em),
     recebido_em: status === 'pago' ? toIso(data.recebido_em) : null,
+  };
+}
+
+function sanitizeParcelamentoRecebimento(venda, entry) {
+  const data = venda.get ? venda.get({ plain: true }) : venda;
+  const installmentPlan = normalizeInstallmentPlan(data.parcelamento);
+  const cliente = data.cliente_convenio ? sanitizeCliente(data.cliente_convenio) : null;
+  const status = entry.paid || entry.paidAt ? 'pago' : 'pendente';
+  const installmentCount = installmentPlan?.installmentCount || installmentPlan?.entries.length || entry.number;
+
+  return {
+    id: `${data.id}:${entry.number}`,
+    venda_id: data.id,
+    codigo: data.codigo,
+    titulo: `Parcela ${entry.number}/${installmentCount}`,
+    charge_kind: 'parcelamento',
+    parcela_numero: entry.number,
+    parcelas_total: installmentCount,
+    vencimento_em: toIsoDate(entry.dueDate),
+    cliente_convenio_id: data.cliente_convenio_id || null,
+    convenio_id: data.convenio_id || null,
+    cliente_nome: cliente?.nome || getParcelamentoClienteNome(data, installmentPlan),
+    cliente,
+    nome_consumidor: data.nome_consumidor || null,
+    observacao: data.observacao || installmentPlan?.observation || null,
+    itens_count: Number(data.quantidade_itens || 0),
+    total_centavos: sanitizeCents(entry.amountCents),
+    status_convenio: status,
+    metodo_pagamento: 'parcelamento',
+    metodo_pagamento_recebimento: entry.paymentMethod || data.metodo_pagamento_recebimento || null,
+    situacao: data.situacao,
+    situacao_recebimento: status === 'pago' ? 'baixado_painel' : 'pendente',
+    caixa: sanitizeCaixaReferencia(data.caixa),
+    caixa_recebimento: sanitizeCaixaReferencia(data.caixa_recebimento),
+    registrado_em: toIso(data.registrado_em),
+    recebido_em: status === 'pago' ? toIso(entry.paidAt || data.recebido_em) : null,
   };
 }
 
@@ -379,6 +502,52 @@ async function findUserRecebimento(usuarioId, vendaId) {
       },
     ],
   });
+}
+
+async function findUserParcelamentoVenda(usuarioId, vendaId) {
+  return Venda.findOne({
+    where: {
+      id: String(vendaId || ''),
+      usuario_id: usuarioId,
+      situacao: {
+        [Op.notIn]: ['cancelada', 'cancelled', 'canceled'],
+      },
+      [Op.or]: [
+        { metodo_pagamento: 'parcelamento' },
+        { parcelamento: { [Op.ne]: null } },
+      ],
+    },
+    include: [
+      {
+        model: ClienteConvenio,
+        as: 'cliente_convenio',
+        required: false,
+      },
+      {
+        model: Caixa,
+        as: 'caixa',
+        required: false,
+      },
+      {
+        model: Caixa,
+        as: 'caixa_recebimento',
+        required: false,
+      },
+    ],
+  });
+}
+
+function normalizeInstallmentNumbers(value) {
+  const source = Array.isArray(value)
+    ? value
+    : value === undefined || value === null
+      ? []
+      : [value];
+  const numbers = source
+    .map(item => Math.floor(Number(item)))
+    .filter(number => Number.isInteger(number) && number > 0);
+
+  return [...new Set(numbers)];
 }
 
 module.exports = {
@@ -676,6 +845,67 @@ module.exports = {
     }
   },
 
+  async listParcelamentos(req, res) {
+    try {
+      const vendas = await Venda.findAll({
+        where: {
+          usuario_id: req.user.id,
+          situacao: {
+            [Op.notIn]: ['cancelada', 'cancelled', 'canceled'],
+          },
+          [Op.or]: [
+            { metodo_pagamento: 'parcelamento' },
+            { parcelamento: { [Op.ne]: null } },
+          ],
+        },
+        include: [
+          {
+            model: ClienteConvenio,
+            as: 'cliente_convenio',
+            required: false,
+          },
+          {
+            model: Caixa,
+            as: 'caixa',
+            required: false,
+          },
+          {
+            model: Caixa,
+            as: 'caixa_recebimento',
+            required: false,
+          },
+        ],
+        order: [
+          ['registrado_em', 'DESC'],
+          ['created_at', 'DESC'],
+        ],
+      });
+      const parcelamentos = vendas.flatMap(venda => {
+        const data = venda.get ? venda.get({ plain: true }) : venda;
+        const installmentPlan = normalizeInstallmentPlan(data.parcelamento);
+
+        if (!installmentPlan || installmentPlan.entries.length === 0) {
+          return [];
+        }
+
+        return installmentPlan.entries.map(entry => sanitizeParcelamentoRecebimento(venda, entry));
+      });
+
+      return res.json({
+        parcelamentos,
+        resumo: {
+          pendentes: parcelamentos.filter(parcelamento => parcelamento.status_convenio === 'pendente').length,
+          pagos: parcelamentos.filter(parcelamento => parcelamento.status_convenio === 'pago').length,
+          total_pendente_centavos: parcelamentos
+            .filter(parcelamento => parcelamento.status_convenio === 'pendente')
+            .reduce((total, parcelamento) => total + parcelamento.total_centavos, 0),
+        },
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao listar parcelamentos.', detail: error.message });
+    }
+  },
+
   async confirmarRecebimento(req, res) {
     try {
       const venda = await findUserRecebimento(req.user.id, req.params.vendaId);
@@ -704,6 +934,149 @@ module.exports = {
       return res.json(sanitizeRecebimento(updated));
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao confirmar recebimento.', detail: error.message });
+    }
+  },
+
+  async confirmarParcelamento(req, res) {
+    try {
+      const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId);
+
+      if (!venda) {
+        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
+      }
+
+      const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
+
+      if (!installmentPlan || installmentPlan.entries.length === 0) {
+        return res.status(400).json({ message: 'Parcelamento inválido.' });
+      }
+
+      const paymentMethod = normalizeRecebimentoPaymentMethod(
+        req.body?.metodo_pagamento_recebimento || req.body?.metodo_pagamento || req.body?.forma_pagamento
+      );
+
+      if (!paymentMethod) {
+        return res.status(400).json({ message: 'Informe a forma de pagamento do recebimento.' });
+      }
+
+      const requestedNumbers = normalizeInstallmentNumbers(
+        req.body?.parcelas ?? req.body?.parcela ?? req.body?.numeros
+      );
+
+      if (requestedNumbers.length === 0) {
+        return res.status(400).json({ message: 'Selecione ao menos uma parcela.' });
+      }
+
+      const requestedSet = new Set(requestedNumbers);
+      const now = new Date();
+      let updatedCount = 0;
+      const nextEntries = installmentPlan.entries.map(entry => {
+        if (!requestedSet.has(entry.number)) {
+          return entry;
+        }
+
+        updatedCount += 1;
+
+        return {
+          ...entry,
+          paid: true,
+          paidAt: now.toISOString(),
+          paymentMethod,
+          receivedSessionId: null,
+        };
+      });
+
+      if (updatedCount === 0) {
+        return res.status(404).json({ message: 'Parcela não encontrada.' });
+      }
+
+      const nextInstallmentPlan = {
+        ...installmentPlan,
+        entries: nextEntries,
+      };
+      const allPaid = nextEntries.every(entry => entry.paid || entry.paidAt);
+
+      await venda.update({
+        parcelamento: nextInstallmentPlan,
+        metodo_pagamento_recebimento: paymentMethod,
+        situacao_recebimento: allPaid ? 'baixado_painel' : 'pendente',
+        recebido_em: allPaid ? now : venda.recebido_em,
+      });
+
+      const updated = await findUserParcelamentoVenda(req.user.id, venda.id);
+      const updatedPlan = normalizeInstallmentPlan(updated.parcelamento);
+
+      return res.json({
+        parcelamentos: updatedPlan.entries.map(entry => sanitizeParcelamentoRecebimento(updated, entry)),
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao confirmar parcelamento.', detail: error.message });
+    }
+  },
+
+  async cancelarParcelamento(req, res) {
+    try {
+      const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId);
+
+      if (!venda) {
+        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
+      }
+
+      const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
+
+      if (!installmentPlan || installmentPlan.entries.length === 0) {
+        return res.status(400).json({ message: 'Parcelamento inválido.' });
+      }
+
+      const requestedNumbers = normalizeInstallmentNumbers(
+        req.body?.parcelas ?? req.body?.parcela ?? req.body?.numeros
+      );
+
+      if (requestedNumbers.length === 0) {
+        return res.status(400).json({ message: 'Informe a parcela.' });
+      }
+
+      const requestedSet = new Set(requestedNumbers);
+      let updatedCount = 0;
+      const nextEntries = installmentPlan.entries.map(entry => {
+        if (!requestedSet.has(entry.number)) {
+          return entry;
+        }
+
+        updatedCount += 1;
+
+        return {
+          ...entry,
+          paid: false,
+          paidAt: null,
+          paymentMethod: null,
+          receivedSessionId: null,
+        };
+      });
+
+      if (updatedCount === 0) {
+        return res.status(404).json({ message: 'Parcela não encontrada.' });
+      }
+
+      const nextInstallmentPlan = {
+        ...installmentPlan,
+        entries: nextEntries,
+      };
+
+      await venda.update({
+        parcelamento: nextInstallmentPlan,
+        situacao_recebimento: 'pendente',
+        recebido_em: null,
+      });
+
+      const updated = await findUserParcelamentoVenda(req.user.id, venda.id);
+      const updatedPlan = normalizeInstallmentPlan(updated.parcelamento);
+
+      return res.json({
+        parcelamentos: updatedPlan.entries.map(entry => sanitizeParcelamentoRecebimento(updated, entry)),
+      });
+    } catch (error) {
+      return res.status(500).json({ message: 'Erro ao cancelar parcelamento.', detail: error.message });
     }
   },
 

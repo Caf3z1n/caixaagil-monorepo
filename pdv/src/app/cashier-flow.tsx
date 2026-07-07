@@ -602,8 +602,10 @@ const paymentOptions: Array<{
   { id: "pix", label: "Pix", description: "Recebimento por QR Code.", icon: QrCode },
   { id: "cartao", label: "Cartão", description: "Recebimento na maquininha.", icon: CreditCard },
   { id: "parcelamento", label: "Parcelamento", description: "Divide e controla as parcelas.", icon: WalletCards },
-  { id: "convenio", label: "Convênio", description: "Cliente para receber depois.", icon: HandCoins }
+  { id: "convenio", label: "Convênios", description: "Venda para receber depois.", icon: HandCoins }
 ];
+
+const operationalPaymentMethods: PaymentMethod[] = ["dinheiro", "pix", "cartao"];
 
 type PaymentSettings = Record<PaymentMethod, boolean>;
 
@@ -1888,7 +1890,7 @@ function normalizePaymentSettings(value?: Partial<Record<PaymentMethod, boolean>
     ...value
   };
 
-  if (!Object.values(settings).some(Boolean)) {
+  if (!operationalPaymentMethods.some((method) => settings[method])) {
     return defaultPaymentSettings;
   }
 
@@ -2546,7 +2548,7 @@ function dedupeFiscalDocuments(documents: FiscalDocumentRecord[]) {
 function getEnabledPaymentOptions(settings: PaymentSettings) {
   const enabledOptions = paymentOptions.filter((option) => settings[option.id]);
 
-  return enabledOptions.length > 0 ? enabledOptions : paymentOptions;
+  return enabledOptions.length > 0 ? enabledOptions : paymentOptions.filter((option) => defaultPaymentSettings[option.id]);
 }
 
 function isSaleCanceled(sale: Pick<SaleRecord, "status">) {

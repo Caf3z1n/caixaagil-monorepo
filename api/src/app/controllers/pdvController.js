@@ -997,6 +997,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
   const origemComandaNome = origem === 'comanda' ? normalizeText(payload.origemComandaNome, 120) : '';
   const paymentMethod = normalizeText(sale.paymentMethod || sale.metodo_pagamento, 20) || null;
   const isConvenioPayment = normalizeKey(paymentMethod) === 'convenio';
+  const isCustomerPayment = isConvenioPayment || normalizeKey(paymentMethod) === 'parcelamento';
   const clientName = normalizeText(sale.clientName || sale.nome_cliente || sale.customerName, 120);
   const clientId = Number(sale.cliente_convenio_id || sale.clienteConvenioId || sale.clientId || 0);
   const requestedClientConvenioId = Number.isInteger(clientId) && clientId > 0 ? clientId : null;
@@ -1019,7 +1020,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
   let clientConvenioId = null;
   let convenioClientName = clientName || normalizeText(sale.customerLabel || sale.cliente_nome, 120) || null;
 
-  if (isConvenioPayment && requestedClientConvenioId) {
+  if (isCustomerPayment && requestedClientConvenioId) {
     const convenioClient = await ClienteConvenio.findOne({
       where: {
         id: requestedClientConvenioId,
@@ -1046,8 +1047,8 @@ async function processSaleCompleted(pdv, payload, transaction) {
       tipo_origem: origem,
       referencia_origem: origemComandaNome || null,
       titulo: origemComandaNome ? `Venda - ${origemComandaNome}` : 'Venda no caixa',
-      cliente_convenio_id: isConvenioPayment ? clientConvenioId : null,
-      nome_cliente: isConvenioPayment ? convenioClientName : null,
+      cliente_convenio_id: isCustomerPayment ? clientConvenioId : null,
+      nome_cliente: isCustomerPayment ? convenioClientName : null,
       nome_consumidor: consumerName,
       rotulo_origem: origemComandaNome || 'Caixa',
       canal: 'pdv',

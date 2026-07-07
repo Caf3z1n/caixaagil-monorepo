@@ -10,7 +10,7 @@ import {
   Building2,
   Check,
   CreditCard,
-  HandCoins,
+  Eye,
   LoaderCircle,
   MapPin,
   MonitorCheck,
@@ -23,6 +23,7 @@ import {
   Trash2,
   UserRound,
   UsersRound,
+  WalletCards,
   X
 } from "lucide-react";
 
@@ -35,11 +36,12 @@ import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
 import { usePlatformModalScrollLock } from "@/lib/use-platform-modal-scroll-lock";
 
-type ConvenioFlowStep = "menu" | "clientes" | "recebimentos";
+type ConvenioFlowStep = "menu" | "clientes" | "recebimentos" | "parcelamentos";
 type ConvenioFlowMotion = "forward" | "backward";
 type RecebimentoStatusFilter = "todos" | "pendente" | "pago";
-type ConvenioChargeStep = "notas" | "pagamento";
+type ChargeStatusFilter = "pendente" | "pago";
 type RecebimentoPaymentMethod = "dinheiro" | "pix" | "cartao";
+type ChargeMode = "convenio" | "parcelamento";
 type ClienteTipoPessoa = "fisica" | "juridica";
 type ClientLookupTarget = "cnpj" | "cep" | null;
 
@@ -98,6 +100,11 @@ type CaixaReferencia = {
 
 type RecebimentoConvenio = {
   id: string;
+  venda_id?: string;
+  charge_kind?: ChargeMode;
+  parcela_numero?: number;
+  parcelas_total?: number;
+  vencimento_em?: string | null;
   codigo: string;
   titulo: string;
   cliente_convenio_id: number | null;
@@ -127,6 +134,19 @@ type RecebimentosResponse = {
     pagos: number;
     total_pendente_centavos: number;
   };
+};
+
+type ParcelamentosResponse = {
+  parcelamentos: RecebimentoConvenio[];
+  resumo: {
+    pendentes: number;
+    pagos: number;
+    total_pendente_centavos: number;
+  };
+};
+
+type ParcelamentoPaymentResponse = {
+  parcelamentos: RecebimentoConvenio[];
 };
 
 type ClientModalState =
@@ -175,10 +195,12 @@ type ClientLookupFeedback = {
 
 type RecebimentoConvenioGroup = {
   key: string;
+  mode: ChargeMode;
   clienteNome: string;
   recebimentos: RecebimentoConvenio[];
   pendentes: number;
   pagos: number;
+  atrasados: number;
   totalCentavos: number;
   totalPendenteCentavos: number;
 };
@@ -194,6 +216,12 @@ const dateTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   year: "numeric",
   hour: "2-digit",
   minute: "2-digit"
+});
+
+const dateFormatter = new Intl.DateTimeFormat("pt-BR", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric"
 });
 
 const clientTypeOptions: ReadonlyArray<PlatformSelectOption<ClienteTipoPessoa>> = [
@@ -498,7 +526,19 @@ function sortClientes(clientes: ClienteConvenio[]) {
 }
 
 function getFlowStepIndex(step: ConvenioFlowStep) {
-  return step === "menu" ? 1 : 2;
+  if (step === "clientes") {
+    return 1;
+  }
+
+  if (step === "recebimentos") {
+    return 2;
+  }
+
+  if (step === "parcelamentos") {
+    return 3;
+  }
+
+  return 0;
 }
 
 function getRecebimentoItemLabel(count: number) {
@@ -507,6 +547,53 @@ function getRecebimentoItemLabel(count: number) {
 
 function getRecebimentoNotaLabel(count: number) {
   return `${count} ${count === 1 ? "nota" : "notas"}`;
+}
+
+function getRecebimentoChargeLabel(count: number, mode: ChargeMode) {
+  if (mode === "parcelamento") {
+    return `${count} ${count === 1 ? "parcela" : "parcelas"}`;
+  }
+
+  return getRecebimentoNotaLabel(count);
+}
+
+function getChargeItemLabel(count: number, mode: ChargeMode) {
+  if (mode === "parcelamento") {
+    return `${count} ${count === 1 ? "parcela" : "parcelas"}`;
+  }
+
+  return getRecebimentoNotaLabel(count);
+}
+
+function formatShortDate(value: string | null | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return dateFormatter.format(date);
+}
+
+function isRecebimentoOverdue(recebimento: RecebimentoConvenio) {
+  if (recebimento.status_convenio !== "pendente" || !recebimento.vencimento_em) {
+    return false;
+  }
+
+  const dueDate = new Date(`${recebimento.vencimento_em}T00:00:00`);
+
+  if (Number.isNaN(dueDate.getTime())) {
+    return false;
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return dueDate.getTime() < today.getTime();
 }
 
 function getPaymentMethodLabel(method: string | null) {
@@ -525,7 +612,7 @@ function getPaymentMethodLabel(method: string | null) {
   }
 
   if (key === "convenio") {
-    return "Convênio";
+    return "Convênios";
   }
 
   return "Pagamento";
@@ -540,10 +627,27 @@ function getCashierReferenceLabel(caixa: CaixaReferencia | null, fallbackDate: s
 }
 
 function getReceiptSaleTitle(recebimento: RecebimentoConvenio) {
+  if (recebimento.charge_kind === "parcelamento") {
+    return `Parcela ${recebimento.parcela_numero ?? "-"}${recebimento.parcelas_total ? `/${recebimento.parcelas_total}` : ""}`;
+  }
+
   return getCashierReferenceLabel(recebimento.caixa, recebimento.registrado_em);
 }
 
 function getReceiptSaleSubtitle(recebimento: RecebimentoConvenio) {
+  if (recebimento.charge_kind === "parcelamento") {
+    const parts = [
+      recebimento.vencimento_em ? `Venc. ${formatShortDate(recebimento.vencimento_em)}` : "",
+      recebimento.parcelas_total ? `Parcelamento ${recebimento.parcelas_total}x` : "Parcelamento"
+    ];
+
+    if (recebimento.status_convenio === "pago") {
+      parts.push(getReceiptStatusDetail(recebimento));
+    }
+
+    return parts.filter(Boolean).join(" · ");
+  }
+
   const parts = [getRecebimentoItemLabel(recebimento.itens_count)];
 
   if (recebimento.status_convenio === "pago") {
@@ -573,7 +677,7 @@ function getRecebimentoGroupSummary(group: RecebimentoConvenioGroup) {
   const parts: string[] = [];
 
   if (group.pendentes > 0) {
-    parts.push(`${getRecebimentoNotaLabel(group.pendentes)} ${group.pendentes === 1 ? "aberta" : "abertas"}`);
+    parts.push(`${getRecebimentoChargeLabel(group.pendentes, group.mode)} ${group.pendentes === 1 ? "aberta" : "abertas"}`);
   }
 
   if (group.totalPendenteCentavos > 0) {
@@ -581,7 +685,7 @@ function getRecebimentoGroupSummary(group: RecebimentoConvenioGroup) {
   }
 
   if (group.pagos > 0) {
-    parts.push(`${getRecebimentoNotaLabel(group.pagos)} ${group.pagos === 1 ? "recebida" : "recebidas"}`);
+    parts.push(`${getRecebimentoChargeLabel(group.pagos, group.mode)} ${group.pagos === 1 ? "recebida" : "recebidas"}`);
   }
 
   return parts.join(" · ") || `${formatCurrencyFromCents(group.totalCentavos)} recebido`;
@@ -592,11 +696,15 @@ export function ConvenioManager() {
   const [flowMotion, setFlowMotion] = useState<ConvenioFlowMotion>("forward");
   const [clientes, setClientes] = useState<ClienteConvenio[]>([]);
   const [recebimentos, setRecebimentos] = useState<RecebimentoConvenio[]>([]);
+  const [parcelamentos, setParcelamentos] = useState<RecebimentoConvenio[]>([]);
   const [clientSearch, setClientSearch] = useState("");
   const [receiptSearch, setReceiptSearch] = useState("");
+  const [installmentSearch, setInstallmentSearch] = useState("");
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<RecebimentoStatusFilter>("todos");
+  const [installmentStatusFilter, setInstallmentStatusFilter] = useState<RecebimentoStatusFilter>("todos");
   const [isLoadingClients, setIsLoadingClients] = useState(false);
   const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
+  const [isLoadingInstallments, setIsLoadingInstallments] = useState(false);
   const [clientModal, setClientModal] = useState<ClientModalState | null>(null);
   const [clientDraftType, setClientDraftType] = useState<ClienteTipoPessoa>("fisica");
   const [clientDraftName, setClientDraftName] = useState("");
@@ -607,9 +715,10 @@ export function ConvenioManager() {
   const [deleteClientRequest, setDeleteClientRequest] = useState<DeleteClientState | null>(null);
   const [cancelReceiptRequest, setCancelReceiptRequest] = useState<RecebimentoConvenio | null>(null);
   const [chargeGroupKey, setChargeGroupKey] = useState<string | null>(null);
-  const [chargeStep, setChargeStep] = useState<ConvenioChargeStep>("notas");
+  const [chargeMode, setChargeMode] = useState<ChargeMode>("convenio");
+  const [chargeSearch, setChargeSearch] = useState("");
   const [selectedChargeReceiptIds, setSelectedChargeReceiptIds] = useState<string[]>([]);
-  const [expandedChargeReceiptId, setExpandedChargeReceiptId] = useState<string | null>(null);
+  const [chargeReceiptDetail, setChargeReceiptDetail] = useState<RecebimentoConvenio | null>(null);
   const [chargePaymentMethod, setChargePaymentMethod] = useState<RecebimentoPaymentMethod | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -617,10 +726,16 @@ export function ConvenioManager() {
   const lastClientCepLookupRef = useRef("");
   const clientCnpjChangedByUserRef = useRef(false);
   const clientCepChangedByUserRef = useRef(false);
-  const activeProgressIndex = getFlowStepIndex(flowStep);
   const flowPanelClassName = `platform-flow-panel platform-flow-panel-${flowMotion}`;
-  const SectionIcon = flowStep === "clientes" ? UsersRound : flowStep === "recebimentos" ? ReceiptText : HandCoins;
-  const sectionTitle = flowStep === "clientes" ? "Clientes" : flowStep === "recebimentos" ? "Recebimentos" : "Convênios";
+  const SectionIcon = flowStep === "parcelamentos" ? WalletCards : flowStep === "recebimentos" ? ReceiptText : UsersRound;
+  const sectionTitle =
+    flowStep === "clientes"
+      ? "Clientes"
+      : flowStep === "recebimentos"
+        ? "Receber convênios"
+        : flowStep === "parcelamentos"
+          ? "Receber parcelas"
+          : "Clientes";
   const filteredClients = useMemo(() => {
     const query = normalizeSearch(clientSearch);
 
@@ -648,10 +763,6 @@ export function ConvenioManager() {
     const query = normalizeSearch(receiptSearch);
 
     return recebimentos.filter((recebimento) => {
-      if (receiptStatusFilter !== "todos" && recebimento.status_convenio !== receiptStatusFilter) {
-        return false;
-      }
-
       if (!query) {
         return true;
       }
@@ -669,7 +780,32 @@ export function ConvenioManager() {
         ].join(" ")
       ).includes(query);
     });
-  }, [receiptSearch, receiptStatusFilter, recebimentos]);
+  }, [receiptSearch, recebimentos]);
+
+  const filteredInstallments = useMemo(() => {
+    const query = normalizeSearch(installmentSearch);
+
+    return parcelamentos.filter((parcelamento) => {
+      if (!query) {
+        return true;
+      }
+
+      return normalizeSearch(
+        [
+          parcelamento.cliente_nome,
+          parcelamento.titulo,
+          getReceiptSaleTitle(parcelamento),
+          getReceiptSaleSubtitle(parcelamento),
+          getReceiptStatusDetail(parcelamento),
+          formatCurrencyFromCents(parcelamento.total_centavos),
+          formatShortDate(parcelamento.vencimento_em),
+          formatDateTime(parcelamento.registrado_em),
+          formatDateTime(parcelamento.recebido_em)
+        ].join(" ")
+      ).includes(query);
+    });
+  }, [installmentSearch, parcelamentos]);
+
   const groupedReceipts = useMemo(() => {
     const groups = new Map<string, RecebimentoConvenioGroup>();
 
@@ -680,10 +816,12 @@ export function ConvenioManager() {
         groups.get(key) ??
         {
           key,
+          mode: "convenio",
           clienteNome: recebimento.cliente_nome || "Cliente não informado",
           recebimentos: [],
           pendentes: 0,
           pagos: 0,
+          atrasados: 0,
           totalCentavos: 0,
           totalPendenteCentavos: 0
         };
@@ -715,16 +853,94 @@ export function ConvenioManager() {
         })
       }))
       .sort((left, right) => {
+        if (left.atrasados !== right.atrasados) {
+          return right.atrasados - left.atrasados;
+        }
+
+        const totalDifference = right.totalPendenteCentavos - left.totalPendenteCentavos;
+
+        if (totalDifference !== 0) {
+          return totalDifference;
+        }
+
+        return left.clienteNome.localeCompare(right.clienteNome, "pt-BR");
+      });
+  }, [filteredReceipts]);
+
+  const groupedInstallments = useMemo(() => {
+    const groups = new Map<string, RecebimentoConvenioGroup>();
+
+    filteredInstallments.forEach((parcelamento) => {
+      const fallbackKey = normalizeClientNameKey(parcelamento.cliente_nome) || "sem-cliente";
+      const key = parcelamento.cliente_convenio_id ? `cliente-${parcelamento.cliente_convenio_id}` : `nome-${fallbackKey}`;
+      const currentGroup =
+        groups.get(key) ??
+        {
+          key,
+          mode: "parcelamento" as const,
+          clienteNome: parcelamento.cliente_nome || "Cliente não informado",
+          recebimentos: [],
+          pendentes: 0,
+          pagos: 0,
+          atrasados: 0,
+          totalCentavos: 0,
+          totalPendenteCentavos: 0
+        };
+
+      currentGroup.recebimentos.push(parcelamento);
+      currentGroup.totalCentavos += parcelamento.total_centavos;
+
+      if (parcelamento.status_convenio === "pendente") {
+        currentGroup.pendentes += 1;
+        currentGroup.totalPendenteCentavos += parcelamento.total_centavos;
+        if (isRecebimentoOverdue(parcelamento)) {
+          currentGroup.atrasados += 1;
+        }
+      } else {
+        currentGroup.pagos += 1;
+      }
+
+      groups.set(key, currentGroup);
+    });
+
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        recebimentos: [...group.recebimentos].sort((left, right) => {
+          if (left.status_convenio !== right.status_convenio) {
+            return left.status_convenio === "pendente" ? -1 : 1;
+          }
+
+          if (left.venda_id === right.venda_id && left.parcela_numero !== right.parcela_numero) {
+            return Number(left.parcela_numero || 0) - Number(right.parcela_numero || 0);
+          }
+
+          const leftDate = left.vencimento_em ? new Date(left.vencimento_em).getTime() : 0;
+          const rightDate = right.vencimento_em ? new Date(right.vencimento_em).getTime() : 0;
+          return leftDate - rightDate;
+        })
+      }))
+      .sort((left, right) => {
         if (left.pendentes !== right.pendentes) {
           return right.pendentes - left.pendentes;
         }
 
         return left.clienteNome.localeCompare(right.clienteNome, "pt-BR");
       });
-  }, [filteredReceipts]);
+  }, [filteredInstallments]);
+
   const chargeReceiptGroup = useMemo(
-    () => groupedReceipts.find((group) => group.key === chargeGroupKey) ?? null,
-    [chargeGroupKey, groupedReceipts]
+    () =>
+      (chargeMode === "parcelamento" ? groupedInstallments : groupedReceipts).find((group) => group.key === chargeGroupKey) ?? null,
+    [chargeGroupKey, chargeMode, groupedInstallments, groupedReceipts]
+  );
+  const visibleReceiptGroups = useMemo(
+    () => groupedReceipts.filter((group) => group.pendentes > 0),
+    [groupedReceipts]
+  );
+  const visibleInstallmentGroups = useMemo(
+    () => groupedInstallments.filter((group) => group.pendentes > 0),
+    [groupedInstallments]
   );
   const pendingChargeReceipts = useMemo(
     () => chargeReceiptGroup?.recebimentos.filter((recebimento) => recebimento.status_convenio === "pendente") ?? [],
@@ -734,6 +950,82 @@ export function ConvenioManager() {
     () => chargeReceiptGroup?.recebimentos.filter((recebimento) => recebimento.status_convenio === "pago") ?? [],
     [chargeReceiptGroup]
   );
+  const pendingReceiptCount = useMemo(
+    () => recebimentos.filter((recebimento) => recebimento.status_convenio === "pendente").length,
+    [recebimentos]
+  );
+  const pendingInstallmentCount = useMemo(
+    () => parcelamentos.filter((parcelamento) => parcelamento.status_convenio === "pendente").length,
+    [parcelamentos]
+  );
+  const chargeStatusFilter: ChargeStatusFilter =
+    chargeMode === "parcelamento"
+      ? installmentStatusFilter === "pago"
+        ? "pago"
+        : "pendente"
+      : receiptStatusFilter === "pago"
+        ? "pago"
+        : "pendente";
+  const filteredChargeReceipts = useMemo(() => {
+    if (!chargeReceiptGroup) {
+      return [];
+    }
+
+    const query = normalizeSearch(chargeSearch);
+
+    return chargeReceiptGroup.recebimentos.filter((recebimento) => {
+      if (recebimento.status_convenio !== chargeStatusFilter) {
+        return false;
+      }
+
+      if (!query) {
+        return true;
+      }
+
+      return normalizeSearch(
+        [
+          recebimento.cliente_nome,
+          recebimento.titulo,
+          getReceiptSaleTitle(recebimento),
+          getReceiptSaleSubtitle(recebimento),
+          getReceiptStatusDetail(recebimento),
+          formatCurrencyFromCents(recebimento.total_centavos),
+          formatShortDate(recebimento.vencimento_em),
+          formatDateTime(recebimento.registrado_em),
+          formatDateTime(recebimento.recebido_em)
+        ].join(" ")
+      ).includes(query);
+    });
+  }, [chargeReceiptGroup, chargeSearch, chargeStatusFilter]);
+  const visiblePendingChargeReceipts = useMemo(
+    () => filteredChargeReceipts.filter((recebimento) => recebimento.status_convenio === "pendente"),
+    [filteredChargeReceipts]
+  );
+  const chargeSaleOrdinalById = useMemo(() => {
+    if (chargeMode !== "parcelamento" || !chargeReceiptGroup) {
+      return new Map<string, string>();
+    }
+
+    const sales = new Map<string, RecebimentoConvenio>();
+
+    chargeReceiptGroup.recebimentos.forEach((recebimento) => {
+      const saleId = recebimento.venda_id || recebimento.id;
+
+      if (!sales.has(saleId)) {
+        sales.set(saleId, recebimento);
+      }
+    });
+
+    return new Map(
+      [...sales.entries()]
+        .sort(([, first], [, second]) => {
+          const firstDate = first.registrado_em ? new Date(first.registrado_em).getTime() : 0;
+          const secondDate = second.registrado_em ? new Date(second.registrado_em).getTime() : 0;
+          return firstDate - secondDate;
+        })
+        .map(([saleId], index) => [saleId, `${index + 1}º Venda`])
+    );
+  }, [chargeMode, chargeReceiptGroup]);
   const selectedChargeReceipts = useMemo(() => {
     const selectedIds = new Set(selectedChargeReceiptIds);
     return pendingChargeReceipts.filter((recebimento) => selectedIds.has(recebimento.id));
@@ -743,8 +1035,8 @@ export function ConvenioManager() {
     [selectedChargeReceipts]
   );
   const allPendingChargeReceiptsSelected =
-    pendingChargeReceipts.length > 0 &&
-    pendingChargeReceipts.every((recebimento) => selectedChargeReceiptIds.includes(recebimento.id));
+    visiblePendingChargeReceipts.length > 0 &&
+    visiblePendingChargeReceipts.every((recebimento) => selectedChargeReceiptIds.includes(recebimento.id));
   const clientDraftResolvedName = useMemo(
     () => getClientDraftName(clientDraftType, clientDraftName, clientDraftFiscal),
     [clientDraftFiscal, clientDraftName, clientDraftType]
@@ -782,6 +1074,7 @@ export function ConvenioManager() {
   const clientModalPresence = useModalPresence(clientModal);
   const deleteClientPresence = useModalPresence(deleteClientRequest);
   const chargePresence = useModalPresence(chargeReceiptGroup);
+  const chargeDetailPresence = useModalPresence(chargeReceiptDetail);
   const cancelReceiptPresence = useModalPresence(cancelReceiptRequest);
   const closeClientModal = useCallback(() => {
     if (isSubmitting) {
@@ -799,9 +1092,10 @@ export function ConvenioManager() {
   }, [isSubmitting]);
   function resetChargeModal() {
     setChargeGroupKey(null);
-    setChargeStep("notas");
+    setChargeMode("convenio");
+    setChargeSearch("");
     setSelectedChargeReceiptIds([]);
-    setExpandedChargeReceiptId(null);
+    setChargeReceiptDetail(null);
     setChargePaymentMethod(null);
   }
 
@@ -812,6 +1106,9 @@ export function ConvenioManager() {
 
     resetChargeModal();
   }, [isSubmitting]);
+  const closeChargeDetailModal = useCallback(() => {
+    setChargeReceiptDetail(null);
+  }, []);
   const closeCancelReceiptModal = useCallback(() => {
     if (isSubmitting) {
       return;
@@ -821,13 +1118,15 @@ export function ConvenioManager() {
   }, [isSubmitting]);
   const clientModalDismiss = useModalDismiss(Boolean(clientModal), closeClientModal);
   const deleteClientDismiss = useModalDismiss(Boolean(deleteClientRequest), closeDeleteClientModal);
-  const chargeDismiss = useModalDismiss(Boolean(chargeReceiptGroup), closeChargeModal);
+  const chargeDismiss = useModalDismiss(Boolean(chargeReceiptGroup) && !chargeReceiptDetail, closeChargeModal);
+  const chargeDetailDismiss = useModalDismiss(Boolean(chargeReceiptDetail), closeChargeDetailModal);
   const cancelReceiptDismiss = useModalDismiss(Boolean(cancelReceiptRequest), closeCancelReceiptModal);
 
   usePlatformModalScrollLock(
     clientModalPresence.isPresent ||
       deleteClientPresence.isPresent ||
       chargePresence.isPresent ||
+      chargeDetailPresence.isPresent ||
       cancelReceiptPresence.isPresent
   );
 
@@ -879,6 +1178,30 @@ export function ConvenioManager() {
     }
   }, []);
 
+  const loadParcelamentos = useCallback(async () => {
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({ tone: "error", message: "Sessão expirada. Entre novamente." });
+      return;
+    }
+
+    setIsLoadingInstallments(true);
+    setFeedback(null);
+
+    try {
+      const result = await apiGet<ParcelamentosResponse>("/convenios/parcelamentos", { cacheTtlMs: 60_000, token });
+      setParcelamentos(result.parcelamentos);
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message: error instanceof Error ? error.message : "Não foi possível carregar as parcelas."
+      });
+    } finally {
+      setIsLoadingInstallments(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (flowStep === "clientes") {
       void loadClientes();
@@ -887,10 +1210,14 @@ export function ConvenioManager() {
     if (flowStep === "recebimentos") {
       void loadRecebimentos();
     }
-  }, [flowStep, loadClientes, loadRecebimentos]);
+
+    if (flowStep === "parcelamentos") {
+      void loadParcelamentos();
+    }
+  }, [flowStep, loadClientes, loadParcelamentos, loadRecebimentos]);
 
   useEffect(() => {
-    if (flowStep !== "recebimentos") {
+    if (flowStep !== "recebimentos" && flowStep !== "parcelamentos") {
       setChargeGroupKey(null);
       return;
     }
@@ -1160,9 +1487,15 @@ export function ConvenioManager() {
   function openChargeModal(group: RecebimentoConvenioGroup) {
     setFeedback(null);
     setChargeGroupKey(group.key);
-    setChargeStep("notas");
+    setChargeMode(group.mode);
+    setChargeSearch("");
+    if (group.mode === "parcelamento") {
+      setInstallmentStatusFilter("pendente");
+    } else {
+      setReceiptStatusFilter("pendente");
+    }
     setSelectedChargeReceiptIds([]);
-    setExpandedChargeReceiptId(null);
+    setChargeReceiptDetail(null);
     setChargePaymentMethod(null);
   }
 
@@ -1174,24 +1507,30 @@ export function ConvenioManager() {
     );
   }
 
-  function toggleAllPendingChargeReceipts() {
-    if (allPendingChargeReceiptsSelected) {
-      setSelectedChargeReceiptIds([]);
+  function updateChargeStatusFilter(nextStatus: ChargeStatusFilter) {
+    setChargeReceiptDetail(null);
+
+    if (chargeMode === "parcelamento") {
+      setInstallmentStatusFilter(nextStatus);
       return;
     }
 
-    setSelectedChargeReceiptIds(pendingChargeReceipts.map((recebimento) => recebimento.id));
+    setReceiptStatusFilter(nextStatus);
   }
 
-  function startChargePaymentStep() {
-    if (selectedChargeReceipts.length === 0) {
+  function toggleAllPendingChargeReceipts() {
+    if (allPendingChargeReceiptsSelected) {
+      setSelectedChargeReceiptIds((currentIds) =>
+        currentIds.filter((currentId) =>
+          !visiblePendingChargeReceipts.some((recebimento) => recebimento.id === currentId)
+        )
+      );
       return;
     }
 
-    setChargeStep("pagamento");
-    setExpandedChargeReceiptId(null);
-    setChargePaymentMethod(null);
-    setFeedback(null);
+    setSelectedChargeReceiptIds((currentIds) =>
+      [...new Set([...currentIds, ...visiblePendingChargeReceipts.map((recebimento) => recebimento.id)])]
+    );
   }
 
   async function submitClient(event: FormEvent<HTMLFormElement>) {
@@ -1371,6 +1710,49 @@ export function ConvenioManager() {
     setFeedback(null);
 
     try {
+      if (chargeMode === "parcelamento") {
+        const selectedBySale = new Map<string, number[]>();
+
+        selectedChargeReceipts.forEach((recebimento) => {
+          if (!recebimento.venda_id || !recebimento.parcela_numero) {
+            return;
+          }
+
+          const currentNumbers = selectedBySale.get(recebimento.venda_id) ?? [];
+          currentNumbers.push(recebimento.parcela_numero);
+          selectedBySale.set(recebimento.venda_id, currentNumbers);
+        });
+
+        if (selectedBySale.size === 0) {
+          throw new Error("Seleção de parcelas inválida.");
+        }
+
+        const results = await Promise.all(
+          Array.from(selectedBySale.entries()).map(([vendaId, parcelas]) =>
+            apiPut<ParcelamentoPaymentResponse>(
+              `/convenios/parcelamentos/${vendaId}/pagar`,
+              { parcelas, metodo_pagamento_recebimento: chargePaymentMethod },
+              { token }
+            )
+          )
+        );
+        const updatedInstallments = results.flatMap((result) => result.parcelamentos);
+        const updatedById = new Map(updatedInstallments.map((parcelamento) => [parcelamento.id, parcelamento]));
+
+        setParcelamentos((currentInstallments) =>
+          currentInstallments.map((parcelamento) => updatedById.get(parcelamento.id) ?? parcelamento)
+        );
+        resetChargeModal();
+        setFeedback({
+          tone: "success",
+          message:
+            selectedChargeReceipts.length === 1
+              ? "Parcela recebida."
+              : `${selectedChargeReceipts.length} parcelas recebidas.`
+        });
+        return;
+      }
+
       const updatedReceipts = await Promise.all(
         selectedChargeReceipts.map((recebimento) =>
           apiPut<RecebimentoConvenio>(
@@ -1399,7 +1781,9 @@ export function ConvenioManager() {
         message:
           error instanceof ApiError || error instanceof Error
             ? error.message
-            : "Não foi possível confirmar os recebimentos."
+            : chargeMode === "parcelamento"
+              ? "Não foi possível receber as parcelas."
+              : "Não foi possível confirmar os recebimentos."
       });
     } finally {
       setIsSubmitting(false);
@@ -1468,23 +1852,23 @@ export function ConvenioManager() {
               ? "platform-flow-card convenio-flow-card convenio-flow-card-menu"
               : "platform-flow-card convenio-flow-card"
           }
-          aria-label="Fluxo de convênios"
+          aria-label="Fluxo de clientes"
         >
           {flowStep === "menu" ? (
             <div className={`${flowPanelClassName} convenio-menu-panel`} key="menu">
               <header className="platform-flow-head">
                 <h1>Escolha uma opção</h1>
-                <p>Cadastre clientes ou acompanhe os recebimentos em convênio.</p>
+                <p>Cadastre clientes para convênios ou vendas parceladas.</p>
               </header>
 
-              <div className="platform-flow-action-list convenio-menu-list" aria-label="Menu de convênios">
+              <div className="platform-flow-action-list convenio-menu-list" aria-label="Menu de clientes">
                 <button type="button" className="platform-flow-action" onClick={() => moveToFlowStep("clientes")}>
                   <span className="platform-flow-action-icon" aria-hidden="true">
                     <UsersRound size={21} />
                   </span>
                   <span>
                     <strong>Clientes</strong>
-                    <small>Cadastre e edite clientes que compram em convênio.</small>
+                    <small>Use em convênios e vendas parceladas.</small>
                   </span>
                   <ArrowRight size={18} aria-hidden="true" />
                 </button>
@@ -1494,8 +1878,19 @@ export function ConvenioManager() {
                     <ReceiptText size={21} />
                   </span>
                   <span>
-                    <strong>Recebimentos</strong>
-                    <small>Revise pendências e confirme pagamentos recebidos.</small>
+                    <strong>Receber convênios</strong>
+                    <small>Cobre notas vendidas para receber depois.</small>
+                  </span>
+                  <ArrowRight size={18} aria-hidden="true" />
+                </button>
+
+                <button type="button" className="platform-flow-action" onClick={() => moveToFlowStep("parcelamentos")}>
+                  <span className="platform-flow-action-icon" aria-hidden="true">
+                    <WalletCards size={21} />
+                  </span>
+                  <span>
+                    <strong>Receber parcelas</strong>
+                    <small>Cobre parcelas abertas das vendas parceladas.</small>
                   </span>
                   <ArrowRight size={18} aria-hidden="true" />
                 </button>
@@ -1577,60 +1972,27 @@ export function ConvenioManager() {
 
           {flowStep === "recebimentos" ? (
             <div className={`${flowPanelClassName} convenio-section-panel`} key="recebimentos">
-              <header className="platform-flow-head convenio-flow-head">
-                <h1>Recebimentos</h1>
-                <p>Escolha um cliente para revisar e cobrar notas em convênio.</p>
+              <header className="platform-flow-head convenio-flow-head convenio-receipt-page-head">
+                <span>
+                  <h1>Receber convênios</h1>
+                  <p>Clientes com títulos em aberto no caixa.</p>
+                </span>
+                <small className="configuration-setting-badge configuration-setting-badge-active">
+                  {pendingReceiptCount} pendente{pendingReceiptCount === 1 ? "" : "s"}
+                </small>
               </header>
 
-              <div className="convenio-toolbar convenio-receipt-toolbar">
+              {recebimentos.length > 0 ? (
                 <label className="convenio-search">
                   <Search aria-hidden="true" size={18} />
                   <input
                     value={receiptSearch}
                     onChange={(event) => setReceiptSearch(event.target.value)}
-                    placeholder="Buscar por cliente, data ou turno"
+                    placeholder="Buscar cliente"
                     type="search"
                   />
                 </label>
-                <div className="product-category-filter convenio-status-filter" aria-label="Filtrar recebimentos">
-                  <button
-                    className={
-                      receiptStatusFilter === "todos"
-                        ? "product-category-filter-chip product-category-filter-chip-active"
-                        : "product-category-filter-chip"
-                    }
-                    type="button"
-                    aria-pressed={receiptStatusFilter === "todos"}
-                    onClick={() => setReceiptStatusFilter("todos")}
-                  >
-                    Todos
-                  </button>
-                  <button
-                    className={
-                      receiptStatusFilter === "pendente"
-                        ? "product-category-filter-chip product-category-filter-chip-active"
-                        : "product-category-filter-chip"
-                    }
-                    type="button"
-                    aria-pressed={receiptStatusFilter === "pendente"}
-                    onClick={() => setReceiptStatusFilter("pendente")}
-                  >
-                    Pendentes
-                  </button>
-                  <button
-                    className={
-                      receiptStatusFilter === "pago"
-                        ? "product-category-filter-chip product-category-filter-chip-active"
-                        : "product-category-filter-chip"
-                    }
-                    type="button"
-                    aria-pressed={receiptStatusFilter === "pago"}
-                    onClick={() => setReceiptStatusFilter("pago")}
-                  >
-                    Pagos
-                  </button>
-                </div>
-              </div>
+              ) : null}
 
               {feedback ? (
                 <div className={`auth-feedback auth-feedback-${feedback.tone} convenio-feedback`} role="status">
@@ -1646,8 +2008,8 @@ export function ConvenioManager() {
                   Array.from({ length: 4 }, (_, index) => (
                     <span className="convenio-row-skeleton" key={index} />
                   ))
-                ) : groupedReceipts.length > 0 ? (
-                  groupedReceipts.map((group) => (
+                ) : visibleReceiptGroups.length > 0 ? (
+                  visibleReceiptGroups.map((group) => (
                     <button
                       className="convenio-row convenio-client-row convenio-receipt-client-row"
                       key={group.key}
@@ -1669,14 +2031,117 @@ export function ConvenioManager() {
                       </span>
                       <span className="convenio-row-action" aria-hidden="true">
                         <ReceiptText size={15} />
-                        Ver notas
+                        Ver detalhes
                       </span>
                     </button>
                   ))
                 ) : (
                   <div className="convenio-empty">
                     <ReceiptText aria-hidden="true" size={26} />
-                    <strong>Nenhum recebimento</strong>
+                    <strong>{recebimentos.length > 0 ? "Nenhum cliente encontrado" : "Nenhum convênio pendente"}</strong>
+                    <small>
+                      {recebimentos.length > 0
+                        ? "Ajuste a busca para localizar o cliente."
+                        : "Clientes com valores em aberto aparecerão aqui."}
+                    </small>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {flowStep === "parcelamentos" ? (
+            <div className={`${flowPanelClassName} convenio-section-panel`} key="parcelamentos">
+              <header className="platform-flow-head convenio-flow-head convenio-receipt-page-head">
+                <span>
+                  <h1>Receber parcelas</h1>
+                  <p>Clientes com parcelas em aberto no caixa.</p>
+                </span>
+                <small className="configuration-setting-badge configuration-setting-badge-active">
+                  {pendingInstallmentCount} pendente{pendingInstallmentCount === 1 ? "" : "s"}
+                </small>
+              </header>
+
+              {parcelamentos.length > 0 ? (
+                <label className="convenio-search">
+                  <Search aria-hidden="true" size={18} />
+                  <input
+                    value={installmentSearch}
+                    onChange={(event) => setInstallmentSearch(event.target.value)}
+                    placeholder="Buscar cliente"
+                    type="search"
+                  />
+                </label>
+              ) : null}
+
+              {feedback ? (
+                <div className={`auth-feedback auth-feedback-${feedback.tone} convenio-feedback`} role="status">
+                  <span className="auth-feedback-marker" aria-hidden="true" />
+                  <span className="auth-feedback-copy">
+                    <strong>{feedback.message}</strong>
+                  </span>
+                </div>
+              ) : null}
+
+              <div className="convenio-receipt-client-list" aria-label="Clientes com parcelas em aberto">
+                {isLoadingInstallments ? (
+                  Array.from({ length: 4 }, (_, index) => (
+                    <span className="convenio-row-skeleton" key={index} />
+                  ))
+                ) : visibleInstallmentGroups.length > 0 ? (
+                  visibleInstallmentGroups.map((group) => {
+                    const openSalesCount = new Set(
+                      group.recebimentos
+                        .filter((recebimento) => recebimento.status_convenio === "pendente")
+                        .map((recebimento) => recebimento.venda_id || recebimento.id)
+                    ).size;
+
+                    return (
+                      <button
+                        className="convenio-row convenio-client-row convenio-receipt-client-row"
+                        key={group.key}
+                        type="button"
+                        onClick={() => openChargeModal(group)}
+                      >
+                        <span className="convenio-row-icon" aria-hidden="true">
+                          <UserRound size={18} />
+                        </span>
+                        <span className="convenio-row-main">
+                          <strong>{group.clienteNome}</strong>
+                          <small className="convenio-row-meta-line">
+                            <span>
+                              {group.pendentes} {group.pendentes === 1 ? "parcela em aberto" : "parcelas em aberto"}
+                            </span>
+                            <span>
+                              {openSalesCount} {openSalesCount === 1 ? "venda em aberto" : "vendas em aberto"}
+                            </span>
+                            {group.atrasados > 0 ? (
+                              <span className="convenio-overdue-text">
+                                {group.atrasados} {group.atrasados === 1 ? "parcela em atraso" : "parcelas em atraso"}
+                              </span>
+                            ) : null}
+                          </small>
+                        </span>
+                        <span className="convenio-row-amount convenio-receipt-client-amount">
+                          <small>Total em aberto</small>
+                          <strong>{formatCurrencyFromCents(group.totalPendenteCentavos)}</strong>
+                        </span>
+                        <span className="convenio-row-action" aria-hidden="true">
+                          Receber
+                          <ArrowRight size={15} />
+                        </span>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="convenio-empty">
+                    <WalletCards aria-hidden="true" size={26} />
+                    <strong>{parcelamentos.length > 0 ? "Nenhum cliente encontrado" : "Nenhuma parcela pendente"}</strong>
+                    <small>
+                      {parcelamentos.length > 0
+                        ? "Ajuste a busca para localizar o cliente."
+                        : "Parcelas em aberto aparecerão aqui."}
+                    </small>
                   </div>
                 )}
               </div>
@@ -1708,21 +2173,6 @@ export function ConvenioManager() {
                 Novo cliente
               </button>
             ) : null}
-          </div>
-
-          <div className="platform-flow-progress" aria-label={`Etapa ${activeProgressIndex + 1} de 3`}>
-            {Array.from({ length: 3 }, (_, index) => (
-              <span
-                className={
-                  index === activeProgressIndex
-                    ? "platform-flow-progress-bar platform-flow-progress-bar-active"
-                    : index < activeProgressIndex
-                      ? "platform-flow-progress-bar platform-flow-progress-bar-done"
-                      : "platform-flow-progress-bar"
-                }
-                key={index}
-              />
-            ))}
           </div>
         </section>
       </div>
@@ -2277,7 +2727,7 @@ export function ConvenioManager() {
             </button>
             <header className="platform-modal-head convenio-charge-modal-head">
               <h2 id="convenio-charge-title">
-                {chargeStep === "notas" ? "Cobrar convênio" : "Forma de pagamento"}
+                {chargeMode === "parcelamento" ? "Detalhes das parcelas" : "Detalhes do convênio"}
               </h2>
               <p>{chargePresence.presentValue.clienteNome}</p>
             </header>
@@ -2288,44 +2738,98 @@ export function ConvenioManager() {
               </div>
             ) : null}
 
-            <div className="convenio-charge-stage" data-charge-step={chargeStep}>
-              {chargeStep === "notas" ? (
-                <>
-                  <div className="convenio-charge-stage-head">
-                    <h3>Selecione as notas</h3>
-                    <p>Marque o que será cobrado agora.</p>
-                  </div>
+            <section className="convenio-receipt-detail-head convenio-charge-client-summary" aria-label="Resumo do cliente">
+              <span className="convenio-row-icon" aria-hidden="true">
+                <UserRound size={18} />
+              </span>
+              <span>
+                <strong>{chargePresence.presentValue.clienteNome}</strong>
+                <small>{getRecebimentoGroupSummary(chargePresence.presentValue)}</small>
+              </span>
+              <strong className="convenio-receipt-client-total">
+                {formatCurrencyFromCents(chargePresence.presentValue.totalPendenteCentavos)}
+              </strong>
+            </section>
 
-                  {pendingChargeReceipts.length > 0 ? (
+            <div className="convenio-charge-toolbar">
+              <label className="convenio-search">
+                <Search aria-hidden="true" size={18} />
+                <input
+                  value={chargeSearch}
+                  onChange={(event) => setChargeSearch(event.target.value)}
+                  placeholder={chargeMode === "parcelamento" ? "Buscar parcela" : "Buscar nota"}
+                  type="search"
+                />
+              </label>
+              <div className="convenio-charge-status-filter" aria-label={chargeMode === "parcelamento" ? "Filtro de parcelas" : "Filtro de notas"}>
+                <button
+                  className={
+                    chargeStatusFilter === "pendente"
+                      ? "pdv-status-filter-chip pdv-status-filter-chip-active"
+                      : "pdv-status-filter-chip"
+                  }
+                  type="button"
+                  aria-pressed={chargeStatusFilter === "pendente"}
+                  onClick={() => updateChargeStatusFilter("pendente")}
+                >
+                  Pendentes
+                  <span>{pendingChargeReceipts.length}</span>
+                </button>
+                <button
+                  className={
+                    chargeStatusFilter === "pago"
+                      ? "pdv-status-filter-chip pdv-status-filter-chip-active"
+                      : "pdv-status-filter-chip"
+                  }
+                  type="button"
+                  aria-pressed={chargeStatusFilter === "pago"}
+                  onClick={() => updateChargeStatusFilter("pago")}
+                >
+                  Pagas
+                  <span>{paidChargeReceipts.length}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="convenio-charge-stage">
+                  {filteredChargeReceipts.length > 0 ? (
                     <div className="convenio-charge-section">
                       <div className="convenio-charge-section-head">
-                        <strong>Notas em aberto</strong>
-                        <button className="convenio-charge-select-all" type="button" onClick={toggleAllPendingChargeReceipts}>
-                          {allPendingChargeReceiptsSelected ? (
-                            <>
-                              <X aria-hidden="true" size={14} />
-                              Limpar seleção
-                            </>
-                          ) : (
-                            <>
-                              <Check aria-hidden="true" size={14} />
-                              Selecionar todas
-                            </>
-                          )}
-                        </button>
+                        <strong>
+                          {chargeStatusFilter === "pendente"
+                            ? chargeMode === "parcelamento"
+                              ? "Parcelas em aberto"
+                              : "Notas em aberto"
+                            : chargeMode === "parcelamento"
+                              ? "Parcelas pagas"
+                              : "Notas pagas"}
+                        </strong>
+                        {chargeStatusFilter === "pendente" && visiblePendingChargeReceipts.length > 0 ? (
+                          <button className="convenio-charge-select-all" type="button" onClick={toggleAllPendingChargeReceipts}>
+                            {allPendingChargeReceiptsSelected ? "Limpar seleção" : "Selecionar visíveis"}
+                          </button>
+                        ) : null}
                       </div>
 
                       <div className="convenio-charge-note-list">
-                        {pendingChargeReceipts.map((recebimento) => {
+                        {filteredChargeReceipts.map((recebimento) => {
                           const isSelected = selectedChargeReceiptIds.includes(recebimento.id);
-                          const isExpanded = expandedChargeReceiptId === recebimento.id;
+                          const isPaid = recebimento.status_convenio === "pago";
+                          const isOverdue = isRecebimentoOverdue(recebimento);
+                          const saleId = recebimento.venda_id || recebimento.id;
+                          const rowTitle =
+                            chargeMode === "parcelamento"
+                              ? chargeSaleOrdinalById.get(saleId) ?? "Venda"
+                              : getReceiptSaleTitle(recebimento);
 
                           return (
                             <div
                               className={
-                                isSelected
-                                  ? "convenio-charge-note convenio-charge-note-selected"
-                                  : "convenio-charge-note"
+                                [
+                                  "convenio-charge-note",
+                                  chargeMode === "parcelamento" ? "convenio-charge-installment-note" : "convenio-charge-note-simple",
+                                  isSelected ? "convenio-charge-note-selected" : ""
+                                ].filter(Boolean).join(" ")
                               }
                               key={recebimento.id}
                             >
@@ -2334,45 +2838,51 @@ export function ConvenioManager() {
                                 type="button"
                                 aria-pressed={isSelected}
                                 onClick={() => toggleChargeReceipt(recebimento.id)}
+                                disabled={isPaid}
                               >
                                 <span className="convenio-charge-check" aria-hidden="true">
-                                  {isSelected ? <Check size={15} /> : null}
+                                  {isPaid ? <CreditCard size={16} /> : isSelected ? <Check size={17} /> : null}
                                 </span>
                                 <span className="convenio-charge-note-copy">
-                                  <strong>{getReceiptSaleTitle(recebimento)}</strong>
-                                  <small>{getReceiptSaleSubtitle(recebimento)}</small>
+                                  <strong>{rowTitle}</strong>
+                                  <em className="convenio-charge-note-meta">
+                                    {chargeMode === "parcelamento" ? (
+                                      <>
+                                        <span>
+                                          Parcela {recebimento.parcela_numero ?? "-"}
+                                          {recebimento.parcelas_total ? `/${recebimento.parcelas_total}` : ""}
+                                        </span>
+                                        {recebimento.vencimento_em ? <span>Venc. {formatShortDate(recebimento.vencimento_em)}</span> : null}
+                                        <span>{recebimento.parcelas_total ? `Parcelamento ${recebimento.parcelas_total}x` : "Parcelamento"}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span>{formatDateTime(recebimento.registrado_em)}</span>
+                                        <span>{getRecebimentoItemLabel(recebimento.itens_count)}</span>
+                                      </>
+                                    )}
+                                  </em>
                                 </span>
-                                <span className="convenio-charge-note-value">
-                                  {formatCurrencyFromCents(recebimento.total_centavos)}
+                                <span className="convenio-charge-note-status">
+                                  <em className={isOverdue ? "convenio-overdue-text" : undefined}>
+                                    {isPaid
+                                      ? `Pago${recebimento.recebido_em ? ` em ${formatDateTime(recebimento.recebido_em)}` : ""}`
+                                      : isOverdue
+                                        ? `Em atraso desde ${formatShortDate(recebimento.vencimento_em)}`
+                                        : "Pendente"}
+                                  </em>
+                                  <strong>{formatCurrencyFromCents(recebimento.total_centavos)}</strong>
                                 </span>
                               </button>
-                              <button
-                                className="convenio-charge-detail-button"
-                                type="button"
-                                aria-expanded={isExpanded}
-                                onClick={() => setExpandedChargeReceiptId(isExpanded ? null : recebimento.id)}
-                              >
-                                Detalhes
-                              </button>
-                              {isExpanded ? (
-                                <div className="convenio-charge-note-detail">
-                                  <span>
-                                    <small>Nota</small>
-                                    <strong>{getReceiptSaleTitle(recebimento)}</strong>
-                                  </span>
-                                  <span>
-                                    <small>Itens</small>
-                                    <strong>{getRecebimentoItemLabel(recebimento.itens_count)}</strong>
-                                  </span>
-                                  <span>
-                                    <small>Status</small>
-                                    <strong>{getReceiptStatusDetail(recebimento)}</strong>
-                                  </span>
-                                  <span>
-                                    <small>Total</small>
-                                    <strong>{formatCurrencyFromCents(recebimento.total_centavos)}</strong>
-                                  </span>
-                                </div>
+                              {chargeMode === "parcelamento" ? (
+                                <button
+                                  className="convenio-charge-detail-button"
+                                  type="button"
+                                  onClick={() => setChargeReceiptDetail(recebimento)}
+                                >
+                                  <Eye aria-hidden="true" size={16} />
+                                  Detalhes
+                                </button>
                               ) : null}
                             </div>
                           );
@@ -2382,64 +2892,42 @@ export function ConvenioManager() {
                   ) : (
                     <div className="convenio-charge-empty">
                       <ReceiptText aria-hidden="true" size={24} />
-                      <strong>Nenhuma nota aberta</strong>
-                      <small>Este cliente não tem valores pendentes.</small>
+                      <strong>
+                        {chargeStatusFilter === "pendente"
+                          ? chargeMode === "parcelamento"
+                            ? "Nenhuma parcela aberta"
+                            : "Nenhuma nota aberta"
+                          : chargeMode === "parcelamento"
+                            ? "Nenhuma parcela paga"
+                            : "Nenhuma nota paga"}
+                      </strong>
+                      <small>
+                        {chargeStatusFilter === "pendente"
+                          ? "Este cliente não tem valores pendentes."
+                          : "Recebimentos concluídos aparecerão aqui."}
+                      </small>
                     </div>
                   )}
 
-                  {paidChargeReceipts.length > 0 ? (
-                    <div className="convenio-charge-section convenio-charge-section-paid">
-                      <div className="convenio-charge-section-head">
-                        <strong>Notas recebidas</strong>
-                        <small>{getRecebimentoNotaLabel(paidChargeReceipts.length)}</small>
-                      </div>
-                      <div className="convenio-charge-paid-list">
-                        {paidChargeReceipts.map((recebimento) => (
-                          <div className="convenio-charge-paid-row" key={recebimento.id}>
-                            <span>
-                              <strong>{getReceiptSaleTitle(recebimento)}</strong>
-                              <small>{getReceiptStatusDetail(recebimento)}</small>
-                            </span>
-                            <strong>{formatCurrencyFromCents(recebimento.total_centavos)}</strong>
-                            <button type="button" onClick={() => setCancelReceiptRequest(recebimento)}>
-                              <RotateCcw aria-hidden="true" size={14} />
-                              Cancelar
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <>
-                  <div className="convenio-charge-stage-head">
-                    <h3>Receber notas</h3>
-                    <p>Escolha como esse valor foi pago.</p>
-                  </div>
-
-                  <div className="convenio-charge-payment-summary">
+                  <section className="convenio-charge-receive-footer" aria-label="Resumo do recebimento">
                     <span>
-                      <small>Selecionado</small>
-                      <strong>{getRecebimentoNotaLabel(selectedChargeReceipts.length)}</strong>
+                      <em>Selecionado</em>
+                      <strong>
+                        {selectedChargeReceipts.length}{" "}
+                        {chargeMode === "parcelamento"
+                          ? selectedChargeReceipts.length === 1
+                            ? "parcela"
+                            : "parcelas"
+                          : selectedChargeReceipts.length === 1
+                            ? "nota"
+                            : "notas"}
+                        {chargeMode === "convenio"
+                          ? ` · ${selectedChargeReceipts.reduce((total, recebimento) => total + recebimento.itens_count, 0)} itens`
+                          : ""}
+                      </strong>
                     </span>
-                    <span>
-                      <small>Total</small>
-                      <strong>{formatCurrencyFromCents(selectedChargeTotalCentavos)}</strong>
-                    </span>
-                  </div>
-
-                  <div className="convenio-charge-selected-list" aria-label="Notas selecionadas">
-                    {selectedChargeReceipts.map((recebimento) => (
-                      <div className="convenio-charge-selected-row" key={recebimento.id}>
-                        <span>
-                          <strong>{getReceiptSaleTitle(recebimento)}</strong>
-                          <small>{getRecebimentoItemLabel(recebimento.itens_count)}</small>
-                        </span>
-                        <strong>{formatCurrencyFromCents(recebimento.total_centavos)}</strong>
-                      </div>
-                    ))}
-                  </div>
+                    <strong>{formatCurrencyFromCents(selectedChargeTotalCentavos)}</strong>
+                  </section>
 
                   <div className="convenio-charge-payment-area">
                     <strong>Forma de pagamento</strong>
@@ -2497,58 +2985,109 @@ export function ConvenioManager() {
                       </button>
                     </div>
                   </div>
-                </>
-              )}
-            </div>
-
-            <div className="platform-flow-progress convenio-charge-progress" aria-label={`Etapa ${chargeStep === "notas" ? 1 : 2} de 2`}>
-              {Array.from({ length: 2 }, (_, index) => (
-                <span
-                  className={
-                    (chargeStep === "notas" && index === 0) || (chargeStep === "pagamento" && index === 1)
-                      ? "platform-flow-progress-bar platform-flow-progress-bar-active"
-                      : chargeStep === "pagamento" && index === 0
-                        ? "platform-flow-progress-bar platform-flow-progress-bar-done"
-                        : "platform-flow-progress-bar"
-                  }
-                  key={index}
-                />
-              ))}
             </div>
 
             <div className="platform-modal-actions platform-item-modal-actions convenio-charge-actions">
               <button
                 className="platform-secondary-button"
                 type="button"
-                onClick={chargeStep === "notas" ? closeChargeModal : () => setChargeStep("notas")}
+                onClick={closeChargeModal}
               >
-                {chargeStep === "notas" ? "Cancelar" : "Voltar"}
+                Cancelar
               </button>
-              {chargeStep === "notas" ? (
-                <button
-                  className="platform-primary-button"
-                  type="button"
-                  onClick={startChargePaymentStep}
-                  disabled={selectedChargeReceipts.length === 0}
-                >
-                  <ArrowRight aria-hidden="true" size={16} />
-                  Iniciar cobrança
-                </button>
-              ) : (
-                <button
-                  className="platform-primary-button platform-save-button"
-                  type="button"
-                  onClick={() => void confirmChargePayment()}
-                  disabled={isSubmitting || selectedChargeReceipts.length === 0 || !chargePaymentMethod}
-                >
-                  {isSubmitting ? <LoaderCircle className="configuration-switch-loader" aria-hidden="true" size={16} /> : <Check aria-hidden="true" size={16} />}
-                  Confirmar recebimento
-                </button>
-              )}
+              <button
+                className="platform-primary-button platform-save-button"
+                type="button"
+                onClick={() => void confirmChargePayment()}
+                disabled={isSubmitting || selectedChargeReceipts.length === 0 || !chargePaymentMethod}
+              >
+                {isSubmitting ? <LoaderCircle className="configuration-switch-loader" aria-hidden="true" size={16} /> : <Check aria-hidden="true" size={16} />}
+                {chargePaymentMethod === "dinheiro" ? "Receber em dinheiro" : chargePaymentMethod ? "Finalizar recebimento" : "Escolha o pagamento"}
+              </button>
             </div>
           </section>
         </div>
       ) : null}
+
+      {chargeDetailPresence.isPresent && chargeDetailPresence.presentValue ? (() => {
+        const recebimento = chargeDetailPresence.presentValue;
+        const saleId = recebimento.venda_id || recebimento.id;
+        const saleTitle = chargeSaleOrdinalById.get(saleId) ?? getReceiptSaleTitle(recebimento);
+        const paymentLabel = recebimento.parcelas_total ? `Parcelamento ${recebimento.parcelas_total}x` : "Parcelamento";
+        const paidAt = recebimento.recebido_em ? formatDateTime(recebimento.recebido_em) : null;
+        const statusLabel =
+          recebimento.status_convenio === "pago"
+            ? paidAt ? `Pago em ${paidAt}` : "Pago"
+            : isRecebimentoOverdue(recebimento)
+              ? `Em atraso desde ${formatShortDate(recebimento.vencimento_em)}`
+              : "Pendente";
+
+        return (
+          <div
+            className="platform-modal-backdrop convenio-sale-detail-backdrop"
+            data-modal-state={chargeDetailPresence.state}
+            {...chargeDetailDismiss.backdropProps}
+          >
+            <section
+              className="platform-modal convenio-sale-detail-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="convenio-sale-detail-title"
+            >
+              <button className="platform-modal-close" type="button" aria-label="Fechar" onClick={closeChargeDetailModal}>
+                <X aria-hidden="true" size={19} />
+              </button>
+              <header className="platform-modal-head convenio-sale-detail-head">
+                <h2 id="convenio-sale-detail-title">Detalhes da venda</h2>
+                <p>{recebimento.cliente_nome}</p>
+              </header>
+
+              <section className="convenio-sale-detail-total" aria-label="Total da parcela">
+                <small>Total</small>
+                <strong>{formatCurrencyFromCents(recebimento.total_centavos)}</strong>
+              </section>
+
+              <dl className="convenio-sale-detail-list">
+                <div>
+                  <dt>Venda</dt>
+                  <dd>{saleTitle}</dd>
+                </div>
+                <div>
+                  <dt>Parcela</dt>
+                  <dd>
+                    {recebimento.parcela_numero ?? "-"}
+                    {recebimento.parcelas_total ? `/${recebimento.parcelas_total}` : ""}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Vencimento</dt>
+                  <dd>{formatShortDate(recebimento.vencimento_em) || "Sem data"}</dd>
+                </div>
+                <div>
+                  <dt>Pagamento</dt>
+                  <dd>{paymentLabel}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd className={isRecebimentoOverdue(recebimento) && recebimento.status_convenio !== "pago" ? "convenio-overdue-text" : undefined}>
+                    {statusLabel}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Itens</dt>
+                  <dd>{getRecebimentoItemLabel(recebimento.itens_count)}</dd>
+                </div>
+              </dl>
+
+              <div className="platform-modal-actions platform-item-modal-actions convenio-sale-detail-actions">
+                <button className="platform-secondary-button" type="button" onClick={closeChargeDetailModal}>
+                  Fechar
+                </button>
+              </div>
+            </section>
+          </div>
+        );
+      })() : null}
 
       {cancelReceiptPresence.isPresent && cancelReceiptPresence.presentValue ? (
         <div

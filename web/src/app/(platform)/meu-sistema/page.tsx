@@ -7,7 +7,6 @@ import type { FocusEvent, PointerEvent } from "react";
 import {
   ArrowRight,
   FileCheck2,
-  HandCoins,
   LayoutGrid,
   PackageSearch,
   ReceiptText,
@@ -39,11 +38,12 @@ type SystemMenuItem = {
 };
 
 type PlanFeature = "emissao_fiscal";
-type OptionalSystemFeature = "convenio" | "expenses" | "employees";
+type OptionalSystemFeature = "customers" | "expenses" | "employees";
 
 type ConfiguracaoSistema = {
   formas_pagamento?: {
     convenio?: boolean;
+    parcelamento?: boolean;
   } | null;
   lancar_despesas?: {
     ativo?: boolean;
@@ -56,7 +56,7 @@ type ConfiguracaoSistema = {
 type EnabledSystemFeatures = Record<OptionalSystemFeature, boolean>;
 
 const defaultEnabledSystemFeatures: EnabledSystemFeatures = {
-  convenio: false,
+  customers: false,
   expenses: false,
   employees: false
 };
@@ -101,10 +101,10 @@ const menuItems: SystemMenuItem[] = [
     requiredFeature: "expenses"
   },
   {
-    title: "Convênios",
+    title: "Clientes",
     href: "/meu-sistema/convenios",
-    icon: HandCoins,
-    requiredFeature: "convenio"
+    icon: UsersRound,
+    requiredFeature: "customers"
   },
   {
     title: "Documentos fiscais",
@@ -216,7 +216,7 @@ export default function MeuSistemaPage() {
 
         if (!cancelled) {
           setEnabledFeatures({
-            convenio: Boolean(configuracao.formas_pagamento?.convenio),
+            customers: Boolean(configuracao.formas_pagamento?.convenio || configuracao.formas_pagamento?.parcelamento),
             expenses: configuracao.lancar_despesas?.ativo === true,
             employees: configuracao.controle_funcionarios?.ativo === true
           });
@@ -278,11 +278,6 @@ export default function MeuSistemaPage() {
               </div>
             </nav>
 
-            <div className="platform-flow-progress" aria-hidden="true">
-              <span className="platform-flow-progress-bar platform-flow-progress-bar-active" />
-              <span className="platform-flow-progress-bar" />
-              <span className="platform-flow-progress-bar" />
-            </div>
           </section>
         </div>
       </main>

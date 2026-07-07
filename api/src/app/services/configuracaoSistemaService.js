@@ -4,8 +4,9 @@ const { Arquivo, ConfiguracaoSistema, Nf } = require('../models');
 const { decryptSecret, encryptSecret } = require('./secretService');
 const { toAbsolutePath } = require('./fileStorageService');
 
-const operationalPaymentMethodKeys = ['dinheiro', 'pix', 'cartao', 'parcelamento'];
-const paymentMethodKeys = [...operationalPaymentMethodKeys, 'convenio'];
+const operationalPaymentMethodKeys = ['dinheiro', 'pix', 'cartao'];
+const customerPaymentMethodKeys = ['convenio', 'parcelamento'];
+const paymentMethodKeys = [...operationalPaymentMethodKeys, ...customerPaymentMethodKeys];
 
 const defaultPaymentMethods = {
   dinheiro: true,

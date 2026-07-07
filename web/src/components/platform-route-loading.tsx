@@ -48,11 +48,6 @@ function PlatformRouteMenuLoading({ title }: { title: string }) {
               ))}
             </div>
 
-            <div className="platform-flow-progress" aria-hidden="true">
-              <span className="platform-flow-progress-bar platform-flow-progress-bar-active" />
-              <span className="platform-flow-progress-bar" />
-              <span className="platform-flow-progress-bar" />
-            </div>
           </section>
         </div>
       </main>
@@ -160,11 +155,6 @@ function PlatformRouteActionsLoading({
               </div>
             </div>
 
-            <div className="platform-flow-progress" aria-hidden="true">
-              <span className="platform-flow-progress-bar platform-flow-progress-bar-active" />
-              <span className="platform-flow-progress-bar" />
-              <span className="platform-flow-progress-bar" />
-            </div>
           </section>
         </div>
       </main>
@@ -258,11 +248,6 @@ export function PlatformRouteLoading({
               </span>
             </div>
 
-            <div className="platform-flow-progress" aria-hidden="true">
-              <span className="platform-flow-progress-bar platform-flow-progress-bar-active" />
-              <span className="platform-flow-progress-bar" />
-              <span className="platform-flow-progress-bar" />
-            </div>
           </section>
         </div>
       </main>

@@ -4,7 +4,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   FileCheck2,
-  HandCoins,
   LayoutGrid,
   PackageSearch,
   ReceiptText,
@@ -37,7 +36,7 @@ const pendingRouteMeta: Array<{ prefix: string; meta: PendingRouteMeta }> = [
   { prefix: "/meu-sistema/produtos", meta: { icon: PackageSearch, rows: 6, title: "Produtos" } },
   { prefix: "/meu-sistema/estoque", meta: { icon: Warehouse, rows: 4, size: "compact", title: "Estoque", variant: "actions" } },
   { prefix: "/meu-sistema/conferencia-caixa", meta: { icon: ShieldCheck, rows: 4, size: "medium", title: "Conferência de caixa" } },
-  { prefix: "/meu-sistema/convenios", meta: { icon: HandCoins, rows: 5, size: "medium", title: "Convênios" } },
+  { prefix: "/meu-sistema/convenios", meta: { icon: UsersRound, rows: 5, size: "medium", title: "Clientes" } },
   { prefix: "/meu-sistema/despesas", meta: { icon: WalletCards, rows: 5, size: "medium", title: "Despesas" } },
   { prefix: "/meu-sistema/documentos-fiscais", meta: { icon: ReceiptText, rows: 5, size: "extra-wide", title: "Documentos fiscais" } },
   { prefix: "/meu-sistema/funcionarios", meta: { icon: UsersRound, rows: 5, size: "medium", title: "Funcionários" } },

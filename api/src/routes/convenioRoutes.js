@@ -13,5 +13,8 @@ router.delete('/clientes/:id', controller.deleteCliente);
 router.get('/recebimentos', controller.listRecebimentos);
 router.put('/recebimentos/:vendaId/pagar', controller.confirmarRecebimento);
 router.put('/recebimentos/:vendaId/cancelar', controller.cancelarRecebimento);
+router.get('/parcelamentos', controller.listParcelamentos);
+router.put('/parcelamentos/:vendaId/pagar', controller.confirmarParcelamento);
+router.put('/parcelamentos/:vendaId/cancelar', controller.cancelarParcelamento);
 
 module.exports = router;

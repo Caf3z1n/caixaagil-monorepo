@@ -269,11 +269,6 @@ type RemoteSupportRotationResponse = {
   message?: string;
 };
 
-type ModalProgressProps = {
-  activeIndex: number;
-  total: number;
-};
-
 const emptyPdvForm: PdvForm = {
   nome: ""
 };
@@ -882,41 +877,6 @@ function PaymentBrandMark({ brand, compact = false }: { brand?: string | null; c
       <b>{getPaymentBrandShortLabel(normalized)}</b>
     </span>
   );
-}
-
-function ModalProgress({ activeIndex, total }: ModalProgressProps) {
-  return (
-    <div className="auth-modal-progress platform-account-modal-progress" aria-label={`Etapa ${activeIndex + 1} de ${total}`}>
-      {Array.from({ length: total }).map((_, index) => (
-        <span
-          className={
-            index === activeIndex
-              ? "auth-progress-dot auth-progress-dot-active"
-              : index < activeIndex
-                ? "auth-progress-dot auth-progress-dot-done"
-                : "auth-progress-dot"
-          }
-          key={index}
-        />
-      ))}
-    </div>
-  );
-}
-
-function getAccountProgress(step: AccountStep, isSubconta: boolean) {
-  if (step === "menu") {
-    return { activeIndex: 0, total: 2 };
-  }
-
-  if (step === "email-sent") {
-    return { activeIndex: 2, total: 3 };
-  }
-
-  if (step === "email" && !isSubconta) {
-    return { activeIndex: 1, total: 3 };
-  }
-
-  return { activeIndex: 1, total: 2 };
 }
 
 function sortPayments(payments: PagamentoAssinatura[]) {
@@ -1990,25 +1950,6 @@ export default function PlatformAccountPage() {
     }
   }
 
-  function renderAccountFlowProgress(view: AccountView) {
-    const activeIndex = view === "menu" ? 0 : 1;
-
-    return (
-      <div className="platform-flow-progress" aria-hidden="true">
-        {Array.from({ length: 2 }).map((_, index) => (
-          <span
-            className={
-              index === activeIndex
-                ? "platform-flow-progress-bar platform-flow-progress-bar-active"
-                : "platform-flow-progress-bar"
-            }
-            key={index}
-          />
-        ))}
-      </div>
-    );
-  }
-
   function renderAccountMenuAction({
     detail,
     disabled,
@@ -2142,7 +2083,6 @@ export default function PlatformAccountPage() {
           </div>
         </nav>
 
-        {renderAccountFlowProgress("menu")}
       </section>
     );
   }
@@ -2171,10 +2111,6 @@ export default function PlatformAccountPage() {
           ))}
         </div>
 
-        <div className="platform-flow-progress" aria-hidden="true">
-          <span className="platform-flow-progress-bar platform-flow-progress-bar-active" />
-          <span className="platform-flow-progress-bar" />
-        </div>
       </section>
     );
   }
@@ -2274,7 +2210,6 @@ export default function PlatformAccountPage() {
           {renderPaymentHistory()}
         </div>
 
-        {renderAccountFlowProgress("plan")}
       </section>
     );
   }
@@ -2441,7 +2376,6 @@ export default function PlatformAccountPage() {
           </div>
         </div>
 
-        {renderAccountFlowProgress("pdvs")}
       </section>
     );
   }
@@ -2521,7 +2455,6 @@ export default function PlatformAccountPage() {
           </div>
         </div>
 
-        {renderAccountFlowProgress("subcontas")}
       </section>
     );
   }
@@ -2529,7 +2462,6 @@ export default function PlatformAccountPage() {
   const feedbackTone: "neutral" | "success" | "error" | "warning" =
     feedback?.tone === "danger" ? "error" : feedback?.tone || "neutral";
   const modalFeedback = feedback ? <AuthFeedback tone={feedbackTone}>{feedback.message}</AuthFeedback> : null;
-  const accountProgress = visibleAccountStep ? getAccountProgress(visibleAccountStep, isSubconta) : null;
   const accountFlowMeta: { icon: LucideIcon; title: string } =
     accountView === "plan" && !isSubconta
       ? { icon: WalletCards, title: "Meu plano" }
@@ -2798,8 +2730,6 @@ export default function PlatformAccountPage() {
                 </div>
               </form>
             ) : null}
-
-            {accountProgress ? <ModalProgress activeIndex={accountProgress.activeIndex} total={accountProgress.total} /> : null}
           </section>
         </div>
       ) : null}
@@ -3285,11 +3215,6 @@ export default function PlatformAccountPage() {
                 </div>
               </form>
             ) : null}
-
-            <ModalProgress
-              activeIndex={subaccountStep === "email" ? 0 : subaccountStep === "password" ? 1 : 2}
-              total={3}
-            />
           </section>
         </div>
       ) : null}
