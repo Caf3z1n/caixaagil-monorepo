@@ -2024,6 +2024,10 @@ function getPdvFiscalSeriesValue(config?: Record<string, unknown> | null) {
   const environmentNfce = asRecord(environment?.nfce);
   const environmentNfe = asRecord(environment?.nfe);
   const value =
+    environmentNfce?.serie ??
+    environmentNfe?.serie ??
+    nfce?.serie ??
+    nfe?.serie ??
     config?.serie_fiscal ??
     config?.serieFiscal ??
     config?.serie ??
@@ -2031,11 +2035,7 @@ function getPdvFiscalSeriesValue(config?: Record<string, unknown> | null) {
     environment?.serie_fiscal ??
     environment?.serieFiscal ??
     environment?.serie ??
-    environmentSeries?.fiscal ??
-    environmentNfce?.serie ??
-    environmentNfe?.serie ??
-    nfce?.serie ??
-    nfe?.serie;
+    environmentSeries?.fiscal;
   const number = Number(value);
 
   return Number.isFinite(number) && number > 0 ? normalizePdvFiscalSeries(number) : null;
@@ -2394,18 +2394,21 @@ function buildLocalFiscalConfigFromRemote(
   const endereco = asRecord(emitente.endereco) ?? {};
   const senhaPfx = String(certificado.senha_pfx ?? certificado.senha ?? "");
   const cscToken = String(nfce.csc_token ?? nfce.cscToken ?? "");
-  const serieFiscal = getPdvFiscalSeriesValue({
+  const fallbackSerie = getPdvFiscalSeriesValue({
     ...fiscal,
     ...activeEnvironment,
     nfce,
     nfe
   }) ?? 1;
-
-  return applyPdvFiscalSeriesConfig({
+  const nfceSerie = normalizePdvFiscalSeries(nfce.serie, fallbackSerie);
+  const nfeSerie = normalizePdvFiscalSeries(nfe.serie, nfceSerie);
+  const ambientes = asRecord(fiscal.ambientes) ?? {};
+  const localConfig = {
     ...fiscal,
     ...activeEnvironment,
     ambiente,
-    serie_fiscal: serieFiscal,
+    serie_fiscal: nfceSerie,
+    serie: nfceSerie,
     uf: String(fiscal.uf ?? endereco.uf ?? ""),
     emitente,
     certificado: {
@@ -2416,16 +2419,31 @@ function buildLocalFiscalConfigFromRemote(
     },
     nfce: {
       ...nfce,
-      serie: serieFiscal,
+      serie: nfceSerie,
       csc_token: cscToken,
       cscToken
     },
     nfe: {
       ...nfe,
-      serie: serieFiscal
+      serie: nfeSerie
     },
     ...buildPdvFiscalPrintConfig(printingConfig)
-  }, serieFiscal);
+  };
+
+  return {
+    ...localConfig,
+    ambientes: {
+      ...ambientes,
+      [ambiente]: {
+        ...activeEnvironment,
+        serie_fiscal: nfceSerie,
+        serie: nfceSerie,
+        certificado: localConfig.certificado,
+        nfce: localConfig.nfce,
+        nfe: localConfig.nfe
+      }
+    }
+  };
 }
 
 function getPositiveFiscalNumber(value: unknown) {
@@ -2444,6 +2462,10 @@ function getFiscalNumberSnapshot(
   const environmentModel = asRecord(environment?.[modelKey]);
 
   return {
+    serie: Math.max(
+      getPositiveFiscalNumber(top?.serie),
+      getPositiveFiscalNumber(environmentModel?.serie)
+    ),
     ultimoNumero: Math.max(
       getPositiveFiscalNumber(top?.ultimo_numero ?? top?.ultimoNumero),
       getPositiveFiscalNumber(environmentModel?.ultimo_numero ?? environmentModel?.ultimoNumero)
@@ -2462,14 +2484,15 @@ function preserveLocalFiscalNumbering(
   const ambiente = nextConfig.ambiente === "producao" ? "producao" : "homologacao";
   const nextAmbientes = asRecord(nextConfig.ambientes) ?? {};
   const nextEnvironment = asRecord(nextAmbientes[ambiente]) ?? {};
-  const localSeries = getPdvFiscalSeriesValue(currentConfig);
-  const nextSeries = localSeries ?? getPdvFiscalSeriesValue(nextConfig) ?? 1;
   const mergedConfig: Record<string, unknown> = { ...nextConfig };
   const mergedEnvironment: Record<string, unknown> = { ...nextEnvironment };
 
   (["nfce", "nfe"] as const).forEach((modelKey) => {
     const nextSnapshot = getFiscalNumberSnapshot(nextConfig, ambiente, modelKey);
-    const currentSnapshot = getFiscalNumberSnapshot(currentConfig, ambiente, modelKey);
+    const currentSnapshotCandidate = getFiscalNumberSnapshot(currentConfig, ambiente, modelKey);
+    const currentSnapshot = !currentSnapshotCandidate.serie || currentSnapshotCandidate.serie === nextSnapshot.serie
+      ? currentSnapshotCandidate
+      : { ultimoNumero: 0, proximoNumero: 0 };
     const proximoNumero = Math.max(nextSnapshot.proximoNumero, currentSnapshot.proximoNumero);
     const ultimoNumero = Math.max(nextSnapshot.ultimoNumero, currentSnapshot.ultimoNumero);
     const nextModel = asRecord(nextConfig[modelKey]) ?? {};
@@ -2489,13 +2512,13 @@ function preserveLocalFiscalNumbering(
     };
   });
 
-  return applyPdvFiscalSeriesConfig({
+  return {
     ...mergedConfig,
     ambientes: {
       ...nextAmbientes,
       [ambiente]: mergedEnvironment
     }
-  }, nextSeries);
+  };
 }
 
 function isMissingFiscalIpcHandlerError(error: unknown) {

@@ -617,12 +617,12 @@ function prepareFreshEmissionInput(savedConfig, config, command, payload, option
     asPositiveNumber(options.minimumNumber)
   ].filter(Boolean);
   const serie = asPositiveNumber(payload?.serie) ||
-    getConfiguredCommonSerie(config) ||
-    getConfiguredCommonSerie(savedConfig) ||
     getConfiguredSerie(rootModelConfig) ||
     getConfiguredSerie(environmentModelConfig) ||
     getConfiguredSerie(savedRootModelConfig) ||
-    getConfiguredSerie(savedEnvironmentModelConfig);
+    getConfiguredSerie(savedEnvironmentModelConfig) ||
+    getConfiguredCommonSerie(config) ||
+    getConfiguredCommonSerie(savedConfig);
   const numero = numberCandidates.length > 0 ? Math.max(...numberCandidates) : null;
   const modelPatch = {
     ...rootModelConfig,

@@ -39,7 +39,7 @@ const allowedStatuses = new Set([
   'erro_tecnico',
   'duplicidade',
 ]);
-const reportableFiscalStatuses = new Set(['autorizada', 'contingencia']);
+const reportableFiscalStatuses = new Set(['autorizada']);
 const nonTaxedPisCofinsCsts = new Set(['04', '05', '06', '07', '08', '09']);
 const fiscalNatureByNcmPrefix = [
   { prefix: '22011000', nature: '415' },
@@ -1193,6 +1193,8 @@ function createPdfBuffer(build) {
 
 function drawReportHeader(doc, report, pageNumber) {
   const pageWidth = doc.page.width;
+  const footerDateY = doc.page.height - doc.page.margins.bottom - 10;
+  const footerPageY = footerDateY - 12;
   const period = `${formatReportDate(report.periodo.data_inicio)} - ${formatReportDate(report.periodo.data_fim)}`;
 
   doc.font('Helvetica-BoldOblique').fontSize(12).fillColor('#141414');
@@ -1204,9 +1206,10 @@ function drawReportHeader(doc, report, pageNumber) {
   doc.text(report.titulo, 24, 44, { align: 'center', width: pageWidth - 48 });
   doc.text(period, 24, 60, { align: 'center', width: pageWidth - 48 });
   doc.font('Helvetica').fontSize(7);
-  doc.text(String(pageNumber), pageWidth - 58, doc.page.height - 28, { align: 'right', width: 34 });
-  doc.text(new Intl.DateTimeFormat('pt-BR').format(new Date(report.gerado_em)), pageWidth - 112, doc.page.height - 14, {
+  doc.text(String(pageNumber), pageWidth - 58, footerPageY, { align: 'right', width: 34, lineBreak: false });
+  doc.text(new Intl.DateTimeFormat('pt-BR').format(new Date(report.gerado_em)), pageWidth - 112, footerDateY, {
     align: 'right',
+    lineBreak: false,
     width: 88,
   });
 }
@@ -1230,7 +1233,7 @@ function drawTableCell(doc, text, x, y, width, height, options = {}) {
 
 function buildProductReportPdf(report) {
   return createPdfBuffer(() => {
-    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 18 });
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 18, autoFirstPage: false });
     const columns = [
       ['CODIGO', 48, 'right'],
       ['DESCRICAO DO ITEM', 153, 'left'],
@@ -1297,6 +1300,7 @@ function buildProductReportPdf(report) {
       y += options.height || rowHeight;
     }
 
+    doc.addPage();
     drawHeader();
 
     for (const group of report.grupos) {
@@ -1378,7 +1382,7 @@ function buildProductReportPdf(report) {
 
 function buildCfopReportPdf(report) {
   return createPdfBuffer(() => {
-    const doc = new PDFDocument({ size: 'A4', layout: 'portrait', margin: 36 });
+    const doc = new PDFDocument({ size: 'A4', layout: 'portrait', margin: 36, autoFirstPage: false });
     const columns = [
       ['CFOP', 43, 160, 'left'],
       ['QUANT', 178, 72, 'right'],
@@ -1432,6 +1436,7 @@ function buildCfopReportPdf(report) {
       y += 28;
     }
 
+    doc.addPage();
     drawHeader();
 
     for (const item of report.itens) {
