@@ -15,12 +15,13 @@ import {
 type PlatformNavItem = {
   href: string;
   label: string;
+  mainOnly?: boolean;
   permission?: string;
 };
 
 const platformNavItems: PlatformNavItem[] = [
   { href: "/meu-sistema", label: "Meu sistema" },
-  { href: "/conta", label: "Minha conta" }
+  { href: "/conta", label: "Minha conta", mainOnly: true }
 ];
 
 function isItemActive(pathname: string, item: PlatformNavItem) {
@@ -41,6 +42,10 @@ function isItemActive(pathname: string, item: PlatformNavItem) {
 }
 
 function canUseItem(item: PlatformNavItem, accountType: string, accountPermissions: string[]) {
+  if (accountType === "subconta" && item.mainOnly) {
+    return false;
+  }
+
   if (accountType !== "subconta" || !item.permission) {
     return true;
   }

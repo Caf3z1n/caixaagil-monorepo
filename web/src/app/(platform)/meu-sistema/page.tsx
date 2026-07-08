@@ -22,7 +22,11 @@ import { AuthFeedback } from "@/components/auth-feedback";
 import { PlatformFrame } from "@/components/platform-frame";
 import { apiGet } from "@/lib/api-client";
 import { buildPlatformReturnHref } from "@/lib/platform-return";
-import { getStoredPlatformAuthToken } from "@/lib/platform-session";
+import {
+  getStoredPlatformAuthToken,
+  PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
+  PLATFORM_ACCOUNT_TYPE_STORAGE_KEY
+} from "@/lib/platform-session";
 import {
   hasFiscalEntitlement,
   loadSubscriptionEntitlements,
@@ -33,6 +37,7 @@ type SystemMenuItem = {
   title: string;
   href?: string;
   icon: LucideIcon;
+  permission?: string;
   requiredPlanFeature?: PlanFeature;
   requiredFeature?: OptionalSystemFeature;
 };
@@ -66,50 +71,59 @@ const menuItems: SystemMenuItem[] = [
     title: "Grupos fiscais",
     href: "/meu-sistema/grupos-fiscais",
     icon: FileCheck2,
+    permission: "grupos_fiscais",
     requiredPlanFeature: "emissao_fiscal"
   },
   {
     title: "Produtos",
     href: "/meu-sistema/produtos",
-    icon: PackageSearch
+    icon: PackageSearch,
+    permission: "produtos"
   },
   {
     title: "Estoque",
     href: "/meu-sistema/estoque",
-    icon: Warehouse
+    icon: Warehouse,
+    permission: "estoque"
   },
   {
     title: "Conferência de caixa",
     href: "/meu-sistema/conferencia-caixa",
-    icon: ShieldCheck
+    icon: ShieldCheck,
+    permission: "conferencia_caixa"
   },
   {
     title: "Configurações",
     href: "/meu-sistema/configuracoes",
-    icon: Settings2
+    icon: Settings2,
+    permission: "configuracoes"
   },
   {
     title: "Funcionários",
     href: "/meu-sistema/funcionarios",
     icon: UsersRound,
+    permission: "funcionarios",
     requiredFeature: "employees"
   },
   {
     title: "Despesas",
     href: "/meu-sistema/despesas",
     icon: WalletCards,
+    permission: "despesas",
     requiredFeature: "expenses"
   },
   {
     title: "Clientes",
     href: "/meu-sistema/convenios",
     icon: UsersRound,
+    permission: "convenios",
     requiredFeature: "customers"
   },
   {
     title: "Documentos fiscais",
     href: "/meu-sistema/documentos-fiscais",
     icon: ReceiptText,
+    permission: "documentos_fiscais",
     requiredPlanFeature: "emissao_fiscal"
   }
 ];
@@ -144,6 +158,29 @@ function startMenuFocusWave(event: FocusEvent<HTMLElement>) {
 
 function stopMenuWave(event: FocusEvent<HTMLElement> | PointerEvent<HTMLElement>) {
   event.currentTarget.classList.remove("system-home-menu-item--hovering");
+}
+
+function readStoredPermissions() {
+  const rawPermissions = window.localStorage.getItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
+
+  if (!rawPermissions) {
+    return ["*"];
+  }
+
+  try {
+    const parsed = JSON.parse(rawPermissions);
+    return Array.isArray(parsed) ? parsed : ["*"];
+  } catch {
+    return ["*"];
+  }
+}
+
+function canUseMenuItem(item: SystemMenuItem, accountType: string, accountPermissions: string[]) {
+  if (accountType !== "subconta" || !item.permission) {
+    return true;
+  }
+
+  return accountPermissions.includes("*") || accountPermissions.includes(item.permission);
 }
 
 function renderMenuItem(item: SystemMenuItem, featured = false, lockedByPlan = false) {
@@ -196,19 +233,42 @@ export default function MeuSistemaPage() {
   const searchParams = useSearchParams();
   const [enabledFeatures, setEnabledFeatures] = useState<EnabledSystemFeatures>(defaultEnabledSystemFeatures);
   const [entitlements, setEntitlements] = useState<SubscriptionEntitlements | null>(null);
+  const [accountType, setAccountType] = useState("usuario");
+  const [accountPermissions, setAccountPermissions] = useState<string[]>(["*"]);
 
   useEffect(() => {
     let cancelled = false;
     const token = getStoredPlatformAuthToken();
+    const storedType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY) || "usuario";
+    const storedPermissions = readStoredPermissions();
+
+    setAccountType(storedType);
+    setAccountPermissions(storedPermissions);
 
     if (!token) {
       return;
     }
 
     const authToken = token;
+    const isSubaccount = storedType === "subconta";
 
     async function loadConfiguration() {
       try {
+        if (isSubaccount) {
+          const subscriptionEntitlements = await loadSubscriptionEntitlements(authToken);
+
+          if (!cancelled) {
+            setEnabledFeatures({
+              customers: storedPermissions.includes("*") || storedPermissions.includes("convenios"),
+              expenses: storedPermissions.includes("*") || storedPermissions.includes("despesas"),
+              employees: storedPermissions.includes("*") || storedPermissions.includes("funcionarios")
+            });
+            setEntitlements(subscriptionEntitlements);
+          }
+
+          return;
+        }
+
         const [configuracao, subscriptionEntitlements] = await Promise.all([
           apiGet<ConfiguracaoSistema>("/configuracoes", { cacheTtlMs: 60_000, token: authToken }),
           loadSubscriptionEntitlements(authToken)
@@ -238,9 +298,16 @@ export default function MeuSistemaPage() {
   }, []);
 
   const routineItems = useMemo(
-    () => baseRoutineItems.filter((item) => !item.requiredFeature || enabledFeatures[item.requiredFeature]),
-    [enabledFeatures]
+    () =>
+      baseRoutineItems.filter((item) =>
+        (!item.requiredFeature || enabledFeatures[item.requiredFeature]) &&
+        canUseMenuItem(item, accountType, accountPermissions)
+      ),
+    [accountPermissions, accountType, enabledFeatures]
   );
+  const canUseConfigurationItem = configurationItem
+    ? canUseMenuItem(configurationItem, accountType, accountPermissions)
+    : false;
   const isFiscalLocked = entitlements !== null && !hasFiscalEntitlement(entitlements);
   const blockedByFiscalPlan = searchParams.get("bloqueio") === "emissao_fiscal";
 
@@ -261,21 +328,28 @@ export default function MeuSistemaPage() {
 
           <section className="system-home-card" aria-label="Menu do meu sistema">
             <nav className="system-home-menu" aria-label="Rotinas do sistema">
-              {configurationItem ? (
+              {configurationItem && canUseConfigurationItem ? (
                 <div className="system-home-menu-featured">
                   {renderMenuItem(configurationItem, true)}
                 </div>
               ) : null}
 
-              <div className="system-home-menu-grid">
-                {routineItems.map((item) =>
-                  renderMenuItem(
-                    item,
-                    false,
-                    item.requiredPlanFeature === "emissao_fiscal" && isFiscalLocked
-                  )
-                )}
-              </div>
+              {routineItems.length ? (
+                <div className="system-home-menu-grid">
+                  {routineItems.map((item) =>
+                    renderMenuItem(
+                      item,
+                      false,
+                      item.requiredPlanFeature === "emissao_fiscal" && isFiscalLocked
+                    )
+                  )}
+                </div>
+              ) : accountType === "subconta" ? (
+                <div className="platform-access-empty">
+                  <UsersRound aria-hidden="true" size={20} />
+                  Nenhum acesso liberado para esta subconta.
+                </div>
+              ) : null}
             </nav>
 
           </section>

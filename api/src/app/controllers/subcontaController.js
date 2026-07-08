@@ -4,24 +4,49 @@ const { ensureLimitAvailable } = require('../services/assinaturaEntitlementsServ
 
 const permissoesDisponiveis = [
   {
-    chave: 'pdvs_subcontas',
-    titulo: 'PDVs e subcontas',
-    descricao: 'Acessar a página de PDVs, códigos de ativação e subcontas.',
+    chave: 'configuracoes',
+    titulo: 'Configurações',
+    descricao: 'Acessar preferências de operação, emissão fiscal e recursos do sistema.',
   },
   {
     chave: 'grupos_fiscais',
     titulo: 'Grupos fiscais',
-    descricao: 'Acessar o cadastro de grupos fiscais usados nos produtos.',
+    descricao: 'Acessar o cadastro fiscal usado nos produtos.',
   },
   {
     chave: 'produtos',
     titulo: 'Produtos',
-    descricao: 'Acessar categorias e cadastro de produtos da venda.',
+    descricao: 'Acessar categorias e cadastro de produtos.',
   },
   {
     chave: 'estoque',
     titulo: 'Estoque',
-    descricao: 'Acessar locais de estoque e ajustar saldos dos produtos.',
+    descricao: 'Acessar locais de estoque e ajustar saldos.',
+  },
+  {
+    chave: 'conferencia_caixa',
+    titulo: 'Conferência de caixa',
+    descricao: 'Acessar conferências, lançamentos e fechamento do caixa.',
+  },
+  {
+    chave: 'funcionarios',
+    titulo: 'Funcionários',
+    descricao: 'Acessar cadastro de funcionários e regras de acesso.',
+  },
+  {
+    chave: 'despesas',
+    titulo: 'Despesas',
+    descricao: 'Acessar lançamentos e acompanhamento de despesas.',
+  },
+  {
+    chave: 'convenios',
+    titulo: 'Clientes',
+    descricao: 'Acessar clientes, convênios e recebimentos.',
+  },
+  {
+    chave: 'documentos_fiscais',
+    titulo: 'Documentos fiscais',
+    descricao: 'Acessar notas, XMLs e relatórios fiscais.',
   },
 ];
 

@@ -8,16 +8,16 @@ type PlatformPrefetchRoute = {
 
 const platformRouteConfigs: PlatformPrefetchRoute[] = [
   { href: "/meu-sistema" },
-  { href: "/meu-sistema/configuracoes", mainOnly: true },
+  { href: "/meu-sistema/configuracoes", permission: "configuracoes" },
   { href: "/meu-sistema/grupos-fiscais", permission: "grupos_fiscais" },
   { href: "/meu-sistema/produtos", permission: "produtos" },
   { href: "/meu-sistema/estoque", permission: "estoque" },
-  { href: "/meu-sistema/conferencia-caixa" },
-  { href: "/meu-sistema/convenios" },
-  { href: "/meu-sistema/despesas" },
-  { href: "/meu-sistema/documentos-fiscais" },
-  { href: "/meu-sistema/funcionarios" },
-  { href: "/conta" }
+  { href: "/meu-sistema/conferencia-caixa", permission: "conferencia_caixa" },
+  { href: "/meu-sistema/convenios", permission: "convenios" },
+  { href: "/meu-sistema/despesas", permission: "despesas" },
+  { href: "/meu-sistema/documentos-fiscais", permission: "documentos_fiscais" },
+  { href: "/meu-sistema/funcionarios", permission: "funcionarios" },
+  { href: "/conta", mainOnly: true }
 ];
 
 const platformRouteDataPaths = [

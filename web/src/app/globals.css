@@ -17040,16 +17040,19 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   display: grid;
   gap: 9px;
   margin-top: 4px;
+  max-height: min(52vh, 470px);
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .platform-permission-option {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr) 46px;
   align-items: center;
-  gap: 11px;
+  gap: 12px;
   min-height: 66px;
-  padding: 12px;
+  padding: 12px 13px;
   border: 1px solid var(--line-cool);
   border-radius: 12px;
   background: var(--surface);
@@ -17067,6 +17070,7 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .platform-permission-option-selected {
   border-color: oklch(0.78 0.11 45);
+  background: oklch(0.993 0.01 58);
 }
 
 .platform-permission-option input {
@@ -17080,20 +17084,20 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   border: 0;
 }
 
-.platform-permission-check {
+.platform-permission-icon {
   display: inline-grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 40px;
+  height: 40px;
   border: 1px solid var(--line-cool);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--surface);
+  border-radius: 10px;
+  background: oklch(0.972 0.018 55);
+  color: var(--orange);
 }
 
-.platform-permission-option-selected .platform-permission-check {
-  border-color: var(--orange);
-  background: var(--orange);
+.platform-permission-option-selected .platform-permission-icon {
+  border-color: oklch(0.82 0.08 45);
+  background: oklch(0.958 0.04 55);
 }
 
 .platform-permission-copy {
@@ -17114,6 +17118,40 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   font-size: 0.82rem;
   font-weight: 650;
   line-height: 1.35;
+}
+
+.platform-permission-switch {
+  position: relative;
+  justify-self: end;
+  width: 42px;
+  height: 24px;
+  border: 1px solid var(--line-cool);
+  border-radius: 999px;
+  background: oklch(0.94 0.01 70);
+  transition:
+    background-color 180ms ease-out,
+    border-color 180ms ease-out;
+}
+
+.platform-permission-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 4px oklch(0.28 0.02 55 / 0.18);
+  transition: transform 180ms ease-out;
+}
+
+.platform-permission-option-selected .platform-permission-switch {
+  border-color: oklch(0.72 0.13 150);
+  background: oklch(0.62 0.16 150);
+}
+
+.platform-permission-option-selected .platform-permission-switch span {
+  transform: translateX(18px);
 }
 
 .platform-access-empty {

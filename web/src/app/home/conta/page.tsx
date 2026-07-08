@@ -12,18 +12,23 @@ import {
   CreditCard,
   Eye,
   EyeOff,
+  FileCheck2,
   KeyRound,
   LoaderCircle,
   LockKeyhole,
   Monitor,
+  PackageSearch,
   Pencil,
   Plus,
   ReceiptText,
   RotateCcw,
+  Settings2,
+  ShieldCheck,
   Unplug,
   UserCircle,
   UsersRound,
   WalletCards,
+  Warehouse,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -278,29 +283,63 @@ const emptySubaccountForm: SubaccountForm = {
   email: "",
   senha: "",
   confirmarSenha: "",
-  permissoes: ["pdvs_subcontas"]
+  permissoes: []
 };
 
 const permissionOptions = [
   {
-    chave: "pdvs_subcontas",
-    titulo: "PDVs e subcontas",
-    descricao: "Gerenciar PDVs e acompanhar os acessos da equipe."
+    chave: "configuracoes",
+    titulo: "Configurações",
+    descricao: "Preferências de operação, fiscal e recursos.",
+    icon: Settings2
   },
   {
     chave: "grupos_fiscais",
     titulo: "Grupos fiscais",
-    descricao: "Abrir o cadastro fiscal usado nos produtos."
+    descricao: "Cadastro fiscal usado nos produtos.",
+    icon: FileCheck2
   },
   {
     chave: "produtos",
     titulo: "Produtos",
-    descricao: "Abrir categorias e cadastro de produtos."
+    descricao: "Categorias e cadastro de produtos.",
+    icon: PackageSearch
   },
   {
     chave: "estoque",
     titulo: "Estoque",
-    descricao: "Abrir locais de estoque e ajustar saldos."
+    descricao: "Locais de estoque e ajuste de saldos.",
+    icon: Warehouse
+  },
+  {
+    chave: "conferencia_caixa",
+    titulo: "Conferência de caixa",
+    descricao: "Conferências, lançamentos e fechamento.",
+    icon: ShieldCheck
+  },
+  {
+    chave: "funcionarios",
+    titulo: "Funcionários",
+    descricao: "Cadastro e regras de acesso da equipe.",
+    icon: UsersRound
+  },
+  {
+    chave: "despesas",
+    titulo: "Despesas",
+    descricao: "Lançamentos e acompanhamento de despesas.",
+    icon: WalletCards
+  },
+  {
+    chave: "convenios",
+    titulo: "Clientes",
+    descricao: "Clientes, convênios e recebimentos.",
+    icon: UsersRound
+  },
+  {
+    chave: "documentos_fiscais",
+    titulo: "Documentos fiscais",
+    descricao: "Notas, XMLs e relatórios fiscais.",
+    icon: ReceiptText
   }
 ];
 
@@ -812,8 +851,10 @@ function getSubaccountPermissionSummary(permissoes: string[]) {
     return "Sem acessos";
   }
 
-  if (permissoes.length === 1 && permissoes[0] === "pdvs_subcontas") {
-    return "PDVs e subcontas";
+  const singlePermission = permissionOptions.find((permission) => permission.chave === permissoes[0]);
+
+  if (permissoes.length === 1 && singlePermission) {
+    return singlePermission.titulo;
   }
 
   return `${permissoes.length} acesso${permissoes.length > 1 ? "s" : ""}`;
@@ -3172,6 +3213,7 @@ export default function PlatformAccountPage() {
                 <div className="platform-permission-list" aria-label="Acessos da subconta">
                   {permissionOptions.map((permission) => {
                     const checked = subaccountForm.permissoes.includes(permission.chave);
+                    const PermissionIcon = permission.icon;
 
                     return (
                       <label
@@ -3183,16 +3225,22 @@ export default function PlatformAccountPage() {
                         key={permission.chave}
                       >
                         <input
+                          aria-checked={checked}
                           checked={checked}
                           onChange={() => toggleSubaccountPermission(permission.chave)}
+                          role="switch"
                           type="checkbox"
+                          value={permission.chave}
                         />
-                        <span className="platform-permission-check" aria-hidden="true">
-                          {checked ? <Check size={14} /> : null}
+                        <span className="platform-permission-icon" aria-hidden="true">
+                          <PermissionIcon size={18} />
                         </span>
                         <span className="platform-permission-copy">
                           <strong>{permission.titulo}</strong>
                           <small>{permission.descricao}</small>
+                        </span>
+                        <span className="platform-permission-switch" aria-hidden="true">
+                          <span />
                         </span>
                       </label>
                     );

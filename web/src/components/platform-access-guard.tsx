@@ -24,12 +24,24 @@ type PlatformAccessGuardProps = {
 };
 
 const routePermissions = [
+  { prefix: "/meu-sistema/configuracoes", permission: "configuracoes" },
   { prefix: "/meu-sistema/grupos-fiscais", permission: "grupos_fiscais" },
   { prefix: "/meu-sistema/produtos", permission: "produtos" },
   { prefix: "/meu-sistema/estoque", permission: "estoque" },
+  { prefix: "/meu-sistema/conferencia-caixa", permission: "conferencia_caixa" },
+  { prefix: "/meu-sistema/convenios", permission: "convenios" },
+  { prefix: "/meu-sistema/despesas", permission: "despesas" },
+  { prefix: "/meu-sistema/documentos-fiscais", permission: "documentos_fiscais" },
+  { prefix: "/meu-sistema/funcionarios", permission: "funcionarios" },
+  { prefix: "/configuracoes", permission: "configuracoes" },
   { prefix: "/grupos-fiscais", permission: "grupos_fiscais" },
   { prefix: "/produtos", permission: "produtos" },
-  { prefix: "/estoque", permission: "estoque" }
+  { prefix: "/estoque", permission: "estoque" },
+  { prefix: "/conferencia-caixa", permission: "conferencia_caixa" },
+  { prefix: "/convenios", permission: "convenios" },
+  { prefix: "/despesas", permission: "despesas" },
+  { prefix: "/documentos-fiscais", permission: "documentos_fiscais" },
+  { prefix: "/funcionarios", permission: "funcionarios" }
 ];
 
 const fiscalEntitlementRoutes = [
@@ -85,11 +97,12 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
       const requiredPermission = routePermissions.find((route) =>
         pathname.startsWith(route.prefix)
       )?.permission;
-      const isMainAccountOnlyPage = pathname.startsWith("/meu-sistema/configuracoes");
+      const isMainAccountOnlyPage = pathname.startsWith("/conta");
       const requiresFiscalEntitlement = fiscalEntitlementRoutes.some((route) => pathname.startsWith(route));
       const canAccessPage =
         accountType !== "subconta" ||
-        (!isMainAccountOnlyPage && (!requiredPermission || permissions.includes(requiredPermission)));
+        (!isMainAccountOnlyPage &&
+          (!requiredPermission || permissions.includes("*") || permissions.includes(requiredPermission)));
 
       if (!canAccessPage) {
         router.replace("/meu-sistema");

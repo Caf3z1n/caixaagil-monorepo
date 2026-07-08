@@ -11,6 +11,10 @@ function getRequiredPermission(req) {
     return 'pdvs_subcontas';
   }
 
+  if (baseUrl.startsWith('/configuracoes')) {
+    return 'configuracoes';
+  }
+
   if (baseUrl.startsWith('/grupos-fiscais')) {
     return 'grupos_fiscais';
   }
@@ -21,6 +25,26 @@ function getRequiredPermission(req) {
 
   if (baseUrl.startsWith('/estoques')) {
     return 'estoque';
+  }
+
+  if (baseUrl.startsWith('/caixa')) {
+    return 'conferencia_caixa';
+  }
+
+  if (baseUrl.startsWith('/funcionarios')) {
+    return 'funcionarios';
+  }
+
+  if (baseUrl.startsWith('/despesas')) {
+    return 'despesas';
+  }
+
+  if (baseUrl.startsWith('/convenios')) {
+    return 'convenios';
+  }
+
+  if (baseUrl.startsWith('/nf')) {
+    return 'documentos_fiscais';
   }
 
   return null;
@@ -36,9 +60,9 @@ function isMainAccountOnlyRoute(req) {
   return (
     baseUrl.startsWith('/usuarios') ||
     (baseUrl.startsWith('/assinaturas') && !isEntitlementsRead) ||
-    baseUrl.startsWith('/configuracoes') ||
-    baseUrl.startsWith('/funcionarios') ||
-    baseUrl.startsWith('/nf')
+    baseUrl.startsWith('/conta') ||
+    baseUrl.startsWith('/pdvs') ||
+    baseUrl.startsWith('/subcontas')
   );
 }
 
