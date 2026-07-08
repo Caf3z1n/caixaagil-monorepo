@@ -484,6 +484,15 @@ function getNfArquivoIncludes() {
   ];
 }
 
+function getReportVendaInclude() {
+  return {
+    model: Venda,
+    as: 'venda',
+    required: false,
+    attributes: ['id', 'itens', 'total_centavos'],
+  };
+}
+
 function getFiscalDefaults(fiscal, modelo, ambiente) {
   const targetAmbiente = normalizeAmbiente(ambiente, fiscal?.ambiente);
   const environmentConfig = fiscal?.ambientes?.[targetAmbiente] || fiscal || {};
@@ -635,9 +644,11 @@ async function findFilteredNfs(usuarioId, query = {}, options = {}) {
     return [];
   }
 
-  const include = options.includeHistorico
-    ? [...getNfArquivoIncludes(), getNfEventoInclude()]
-    : getNfArquivoIncludes();
+  const include = [
+    ...getNfArquivoIncludes(),
+    ...(options.includeHistorico ? [getNfEventoInclude()] : []),
+    ...(options.reportOnly ? [getReportVendaInclude()] : []),
+  ];
   const rows = await Nf.findAll({
     where,
     include,
@@ -772,6 +783,18 @@ function getPayloadItemsForReport(payload = {}) {
   return getArrayItems(sale.itens).concat(getArrayItems(sale.items));
 }
 
+function getReportItemsFromNf(nf) {
+  const data = getPlain(nf) || {};
+  const payloadItems = getPayloadItemsForReport(data.payload);
+
+  if (payloadItems.length > 0) {
+    return payloadItems;
+  }
+
+  const venda = asObject(data.venda);
+  return getArrayItems(venda.itens).concat(getArrayItems(venda.items));
+}
+
 function firstTextFromObject(object, keys, maxLength = 255) {
   for (const key of keys) {
     const value = object?.[key];
@@ -827,7 +850,7 @@ async function fetchReportProductMap(usuarioId, nfs) {
   const productIds = [
     ...new Set(
       nfs
-        .flatMap(nf => getPayloadItemsForReport(getPlain(nf).payload))
+        .flatMap(getReportItemsFromNf)
         .map(getProductIdFromLine)
         .filter(Boolean)
     ),
@@ -1026,7 +1049,7 @@ function buildProductFiscalReport({ configuracao, nfs, productMap, query }) {
   let processedItemCount = 0;
 
   for (const nf of nfs) {
-    const payloadItems = getPayloadItemsForReport(getPlain(nf).payload);
+    const payloadItems = getReportItemsFromNf(nf);
 
     payloadItems.forEach((line, index) => {
       const productId = getProductIdFromLine(line);
