@@ -255,6 +255,23 @@ function handleGrupoFiscalError(res, error, defaultMessage) {
 }
 
 module.exports = {
+  async showFiscalConfiguration(req, res) {
+    try {
+      await ensureFeature(req.user.id, 'emissao_fiscal');
+
+      const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
+
+      return res.json({
+        crt: fiscalTaxRegime?.crt || '',
+        regime_tributario: fiscalTaxRegime?.regime_tributario || null,
+        usa_csosn: Boolean(fiscalTaxRegime?.usa_csosn),
+        usa_cst_icms: Boolean(fiscalTaxRegime?.usa_cst_icms),
+      });
+    } catch (error) {
+      return handleGrupoFiscalError(res, error, 'Erro ao carregar configuração fiscal dos grupos.');
+    }
+  },
+
   async list(req, res) {
     try {
       await ensureFeature(req.user.id, 'emissao_fiscal');

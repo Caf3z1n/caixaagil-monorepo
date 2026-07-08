@@ -30,7 +30,11 @@ import {
 } from "lucide-react";
 
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api-client";
-import { getStoredPlatformAuthToken } from "@/lib/platform-session";
+import {
+  getStoredPlatformAuthToken,
+  PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY,
+  PLATFORM_ACCOUNT_TYPE_STORAGE_KEY
+} from "@/lib/platform-session";
 import { capitalizeFirstTextLetter } from "@/lib/text-format";
 import { useModalDismiss } from "@/lib/use-modal-dismiss";
 import { useModalPresence } from "@/lib/use-modal-presence";
@@ -80,12 +84,11 @@ type ActivateFiscalGroupResponse = {
   message?: string;
 };
 
-type FiscalConfigurationSnapshot = {
-  fiscal?: {
-    emitente?: {
-      crt?: string | null;
-    } | null;
-  } | null;
+type FiscalGroupConfiguration = {
+  crt?: string | null;
+  regime_tributario?: RegimeTributario | null;
+  usa_csosn?: boolean;
+  usa_cst_icms?: boolean;
 };
 
 type FiscalGroupDraft = {
@@ -167,6 +170,41 @@ function getTaxRegimeFromCrt(crt: FiscalCrt): RegimeTributario | null {
   }
 
   return null;
+}
+
+function readStoredPermissionList() {
+  if (typeof window === "undefined") {
+    return ["*"];
+  }
+
+  const rawPermissions = window.localStorage.getItem(PLATFORM_ACCOUNT_PERMISSIONS_STORAGE_KEY);
+
+  if (!rawPermissions) {
+    return ["*"];
+  }
+
+  try {
+    const parsed = JSON.parse(rawPermissions);
+    return Array.isArray(parsed) ? parsed : ["*"];
+  } catch {
+    return ["*"];
+  }
+}
+
+function canStoredAccountOpenConfiguration() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const accountType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
+
+  if (accountType !== "subconta") {
+    return true;
+  }
+
+  const permissions = readStoredPermissionList();
+
+  return permissions.includes("*") || permissions.includes("configuracoes");
 }
 
 function formatTaxRegimeLabel(profile: GrupoFiscal) {
@@ -792,6 +830,7 @@ export function FiscalGroupsManager() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [issuerCrt, setIssuerCrt] = useState<FiscalCrt>("");
+  const [canOpenConfiguration, setCanOpenConfiguration] = useState(false);
   const [searchValue, setSearchValue] = useState("");
   const deferredSearchValue = useDeferredValue(searchValue);
   const [flowStep, setFlowStep] = useState<FiscalFlowStep>("choice");
@@ -872,11 +911,11 @@ export function FiscalGroupsManager() {
     try {
       const [result, configuracao] = await Promise.all([
         apiGet<GrupoFiscal[]>("/grupos-fiscais", { cacheTtlMs: 60_000, token }),
-        apiGet<FiscalConfigurationSnapshot>("/configuracoes", { cacheTtlMs: 60_000, token })
+        apiGet<FiscalGroupConfiguration>("/grupos-fiscais/configuracao", { cacheTtlMs: 60_000, token })
       ]);
 
-      const nextIssuerCrt = normalizeFiscalCrt(configuracao.fiscal?.emitente?.crt);
-      const nextTaxRegime = getTaxRegimeFromCrt(nextIssuerCrt);
+      const nextIssuerCrt = normalizeFiscalCrt(configuracao.crt);
+      const nextTaxRegime = configuracao.regime_tributario ?? getTaxRegimeFromCrt(nextIssuerCrt);
 
       setIssuerCrt(nextIssuerCrt);
       setFiscalGroups(
@@ -890,6 +929,10 @@ export function FiscalGroupsManager() {
     } finally {
       setIsLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    setCanOpenConfiguration(canStoredAccountOpenConfiguration());
   }, []);
 
   useEffect(() => {
@@ -1169,11 +1212,17 @@ export function FiscalGroupsManager() {
                 <Info aria-hidden="true" size={18} />
                 <span>
                   <strong>Regime tributário pendente</strong>
-                  <small>Preencha o regime no cadastro fiscal da empresa antes de criar grupos fiscais.</small>
+                  <small>
+                    {canOpenConfiguration
+                      ? "Preencha o regime no cadastro fiscal da empresa antes de criar grupos fiscais."
+                      : "A conta principal precisa preencher o regime fiscal antes da criação de grupos."}
+                  </small>
                 </span>
-                <Link href="/meu-sistema/configuracoes" className="platform-secondary-button">
-                  Abrir cadastro
-                </Link>
+                {canOpenConfiguration ? (
+                  <Link href="/meu-sistema/configuracoes" className="platform-secondary-button">
+                    Abrir cadastro
+                  </Link>
+                ) : null}
               </div>
             ) : !isLoading ? (
               <div className="fiscal-regime-summary">

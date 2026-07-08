@@ -51,6 +51,34 @@ function sanitizeArquivo(arquivo) {
   };
 }
 
+function getSubaccountPermissions(req) {
+  return Array.isArray(req.user?.permissoes) ? req.user.permissoes : [];
+}
+
+function canSubaccountAccessArquivo(req, arquivo) {
+  if (req.user?.tipo_conta !== 'subconta') {
+    return true;
+  }
+
+  const permissions = getSubaccountPermissions(req);
+
+  if (permissions.includes('*')) {
+    return true;
+  }
+
+  const contexto = normalizeText(arquivo.contexto, 60);
+
+  if (permissions.includes('produtos') && contexto === 'produto_imagem') {
+    return true;
+  }
+
+  if (permissions.includes('documentos_fiscais') && contexto.startsWith('nf_')) {
+    return true;
+  }
+
+  return false;
+}
+
 function sendArquivo(res, arquivo) {
   const absolutePath = toAbsolutePath(arquivo.caminho_relativo);
 
@@ -88,6 +116,15 @@ module.exports = {
         return res.status(403).json({
           code: 'MAIN_ACCOUNT_REQUIRED',
           message: 'O certificado fiscal exige acesso pela conta principal.',
+        });
+      }
+
+      if (req.user.tipo_conta === 'subconta' && contexto !== 'produto_imagem') {
+        removePhysicalFile(req.file.path);
+
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Esta subconta não tem acesso para enviar este arquivo.',
         });
       }
 
@@ -138,6 +175,13 @@ module.exports = {
 
     if (!arquivo) {
       return res.status(404).json({ message: 'Arquivo não encontrado.' });
+    }
+
+    if (!canSubaccountAccessArquivo(req, arquivo)) {
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Esta subconta não tem acesso a este arquivo.',
+      });
     }
 
     return sendArquivo(res, arquivo);

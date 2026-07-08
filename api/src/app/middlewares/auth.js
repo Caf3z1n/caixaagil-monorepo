@@ -4,50 +4,65 @@ const { Subconta, Usuario } = require('../models');
 const { getPlatformAccess } = require('../services/assinaturaAccessService');
 const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 
-function getRequiredPermission(req) {
+function getRequiredPermissions(req) {
   const baseUrl = req.baseUrl || '';
+  const path = req.path || '';
+  const method = req.method || '';
 
   if (baseUrl.startsWith('/pdvs') || baseUrl.startsWith('/subcontas')) {
-    return 'pdvs_subcontas';
+    return ['pdvs_subcontas'];
   }
 
   if (baseUrl.startsWith('/configuracoes')) {
-    return 'configuracoes';
+    if (
+      method === 'GET' &&
+      (path.startsWith('/integracoes/cnpja/cnpj/') || path.startsWith('/integracoes/cnpja/cep/'))
+    ) {
+      return ['configuracoes', 'convenios'];
+    }
+
+    return ['configuracoes'];
   }
 
   if (baseUrl.startsWith('/grupos-fiscais')) {
-    return 'grupos_fiscais';
+    return ['grupos_fiscais'];
   }
 
-  if (baseUrl.startsWith('/produtos') || baseUrl.startsWith('/arquivos')) {
-    return 'produtos';
+  if (baseUrl.startsWith('/produtos')) {
+    return ['produtos'];
+  }
+
+  if (baseUrl.startsWith('/arquivos')) {
+    return method === 'GET'
+      ? ['produtos', 'documentos_fiscais']
+      : ['produtos'];
   }
 
   if (baseUrl.startsWith('/estoques')) {
-    return 'estoque';
+    return ['estoque'];
   }
 
   if (baseUrl.startsWith('/caixa')) {
-    return 'conferencia_caixa';
+    return ['conferencia_caixa'];
   }
 
   if (baseUrl.startsWith('/funcionarios')) {
-    return 'funcionarios';
+    return ['funcionarios'];
   }
 
   if (baseUrl.startsWith('/despesas')) {
-    return 'despesas';
+    return ['despesas'];
   }
 
   if (baseUrl.startsWith('/convenios')) {
-    return 'convenios';
+    return ['convenios'];
   }
 
   if (baseUrl.startsWith('/nf')) {
-    return 'documentos_fiscais';
+    return ['documentos_fiscais'];
   }
 
-  return null;
+  return [];
 }
 
 function isMainAccountOnlyRoute(req) {
@@ -64,6 +79,14 @@ function isMainAccountOnlyRoute(req) {
     baseUrl.startsWith('/pdvs') ||
     baseUrl.startsWith('/subcontas')
   );
+}
+
+function hasAnyRequiredPermission(permissoes, requiredPermissions) {
+  if (!Array.isArray(requiredPermissions) || requiredPermissions.length === 0) {
+    return true;
+  }
+
+  return requiredPermissions.some(requiredPermission => permissoes.includes(requiredPermission));
 }
 
 module.exports = async (req, res, next) => {
@@ -117,10 +140,10 @@ module.exports = async (req, res, next) => {
         });
       }
 
-      const requiredPermission = getRequiredPermission(req);
+      const requiredPermissions = getRequiredPermissions(req);
       const permissoes = Array.isArray(subconta.permissoes) ? subconta.permissoes : [];
 
-      if (requiredPermission && !permissoes.includes(requiredPermission)) {
+      if (!hasAnyRequiredPermission(permissoes, requiredPermissions)) {
         return res.status(403).json({
           code: 'ACCESS_DENIED',
           message: 'Esta subconta não tem acesso a esta página.',
