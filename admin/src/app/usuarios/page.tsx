@@ -5,20 +5,19 @@ import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
   Ban,
+  ChevronRight,
   CircleDollarSign,
   Copy,
   CreditCard,
   Eye,
   EyeOff,
-  History,
+  ExternalLink,
+  KeyRound,
   LoaderCircle,
   MailCheck,
   Monitor,
-  PauseCircle,
-  PlayCircle,
   Search,
-  Save,
-  TimerReset,
+  ShieldCheck,
   UserRound,
   UsersRound,
   X
@@ -82,20 +81,6 @@ type ReguaInadimplencia = {
   tolerancia_dias?: number;
   assinatura_id?: number | null;
   assinatura_status?: string | null;
-};
-
-type AcaoAdminAssinatura = {
-  id: number;
-  acao: string;
-  status: string;
-  motivo?: string | null;
-  created_at?: string | null;
-  createdAt?: string | null;
-  administrador?: {
-    id: number;
-    nome?: string | null;
-    email?: string | null;
-  } | null;
 };
 
 type UsuarioAdmin = {
@@ -177,7 +162,6 @@ type UsuarioDetalheResponse = {
   assinatura_atual?: AssinaturaAdmin | null;
   assinaturas: AssinaturaAdmin[];
   pagamentos: PagamentoAdmin[];
-  auditoria?: AcaoAdminAssinatura[];
   pdvs: PdvAdmin[];
   subcontas: Array<{
     id: number;
@@ -207,15 +191,7 @@ type UsuarioDetalheResponse = {
   };
 };
 
-type SubscriptionActionType = "valor" | "trial" | "cancelar" | "pausar" | "reativar";
-
-type SubscriptionActionForm = {
-  assinaturaId: number;
-  tipo: SubscriptionActionType;
-  valor: string;
-  diasGratis: string;
-  motivo: string;
-};
+type AccountDetailView = "pagamentos" | "assinaturas" | "pdvs" | "subcontas";
 
 type AccountActionFeedback = {
   tone: "success" | "error";
@@ -227,6 +203,17 @@ type VerifyUserEmailResponse = {
   usuario?: {
     email_verificado?: boolean;
     email_verificado_em?: string | null;
+  };
+};
+
+type SupportAccessResponse = {
+  acesso_url: string;
+  codigo: string;
+  codigo_expira_em: string;
+  sessao_duracao_segundos: number;
+  usuario: {
+    id: number;
+    email: string;
   };
 };
 
@@ -253,6 +240,7 @@ function normalizeStatus(status?: string | null) {
 
   const labels: Record<string, string> = {
     ativa: "Ativa",
+    cancelamento_agendado: "Cancelamento agendado",
     pendente: "Pendente",
     falha: "Falha",
     pagamento_falhou: "Falha",
@@ -323,34 +311,6 @@ function getBillingPhaseHint(regua?: ReguaInadimplencia | null) {
   return regua.mensagem || "Pagamento vencido";
 }
 
-function parseCurrencyInputToCents(value: string) {
-  const digits = value.replace(/\D/g, "");
-
-  if (!digits) {
-    return 0;
-  }
-
-  return Number(digits);
-}
-
-function formatCurrencyInput(value: string) {
-  const cents = parseCurrencyInputToCents(value);
-
-  if (cents <= 0) {
-    return "";
-  }
-
-  return formatCurrency(cents, "BRL");
-}
-
-function formatCurrencyFieldFromCents(cents?: number | null) {
-  if (!Number.isInteger(cents) || !cents || cents <= 0) {
-    return "";
-  }
-
-  return formatCurrency(cents, "BRL");
-}
-
 function getPaymentDate(payment?: PagamentoAdmin | null) {
   return payment?.pago_em || payment?.processado_em || payment?.vencimento_em || payment?.created_at || payment?.createdAt || null;
 }
@@ -368,10 +328,24 @@ function getPaymentLabel(status?: string | null) {
     pending: "Pendente",
     processed: "Pago",
     rejected: "Falhou",
-    refunded: "Reembolsado"
+    refunded: "Reembolsado",
+    scheduled: "Agendado"
   };
 
   return labels[String(status || "").toLowerCase()] || status || "Sem status";
+}
+
+function getPaymentMethodLabel(method?: string | null) {
+  const labels: Record<string, string> = {
+    account_money: "Saldo Mercado Pago",
+    card: "Cartão",
+    master: "Mastercard",
+    mastercard: "Mastercard",
+    pix: "Pix",
+    visa: "Visa"
+  };
+
+  return labels[String(method || "").toLowerCase()] || method || null;
 }
 
 function getAccountEmailStatus(usuario: UsuarioAdmin) {
@@ -417,34 +391,6 @@ function getAccountInitials(email: string) {
   const second = parts[1]?.[0] || parts[0]?.[1] || "";
 
   return `${first}${second}`.toUpperCase();
-}
-
-function getAuditDate(action: AcaoAdminAssinatura) {
-  return action.created_at || action.createdAt || null;
-}
-
-function getAuditActionLabel(action?: string | null) {
-  const labels: Record<string, string> = {
-    ajustar_valor: "Valor ajustado",
-    conceder_dias_gratis: "Dias grátis",
-    status_cancelar: "Cancelamento",
-    status_pausar: "Pausa",
-    status_reativar: "Reativação"
-  };
-
-  return labels[String(action || "")] || action || "Ação";
-}
-
-function getSubscriptionActionTitle(tipo: SubscriptionActionType) {
-  const labels: Record<SubscriptionActionType, string> = {
-    cancelar: "Cancelar assinatura",
-    pausar: "Pausar assinatura",
-    reativar: "Reativar assinatura",
-    trial: "Conceder dias grátis",
-    valor: "Ajustar valor recorrente"
-  };
-
-  return labels[tipo];
 }
 
 function normalizeSearchValue(value?: string | number | null) {
@@ -575,14 +521,16 @@ export default function AdminUsuariosPage() {
   const [usuarios, setUsuarios] = useState<UsuarioAdmin[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
-  const [isActionSubmitting, setIsActionSubmitting] = useState(false);
   const [isEmailVerifying, setIsEmailVerifying] = useState(false);
+  const [isSupportAccessGenerating, setIsSupportAccessGenerating] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [accountActionFeedback, setAccountActionFeedback] = useState<AccountActionFeedback | null>(null);
   const [selectedUser, setSelectedUser] = useState<UsuarioDetalheResponse | null>(null);
+  const [supportAccess, setSupportAccess] = useState<SupportAccessResponse | null>(null);
+  const [supportAccessClock, setSupportAccessClock] = useState(() => Date.now());
   const [remoteSupportCredentialsByPdv, setRemoteSupportCredentialsByPdv] = useState<Record<number, RemoteSupportCredentialState>>({});
-  const [subscriptionActionForm, setSubscriptionActionForm] = useState<SubscriptionActionForm | null>(null);
+  const [accountDetailView, setAccountDetailView] = useState<AccountDetailView | null>(null);
   const [filters, setFilters] = useState({
     busca: "",
     status: "todos"
@@ -603,6 +551,21 @@ export default function AdminUsuariosPage() {
       return normalizeSearchValue(buildUsuarioSearchText(usuario)).includes(busca);
     });
   }, [filters.busca, filters.status, usuarios]);
+
+  const supportAccessSecondsRemaining = supportAccess
+    ? Math.max(0, Math.ceil((new Date(supportAccess.codigo_expira_em).getTime() - supportAccessClock) / 1000))
+    : 0;
+
+  useEffect(() => {
+    if (!supportAccess) {
+      return undefined;
+    }
+
+    setSupportAccessClock(Date.now());
+    const intervalId = window.setInterval(() => setSupportAccessClock(Date.now()), 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [supportAccess]);
 
   async function loadUsuarios(activeToken = token) {
     if (!activeToken) {
@@ -647,8 +610,9 @@ export default function AdminUsuariosPage() {
 
     try {
       setIsDetailLoading(true);
-      setSubscriptionActionForm(null);
+      setAccountDetailView(null);
       setRemoteSupportCredentialsByPdv({});
+      setSupportAccess(null);
       setActionFeedback(null);
       setAccountActionFeedback(null);
       const result = await apiGet<UsuarioDetalheResponse>(`/admin/usuarios/${usuarioId}`, { token });
@@ -660,6 +624,57 @@ export default function AdminUsuariosPage() {
     } finally {
       setIsDetailLoading(false);
     }
+  }
+
+  async function generateSupportAccess() {
+    if (!token || !selectedUser || isSupportAccessGenerating) {
+      return;
+    }
+
+    try {
+      setIsSupportAccessGenerating(true);
+      setAccountActionFeedback(null);
+      const result = await apiPost<SupportAccessResponse>(
+        `/admin/usuarios/${selectedUser.usuario.id}/acesso-suporte`,
+        {},
+        { token }
+      );
+
+      setSupportAccess(result);
+      setSupportAccessClock(Date.now());
+    } catch (error) {
+      setAccountActionFeedback({
+        tone: "error",
+        message: getErrorMessage(error, "Não foi possível gerar o acesso administrativo.")
+      });
+    } finally {
+      setIsSupportAccessGenerating(false);
+    }
+  }
+
+  async function copySupportAccessCode() {
+    if (!supportAccess) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(supportAccess.codigo);
+      setAccountActionFeedback({ tone: "success", message: "Código temporário copiado." });
+    } catch {
+      setAccountActionFeedback({ tone: "error", message: `Código temporário: ${supportAccess.codigo}` });
+    }
+  }
+
+  function openSupportAccess() {
+    if (!supportAccess || supportAccessSecondsRemaining <= 0) {
+      setAccountActionFeedback({
+        tone: "error",
+        message: "O código expirou. Gere um novo acesso administrativo."
+      });
+      return;
+    }
+
+    window.open(supportAccess.acesso_url, "_blank", "noopener,noreferrer");
   }
 
   async function verifySelectedUserEmail() {
@@ -715,17 +730,6 @@ export default function AdminUsuariosPage() {
     } finally {
       setIsEmailVerifying(false);
     }
-  }
-
-  function openSubscriptionAction(tipo: SubscriptionActionType, assinatura: AssinaturaAdmin) {
-    setActionFeedback(null);
-    setSubscriptionActionForm({
-      assinaturaId: assinatura.id,
-      tipo,
-      valor: formatCurrencyFieldFromCents(assinatura.valor_recorrente_centavos ?? assinatura.valor_centavos),
-      diasGratis: "30",
-      motivo: ""
-    });
   }
 
   async function copyAdminValue(value: string | null | undefined, successMessage: string, fallbackLabel: string) {
@@ -802,62 +806,6 @@ export default function AdminUsuariosPage() {
       }));
     }
   }
-
-  async function submitSubscriptionAction() {
-    if (!token || !selectedUser || !subscriptionActionForm || isActionSubmitting) {
-      return;
-    }
-
-    const usuarioId = selectedUser.usuario.id;
-    const assinaturaId = subscriptionActionForm.assinaturaId;
-    const motivo = subscriptionActionForm.motivo.trim();
-
-    try {
-      setIsActionSubmitting(true);
-      setActionFeedback(null);
-
-      if (subscriptionActionForm.tipo === "valor") {
-        const valorCentavos = parseCurrencyInputToCents(subscriptionActionForm.valor);
-
-        if (valorCentavos <= 0) {
-          setActionFeedback("Informe um valor recorrente válido.");
-          return;
-        }
-
-        await apiPost(`/admin/usuarios/${usuarioId}/assinaturas/${assinaturaId}/valor`, {
-          motivo,
-          valor_centavos: valorCentavos
-        }, { token });
-      } else if (subscriptionActionForm.tipo === "trial") {
-        const diasGratis = Math.max(0, Math.floor(Number(subscriptionActionForm.diasGratis)));
-
-        if (!Number.isFinite(diasGratis) || diasGratis <= 0) {
-          setActionFeedback("Informe a quantidade de dias grátis.");
-          return;
-        }
-
-        await apiPost(`/admin/usuarios/${usuarioId}/assinaturas/${assinaturaId}/trial`, {
-          dias_gratis: diasGratis,
-          motivo
-        }, { token });
-      } else {
-        await apiPost(`/admin/usuarios/${usuarioId}/assinaturas/${assinaturaId}/status`, {
-          acao: subscriptionActionForm.tipo,
-          motivo
-        }, { token });
-      }
-
-      setSubscriptionActionForm(null);
-      await openUserDetails(usuarioId);
-      await loadUsuarios(token);
-    } catch (error) {
-      setActionFeedback(getErrorMessage(error, "Não foi possível concluir a ação administrativa."));
-    } finally {
-      setIsActionSubmitting(false);
-    }
-  }
-
-  const assinaturaAtualDetalhe = selectedUser?.assinatura_atual || null;
 
   return (
     <AdminFrame>
@@ -998,8 +946,9 @@ export default function AdminUsuariosPage() {
                   type="button"
                   onClick={() => {
                     setSelectedUser(null);
-                    setSubscriptionActionForm(null);
+                    setAccountDetailView(null);
                     setRemoteSupportCredentialsByPdv({});
+                    setSupportAccess(null);
                     setActionFeedback(null);
                     setAccountActionFeedback(null);
                   }}
@@ -1013,7 +962,11 @@ export default function AdminUsuariosPage() {
                 <span>
                   <UserRound aria-hidden="true" size={17} />
                   <strong>{selectedUser.assinatura_atual?.plano_nome || "Sem plano"}</strong>
-                  <small>{normalizeStatus(selectedUser.assinatura_atual?.status)}</small>
+                  <small>
+                    {selectedUser.assinatura_atual
+                      ? `${normalizeStatus(selectedUser.assinatura_atual.status)} · ${formatCurrency(selectedUser.assinatura_atual.valor_recorrente_centavos ?? selectedUser.assinatura_atual.valor_centavos, selectedUser.assinatura_atual.moeda || "BRL")}`
+                      : "Nenhuma assinatura vigente"}
+                  </small>
                 </span>
                 <span>
                   <CreditCard aria-hidden="true" size={17} />
@@ -1024,11 +977,6 @@ export default function AdminUsuariosPage() {
                   <Monitor aria-hidden="true" size={17} />
                   <strong>{selectedUser.resumo.pdvs_ativos} / {selectedUser.resumo.subcontas_ativas}</strong>
                   <small>PDVs / subcontas</small>
-                </span>
-                <span>
-                  <CircleDollarSign aria-hidden="true" size={17} />
-                  <strong>{formatCurrency(selectedUser.resumo.total_vendas_30_dias_centavos)}</strong>
-                  <small>{selectedUser.resumo.vendas_30_dias} vendas em 30 dias</small>
                 </span>
               </div>
 
@@ -1059,9 +1007,9 @@ export default function AdminUsuariosPage() {
                 </div>
               ) : null}
 
-              <section className="admin-detail-section admin-account-actions-section" aria-label="Ações administrativas da conta">
+              <section className="admin-detail-section admin-account-actions-section" aria-label="Acesso à conta">
                 <header>
-                  <h3>Ações da conta</h3>
+                  <h3>Acesso</h3>
                   <small>
                     {selectedUser.usuario.email_verificado_em
                       ? `E-mail verificado em ${formatDate(selectedUser.usuario.email_verificado_em)}`
@@ -1070,6 +1018,18 @@ export default function AdminUsuariosPage() {
                 </header>
 
                 <div className="admin-subscription-actions">
+                  <button
+                    disabled={isSupportAccessGenerating || !selectedUser.usuario.ativo}
+                    type="button"
+                    onClick={() => void generateSupportAccess()}
+                  >
+                    {isSupportAccessGenerating ? (
+                      <LoaderCircle aria-hidden="true" className="admin-spin" size={16} />
+                    ) : (
+                      <ShieldCheck aria-hidden="true" size={16} />
+                    )}
+                    {supportAccess ? "Gerar novo acesso" : "Acessar conta"}
+                  </button>
                   <button
                     className={selectedUser.usuario.email_verificado_em ? "admin-account-action-verified" : ""}
                     disabled={isEmailVerifying || Boolean(selectedUser.usuario.email_verificado_em)}
@@ -1085,6 +1045,38 @@ export default function AdminUsuariosPage() {
                   </button>
                 </div>
 
+                {supportAccess ? (
+                  <div className={supportAccessSecondsRemaining > 0 ? "admin-support-access" : "admin-support-access admin-support-access-expired"}>
+                    <span className="admin-support-access-icon">
+                      <KeyRound aria-hidden="true" size={18} />
+                    </span>
+                    <span className="admin-support-access-copy">
+                      <small>Código temporário</small>
+                      <strong>{supportAccess.codigo}</strong>
+                      <em>
+                        {supportAccessSecondsRemaining > 0
+                          ? `Expira em ${supportAccessSecondsRemaining}s · sessão de 30 minutos`
+                          : "Código expirado"}
+                      </em>
+                    </span>
+                    <span className="admin-support-access-actions">
+                      <button type="button" onClick={() => void copySupportAccessCode()}>
+                        <Copy aria-hidden="true" size={15} />
+                        Copiar
+                      </button>
+                      <button
+                        className="admin-support-access-open"
+                        disabled={supportAccessSecondsRemaining <= 0}
+                        type="button"
+                        onClick={openSupportAccess}
+                      >
+                        <ExternalLink aria-hidden="true" size={15} />
+                        Abrir conta
+                      </button>
+                    </span>
+                  </div>
+                ) : null}
+
                 {accountActionFeedback ? (
                   <div className={`admin-feedback admin-feedback-${accountActionFeedback.tone}`} role={accountActionFeedback.tone === "error" ? "alert" : "status"}>
                     {accountActionFeedback.tone === "error" ? (
@@ -1097,269 +1089,183 @@ export default function AdminUsuariosPage() {
                 ) : null}
               </section>
 
-              {assinaturaAtualDetalhe ? (
-                <section className="admin-detail-section admin-account-actions-section" aria-label="Ações administrativas da assinatura">
-                  <header>
-                    <h3>Ações administrativas</h3>
-                    <small>Assinatura #{assinaturaAtualDetalhe.id}</small>
-                  </header>
+              <nav className="admin-account-detail-links" aria-label="Detalhes relacionados à conta">
+                <button type="button" onClick={() => setAccountDetailView("pagamentos")}>
+                  <span className="admin-account-detail-link-icon"><CircleDollarSign aria-hidden="true" size={18} /></span>
+                  <span>
+                    <strong>Pagamentos</strong>
+                    <small>
+                      {selectedUser.pagamentos.length > 0
+                        ? `${selectedUser.pagamentos.length} registro${selectedUser.pagamentos.length === 1 ? "" : "s"} · último em ${formatDate(getPaymentDate(selectedUser.pagamentos[0]))}`
+                        : "Nenhum pagamento registrado"}
+                    </small>
+                  </span>
+                  <em>{selectedUser.pagamentos.length}</em>
+                  <ChevronRight aria-hidden="true" size={18} />
+                </button>
+                <button type="button" onClick={() => setAccountDetailView("assinaturas")}>
+                  <span className="admin-account-detail-link-icon"><CreditCard aria-hidden="true" size={18} /></span>
+                  <span>
+                    <strong>Assinaturas</strong>
+                    <small>{selectedUser.assinatura_atual?.plano_nome || "Nenhum plano vigente"}</small>
+                  </span>
+                  <em>{selectedUser.assinaturas.length}</em>
+                  <ChevronRight aria-hidden="true" size={18} />
+                </button>
+                <button type="button" onClick={() => {
+                  setActionFeedback(null);
+                  setAccountDetailView("pdvs");
+                }}>
+                  <span className="admin-account-detail-link-icon"><Monitor aria-hidden="true" size={18} /></span>
+                  <span>
+                    <strong>PDVs</strong>
+                    <small>{selectedUser.resumo.pdvs_ativos} ativo{selectedUser.resumo.pdvs_ativos === 1 ? "" : "s"} de {selectedUser.pdvs.length}</small>
+                  </span>
+                  <em>{selectedUser.pdvs.length}</em>
+                  <ChevronRight aria-hidden="true" size={18} />
+                </button>
+                <button type="button" onClick={() => setAccountDetailView("subcontas")}>
+                  <span className="admin-account-detail-link-icon"><UsersRound aria-hidden="true" size={18} /></span>
+                  <span>
+                    <strong>Subcontas</strong>
+                    <small>{selectedUser.resumo.subcontas_ativas} ativa{selectedUser.resumo.subcontas_ativas === 1 ? "" : "s"} de {selectedUser.subcontas.length}</small>
+                  </span>
+                  <em>{selectedUser.subcontas.length}</em>
+                  <ChevronRight aria-hidden="true" size={18} />
+                </button>
+              </nav>
+            </section>
 
-                  <div className="admin-subscription-actions">
-                    <button type="button" onClick={() => openSubscriptionAction("valor", assinaturaAtualDetalhe)}>
-                      <CircleDollarSign aria-hidden="true" size={16} />
-                      Ajustar valor
-                    </button>
-                    <button type="button" onClick={() => openSubscriptionAction("trial", assinaturaAtualDetalhe)}>
-                      <TimerReset aria-hidden="true" size={16} />
-                      Dias grátis
-                    </button>
-                    {assinaturaAtualDetalhe.status === "pausada" || assinaturaAtualDetalhe.status === "cancelada" ? (
-                      <button type="button" onClick={() => openSubscriptionAction("reativar", assinaturaAtualDetalhe)}>
-                        <PlayCircle aria-hidden="true" size={16} />
-                        Reativar
-                      </button>
-                    ) : (
-                      <button type="button" onClick={() => openSubscriptionAction("pausar", assinaturaAtualDetalhe)}>
-                        <PauseCircle aria-hidden="true" size={16} />
-                        Pausar
-                      </button>
-                    )}
-                    <button className="admin-subscription-action-danger" type="button" onClick={() => openSubscriptionAction("cancelar", assinaturaAtualDetalhe)}>
-                      <Ban aria-hidden="true" size={16} />
-                      Cancelar
-                    </button>
-                  </div>
-
-                  {subscriptionActionForm ? (
-                    <div className="admin-inline-action-form">
-                      <header>
-                        <strong>{getSubscriptionActionTitle(subscriptionActionForm.tipo)}</strong>
-                        <button type="button" onClick={() => setSubscriptionActionForm(null)} aria-label="Cancelar ação administrativa">
-                          <X aria-hidden="true" size={15} />
-                        </button>
-                      </header>
-
-                      {subscriptionActionForm.tipo === "valor" ? (
-                        <label>
-                          <span>Valor recorrente</span>
-                          <input
-                            inputMode="numeric"
-                            value={subscriptionActionForm.valor}
-                            onChange={event => setSubscriptionActionForm(current => current ? {
-                              ...current,
-                              valor: formatCurrencyInput(event.currentTarget.value)
-                            } : current)}
-                            placeholder="R$ 0,00"
-                          />
-                        </label>
-                      ) : null}
-
-                      {subscriptionActionForm.tipo === "trial" ? (
-                        <label>
-                          <span>Dias grátis</span>
-                          <input
-                            inputMode="numeric"
-                            min="1"
-                            type="number"
-                            value={subscriptionActionForm.diasGratis}
-                            onChange={event => setSubscriptionActionForm(current => current ? {
-                              ...current,
-                              diasGratis: event.currentTarget.value
-                            } : current)}
-                          />
-                        </label>
-                      ) : null}
-
-                      <label>
-                        <span>Motivo</span>
-                        <textarea
-                          value={subscriptionActionForm.motivo}
-                          onChange={event => setSubscriptionActionForm(current => current ? {
-                            ...current,
-                            motivo: event.currentTarget.value
-                          } : current)}
-                          placeholder="Registro interno da decisão"
-                          rows={3}
-                        />
-                      </label>
-
-                      {actionFeedback ? (
-                        <div className="admin-feedback admin-feedback-error" role="alert">
-                          <AlertTriangle aria-hidden="true" size={16} />
-                          <span>{actionFeedback}</span>
-                        </div>
-                      ) : null}
-
-                      <div className="admin-inline-action-footer">
-                        <button className="admin-secondary-button" type="button" onClick={() => setSubscriptionActionForm(null)}>
-                          Cancelar
-                        </button>
-                        <button
-                          className={subscriptionActionForm.tipo === "cancelar" ? "admin-danger-button" : "admin-confirm-button"}
-                          disabled={isActionSubmitting}
-                          type="button"
-                          onClick={() => void submitSubscriptionAction()}
-                        >
-                          <Save aria-hidden="true" size={16} />
-                          Confirmar
-                        </button>
-                      </div>
+            {accountDetailView ? (
+              <div className="admin-subdialog-backdrop" role="presentation">
+                <section className="admin-dialog-card admin-account-subdialog" role="dialog" aria-modal="true" aria-labelledby="admin-account-subdialog-title">
+                  <header className="admin-dialog-head">
+                    <div>
+                      <span className="admin-subdialog-eyebrow">{selectedUser.usuario.email}</span>
+                      <h2 id="admin-account-subdialog-title">
+                        {accountDetailView === "pagamentos" ? "Pagamentos" : null}
+                        {accountDetailView === "assinaturas" ? "Assinaturas" : null}
+                        {accountDetailView === "pdvs" ? "PDVs" : null}
+                        {accountDetailView === "subcontas" ? "Subcontas" : null}
+                      </h2>
+                      <p>
+                        {accountDetailView === "pagamentos" ? `${selectedUser.pagamentos.length} registro${selectedUser.pagamentos.length === 1 ? "" : "s"}` : null}
+                        {accountDetailView === "assinaturas" ? `${selectedUser.assinaturas.length} vínculo${selectedUser.assinaturas.length === 1 ? "" : "s"}` : null}
+                        {accountDetailView === "pdvs" ? `${selectedUser.pdvs.length} equipamento${selectedUser.pdvs.length === 1 ? "" : "s"}` : null}
+                        {accountDetailView === "subcontas" ? `${selectedUser.subcontas.length} acesso${selectedUser.subcontas.length === 1 ? "" : "s"}` : null}
+                      </p>
                     </div>
-                  ) : null}
-                </section>
-              ) : null}
-
-              <div className="admin-detail-grid">
-                <section className="admin-detail-section" aria-label="Histórico de pagamentos">
-                  <header>
-                    <h3>Pagamentos</h3>
-                    <small>{selectedUser.pagamentos.length} registro{selectedUser.pagamentos.length === 1 ? "" : "s"}</small>
+                    <button type="button" onClick={() => setAccountDetailView(null)} aria-label="Fechar detalhes">
+                      <X aria-hidden="true" size={18} />
+                    </button>
                   </header>
-                  <div className="admin-compact-list">
-                    {selectedUser.pagamentos.slice(0, 8).map(payment => (
-                      <div key={payment.id}>
-                        <span>
-                          <strong>{formatCurrency(payment.valor_centavos, payment.moeda || "BRL")}</strong>
-                          <small>{formatDate(getPaymentDate(payment))}</small>
-                        </span>
-                        <em className={getPaymentStatusClass(payment.status)}>{getPaymentLabel(payment.status)}</em>
+
+                  <div className="admin-subdialog-content">
+                    {accountDetailView === "pagamentos" ? (
+                      <div className="admin-compact-list admin-subdialog-list">
+                        {selectedUser.pagamentos.map(payment => (
+                          <div key={payment.id}>
+                            <span>
+                              <strong>{formatCurrency(payment.valor_centavos, payment.moeda || "BRL")}</strong>
+                              <small>{formatDate(getPaymentDate(payment))}{payment.forma_pagamento ? ` · ${getPaymentMethodLabel(payment.forma_pagamento)}` : ""}</small>
+                            </span>
+                            <em className={getPaymentStatusClass(payment.status)}>{getPaymentLabel(payment.status)}</em>
+                          </div>
+                        ))}
+                        {selectedUser.pagamentos.length === 0 ? <p className="admin-subdialog-empty">Nenhum pagamento registrado.</p> : null}
                       </div>
-                    ))}
-                    {selectedUser.pagamentos.length === 0 ? <p>Nenhum pagamento registrado.</p> : null}
-                  </div>
-                </section>
+                    ) : null}
 
-                <section className="admin-detail-section" aria-label="Assinaturas da conta">
-                  <header>
-                    <h3>Assinaturas</h3>
-                    <small>{selectedUser.assinaturas.length} vínculo{selectedUser.assinaturas.length === 1 ? "" : "s"}</small>
-                  </header>
-                  <div className="admin-compact-list">
-                    {selectedUser.assinaturas.slice(0, 6).map(assinatura => (
-                      <div key={assinatura.id}>
-                        <span>
-                          <strong>{assinatura.plano_nome || assinatura.plano}</strong>
-                          <small>{formatCurrency(assinatura.valor_recorrente_centavos ?? assinatura.valor_centavos, assinatura.moeda || "BRL")}</small>
-                        </span>
-                        <em className={getStatusClass(assinatura.status)}>{normalizeStatus(assinatura.status)}</em>
+                    {accountDetailView === "assinaturas" ? (
+                      <div className="admin-compact-list admin-subdialog-list">
+                        {selectedUser.assinaturas.map(assinatura => (
+                          <div key={assinatura.id}>
+                            <span>
+                              <strong>{assinatura.plano_nome || assinatura.plano}</strong>
+                              <small>
+                                Assinatura #{assinatura.id} · {formatCurrency(assinatura.valor_recorrente_centavos ?? assinatura.valor_centavos, assinatura.moeda || "BRL")}
+                                {assinatura.proximo_pagamento_em ? ` · próxima em ${formatDate(assinatura.proximo_pagamento_em)}` : ""}
+                              </small>
+                            </span>
+                            <em className={getStatusClass(assinatura.status)}>{normalizeStatus(assinatura.status)}</em>
+                          </div>
+                        ))}
+                        {selectedUser.assinaturas.length === 0 ? <p className="admin-subdialog-empty">Nenhuma assinatura vinculada.</p> : null}
                       </div>
-                    ))}
-                  </div>
-                </section>
+                    ) : null}
 
-                <section className="admin-detail-section admin-detail-section-wide" aria-label="PDVs da conta">
-                  <header>
-                    <h3>PDVs</h3>
-                    <small>{selectedUser.pdvs.length} cadastro{selectedUser.pdvs.length === 1 ? "" : "s"}</small>
-                  </header>
-                  <div className="admin-compact-list admin-remote-support-list">
-                    {selectedUser.pdvs.slice(0, 6).map(pdv => {
-                      const support = pdv.suporte_remoto;
-                      const credentialsState = remoteSupportCredentialsByPdv[pdv.id];
-                      const rustdeskId = credentialsState?.rustdesk_id || support?.rustdesk_id || null;
-                      const canShowPassword = Boolean(support?.senha_configurada && rustdeskId);
-                      const isPasswordVisible = Boolean(credentialsState?.showPassword);
+                    {accountDetailView === "pdvs" ? (
+                      <>
+                        {actionFeedback ? <div className="admin-feedback" role="status"><span>{actionFeedback}</span></div> : null}
+                        <div className="admin-compact-list admin-remote-support-list admin-subdialog-list">
+                          {selectedUser.pdvs.map(pdv => {
+                            const support = pdv.suporte_remoto;
+                            const credentialsState = remoteSupportCredentialsByPdv[pdv.id];
+                            const rustdeskId = credentialsState?.rustdesk_id || support?.rustdesk_id || null;
+                            const canShowPassword = Boolean(support?.senha_configurada && rustdeskId);
+                            const isPasswordVisible = Boolean(credentialsState?.showPassword);
 
-                      return (
-                        <div className="admin-remote-support-row" key={pdv.id}>
-                          <span className="admin-remote-support-main">
-                            <strong>{pdv.nome}</strong>
-                            <small>
-                              {formatDate(pdv.ultima_sincronizacao_em || pdv.ultimo_acesso_em)}
-                              {rustdeskId ? ` · ID ${rustdeskId}` : " · sem ID de suporte"}
-                            </small>
-                            {isPasswordVisible ? (
-                              <small className="admin-remote-support-secret">Senha {credentialsState?.senha || "indisponível"}</small>
-                            ) : null}
-                            {credentialsState?.error ? (
-                              <small className="admin-remote-support-error">{credentialsState.error}</small>
-                            ) : null}
-                          </span>
-
-                          <span className="admin-remote-support-side">
-                            <em className={pdv.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{pdv.ativo ? "Ativo" : "Inativo"}</em>
-                            <em className={getRemoteSupportStatusClass(support)}>{getRemoteSupportStatusLabel(support)}</em>
-                            {rustdeskId ? (
-                              <span className="admin-remote-support-actions">
-                                <button
-                                  type="button"
-                                  onClick={() => void copyAdminValue(rustdeskId, "ID do RustDesk copiado.", "ID do RustDesk")}
-                                >
-                                  <Copy aria-hidden="true" size={14} />
-                                  ID
-                                </button>
-                                {canShowPassword ? (
-                                  <button
-                                    disabled={Boolean(credentialsState?.loading)}
-                                    type="button"
-                                    onClick={() => void revealRemoteSupportPassword(pdv)}
-                                  >
-                                    {isPasswordVisible ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}
-                                    {credentialsState?.loading ? "Carregando" : isPasswordVisible ? "Ocultar" : "Senha"}
-                                  </button>
-                                ) : null}
-                                {isPasswordVisible && credentialsState?.senha ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => void copyAdminValue(credentialsState.senha, "Senha do RustDesk copiada.", "Senha")}
-                                  >
-                                    <Copy aria-hidden="true" size={14} />
-                                    Copiar
-                                  </button>
-                                ) : null}
-                              </span>
-                            ) : null}
-                          </span>
+                            return (
+                              <div className="admin-remote-support-row" key={pdv.id}>
+                                <span className="admin-remote-support-main">
+                                  <strong>{pdv.nome}</strong>
+                                  <small>
+                                    Última sincronização em {formatDate(pdv.ultima_sincronizacao_em || pdv.ultimo_acesso_em)}
+                                    {rustdeskId ? ` · ID ${rustdeskId}` : " · sem ID de suporte"}
+                                  </small>
+                                  {isPasswordVisible ? <small className="admin-remote-support-secret">Senha {credentialsState?.senha || "indisponível"}</small> : null}
+                                  {credentialsState?.error ? <small className="admin-remote-support-error">{credentialsState.error}</small> : null}
+                                </span>
+                                <span className="admin-remote-support-side">
+                                  <span className="admin-remote-support-statuses">
+                                    <em className={pdv.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{pdv.ativo ? "Ativo" : "Inativo"}</em>
+                                    <em className={getRemoteSupportStatusClass(support)}>{getRemoteSupportStatusLabel(support)}</em>
+                                  </span>
+                                  {rustdeskId ? (
+                                    <span className="admin-remote-support-actions">
+                                      <button type="button" onClick={() => void copyAdminValue(rustdeskId, "ID do RustDesk copiado.", "ID do RustDesk")}>
+                                        <Copy aria-hidden="true" size={14} /> ID
+                                      </button>
+                                      {canShowPassword ? (
+                                        <button disabled={Boolean(credentialsState?.loading)} type="button" onClick={() => void revealRemoteSupportPassword(pdv)}>
+                                          {isPasswordVisible ? <EyeOff aria-hidden="true" size={14} /> : <Eye aria-hidden="true" size={14} />}
+                                          {credentialsState?.loading ? "Carregando" : isPasswordVisible ? "Ocultar" : "Senha"}
+                                        </button>
+                                      ) : null}
+                                      {isPasswordVisible && credentialsState?.senha ? (
+                                        <button type="button" onClick={() => void copyAdminValue(credentialsState.senha, "Senha do RustDesk copiada.", "Senha")}>
+                                          <Copy aria-hidden="true" size={14} /> Copiar
+                                        </button>
+                                      ) : null}
+                                    </span>
+                                  ) : null}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {selectedUser.pdvs.length === 0 ? <p className="admin-subdialog-empty">Nenhum PDV cadastrado.</p> : null}
                         </div>
-                      );
-                    })}
-                    {selectedUser.pdvs.length === 0 ? <p>Nenhum PDV cadastrado.</p> : null}
-                  </div>
-                </section>
+                      </>
+                    ) : null}
 
-                <section className="admin-detail-section" aria-label="Subcontas da conta">
-                  <header>
-                    <h3>Subcontas</h3>
-                    <small>{selectedUser.subcontas.length} acesso{selectedUser.subcontas.length === 1 ? "" : "s"}</small>
-                  </header>
-                  <div className="admin-compact-list">
-                    {selectedUser.subcontas.slice(0, 6).map(subconta => (
-                      <div key={subconta.id}>
-                        <span>
-                          <strong>{subconta.nome}</strong>
-                          <small>{subconta.email}</small>
-                        </span>
-                        <em className={subconta.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{subconta.ativo ? "Ativa" : "Inativa"}</em>
+                    {accountDetailView === "subcontas" ? (
+                      <div className="admin-compact-list admin-subdialog-list">
+                        {selectedUser.subcontas.map(subconta => (
+                          <div key={subconta.id}>
+                            <span>
+                              <strong>{subconta.nome}</strong>
+                              <small>{subconta.email}{subconta.ultimo_acesso_em ? ` · último acesso em ${formatDate(subconta.ultimo_acesso_em)}` : ""}</small>
+                            </span>
+                            <em className={subconta.ativo ? "admin-status-pill admin-status-pill-success" : "admin-status-pill"}>{subconta.ativo ? "Ativa" : "Inativa"}</em>
+                          </div>
+                        ))}
+                        {selectedUser.subcontas.length === 0 ? <p className="admin-subdialog-empty">Nenhuma subconta cadastrada.</p> : null}
                       </div>
-                    ))}
-                    {selectedUser.subcontas.length === 0 ? <p>Nenhuma subconta cadastrada.</p> : null}
-                  </div>
-                </section>
-
-                <section className="admin-detail-section admin-detail-section-wide" aria-label="Auditoria administrativa">
-                  <header>
-                    <h3>Auditoria</h3>
-                    <small>{selectedUser.auditoria?.length || 0} ação{selectedUser.auditoria?.length === 1 ? "" : "ões"}</small>
-                  </header>
-                  <div className="admin-compact-list">
-                    {(selectedUser.auditoria || []).slice(0, 8).map(action => (
-                      <div key={action.id}>
-                        <span>
-                          <strong>{getAuditActionLabel(action.acao)}</strong>
-                          <small>
-                            {formatDate(getAuditDate(action))}
-                            {action.administrador?.nome ? ` · ${action.administrador.nome}` : ""}
-                          </small>
-                          {action.motivo ? <small>{action.motivo}</small> : null}
-                        </span>
-                        <em className="admin-status-pill">{action.status}</em>
-                      </div>
-                    ))}
-                    {(selectedUser.auditoria || []).length === 0 ? <p>Nenhuma ação administrativa registrada.</p> : null}
+                    ) : null}
                   </div>
                 </section>
               </div>
-            </section>
+            ) : null}
           </div>
         ) : null}
       </main>

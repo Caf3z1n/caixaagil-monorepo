@@ -1,5 +1,7 @@
 const { Op } = require('sequelize');
-const { PagamentoAssinatura } = require('../models');
+const sequelize = require('../../database');
+const { Assinatura, PagamentoAssinatura } = require('../models');
+const { DIAS_TOLERANCIA_BLOQUEIO } = require('./assinaturaInadimplenciaService');
 const {
   getMercadoPagoPayment,
   searchMercadoPagoAuthorizedPayments,
@@ -28,6 +30,49 @@ function toDate(value) {
 
 function toPlain(record) {
   return record?.get ? record.get({ plain: true }) : record || null;
+}
+
+function addMonths(date, months) {
+  const next = new Date(date);
+  const originalDay = next.getDate();
+
+  next.setMonth(next.getMonth() + months);
+
+  if (next.getDate() !== originalDay) {
+    next.setDate(0);
+  }
+
+  return next;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addSubscriptionInterval(date, assinatura) {
+  const snapshot = toPlain(assinatura)?.plano_snapshot || {};
+  const quantity = Number(snapshot.intervalo_quantidade || 1);
+  const safeQuantity = Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+
+  return snapshot.intervalo === 'dias'
+    ? addDays(date, safeQuantity)
+    : addMonths(date, safeQuantity);
+}
+
+function getPaymentReferenceDate(pagamento) {
+  const data = toPlain(pagamento);
+
+  return toDate(
+    data?.pago_em || data?.processado_em || data?.vencimento_em || data?.createdAt || data?.created_at
+  );
+}
+
+function isFinalApprovedPaymentStatus(status) {
+  return ['approved', 'accredited', 'paid', 'processed'].includes(
+    String(status || '').trim().toLowerCase()
+  );
 }
 
 function firstString(...values) {
@@ -92,7 +137,7 @@ function normalizeCardLastDigits(value) {
   return digits.slice(-4);
 }
 
-function normalizeCardBrand(value, allowUnknown = false) {
+function normalizeCardBrand(value) {
   const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
 
   if (!normalized) {
@@ -111,7 +156,22 @@ function normalizeCardBrand(value, allowUnknown = false) {
     return normalized === 'hiper' ? 'hipercard' : normalized;
   }
 
-  if (!allowUnknown || ['pix', 'ticket', 'bolbradesco', 'bank_transfer', 'account_money'].includes(normalized)) {
+  if (
+    [
+      'account_money',
+      'bank_transfer',
+      'bolbradesco',
+      'boleto',
+      'card',
+      'cartao',
+      'cartao_credito',
+      'cartao_debito',
+      'credit_card',
+      'debit_card',
+      'pix',
+      'ticket',
+    ].includes(normalized)
+  ) {
     return null;
   }
 
@@ -155,11 +215,10 @@ function extractPaymentMethodDetails(payload, fallbackMethod = null) {
   );
   const knownBrand = normalizeCardBrand(directBrand);
   const cardPayment = isCardPayment({ tipoPagamento, bandeira: knownBrand, ultimosDigitos });
-  const bandeira = knownBrand || normalizeCardBrand(directBrand, cardPayment);
 
   return {
     tipo_pagamento: tipoPagamento || (cardPayment ? 'card' : null),
-    cartao_bandeira: cardPayment ? bandeira : null,
+    cartao_bandeira: cardPayment ? knownBrand : null,
     cartao_ultimos_digitos: cardPayment ? ultimosDigitos : null,
   };
 }
@@ -319,8 +378,9 @@ function addPaymentData(map, paymentData) {
   map.set(key, mergePaymentData(map.get(key), paymentData));
 }
 
-async function upsertPagamentoAssinatura(paymentData, assinatura) {
+async function upsertPagamentoAssinaturaWithState(paymentData, assinatura, options = {}) {
   const assinaturaData = toPlain(assinatura);
+  const transaction = options.transaction || null;
   const lookupConditions = [];
 
   if (paymentData.mercado_pago_payment_id) {
@@ -337,7 +397,12 @@ async function upsertPagamentoAssinatura(paymentData, assinatura) {
     return null;
   }
 
-  const existing = await PagamentoAssinatura.findOne({ where: { [Op.or]: lookupConditions } });
+  const existing = await PagamentoAssinatura.findOne({
+    where: { [Op.or]: lookupConditions },
+    transaction,
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+  });
+  const previousStatus = existing?.status || null;
   const payload = {
     ...paymentData,
     assinatura_id: assinaturaData?.id || paymentData.assinatura_id || null,
@@ -351,16 +416,103 @@ async function upsertPagamentoAssinatura(paymentData, assinatura) {
     const existingData = toPlain(existing);
 
     for (const key of ['forma_pagamento', 'tipo_pagamento', 'cartao_bandeira', 'cartao_ultimos_digitos']) {
+      if (key === 'cartao_bandeira') {
+        payload[key] = normalizeCardBrand(payload[key]) || normalizeCardBrand(existingData?.[key]);
+        continue;
+      }
+
       if ((payload[key] === null || payload[key] === undefined) && existingData?.[key]) {
         payload[key] = existingData[key];
       }
     }
 
-    await existing.update(payload);
-    return existing;
+    await existing.update(payload, { transaction });
+    return {
+      pagamento: existing,
+      previousStatus,
+    };
   }
 
-  return PagamentoAssinatura.create(payload);
+  return {
+    pagamento: await PagamentoAssinatura.create(payload, { transaction }),
+    previousStatus,
+  };
+}
+
+async function upsertPagamentoAssinatura(paymentData, assinatura, options = {}) {
+  const result = await upsertPagamentoAssinaturaWithState(paymentData, assinatura, options);
+
+  return result?.pagamento || null;
+}
+
+async function processarPagamentoAssinatura(paymentData, assinatura, options = {}) {
+  const assinaturaData = toPlain(assinatura);
+  const assinaturaId = assinaturaData?.id || paymentData?.assinatura_id || null;
+
+  const process = async transaction => {
+    const assinaturaAtual = assinaturaId
+      ? await Assinatura.findByPk(assinaturaId, {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        })
+      : null;
+    const result = await upsertPagamentoAssinaturaWithState(
+      paymentData,
+      assinaturaAtual || assinatura,
+      { transaction }
+    );
+    const pagamento = result?.pagamento || null;
+    const becameApproved =
+      !isFinalApprovedPaymentStatus(result?.previousStatus) &&
+      isFinalApprovedPaymentStatus(pagamento?.status);
+    let accessExtended = false;
+
+    if (assinaturaAtual?.renovacao_cancelada_em) {
+      let shouldSave = assinaturaAtual.status !== 'cancelamento_agendado';
+
+      assinaturaAtual.status = 'cancelamento_agendado';
+
+      if (becameApproved) {
+        const currentNextPaymentDate = toDate(assinaturaAtual.proximo_pagamento_em);
+        const paymentReferenceDate = getPaymentReferenceDate(pagamento);
+
+        if (
+          currentNextPaymentDate &&
+          paymentReferenceDate &&
+          paymentReferenceDate >= currentNextPaymentDate
+        ) {
+          const nextPaymentDate = addSubscriptionInterval(
+            currentNextPaymentDate,
+            assinaturaAtual
+          );
+
+          assinaturaAtual.proximo_pagamento_em = nextPaymentDate;
+          assinaturaAtual.acesso_ate = addDays(
+            nextPaymentDate,
+            DIAS_TOLERANCIA_BLOQUEIO
+          );
+          shouldSave = true;
+          accessExtended = true;
+        }
+      }
+
+      if (shouldSave) {
+        await assinaturaAtual.save({ transaction });
+      }
+    }
+
+    return {
+      accessExtended,
+      assinatura: assinaturaAtual,
+      pagamento,
+    };
+  };
+
+  if (options.transaction) {
+    return process(options.transaction);
+  }
+
+  return sequelize.transaction(process);
 }
 
 async function syncAssinaturaPagamentosMercadoPago(assinatura, options = {}) {
@@ -395,8 +547,15 @@ async function syncAssinaturaPagamentosMercadoPago(assinatura, options = {}) {
 
   const pagamentos = [];
 
-  for (const paymentData of paymentDataMap.values()) {
-    const pagamento = await upsertPagamentoAssinatura(paymentData, assinatura);
+  const paymentDataList = [...paymentDataMap.values()].sort((first, second) => {
+    const firstDate = getPaymentReferenceDate(first)?.getTime() || 0;
+    const secondDate = getPaymentReferenceDate(second)?.getTime() || 0;
+
+    return firstDate - secondDate;
+  });
+
+  for (const paymentData of paymentDataList) {
+    const { pagamento } = await processarPagamentoAssinatura(paymentData, assinatura);
 
     if (pagamento) {
       pagamentos.push(pagamento);
@@ -412,6 +571,7 @@ async function syncAssinaturaPagamentosMercadoPago(assinatura, options = {}) {
 module.exports = {
   normalizeMercadoPagoAuthorizedPayment,
   normalizeMercadoPagoPayment,
+  processarPagamentoAssinatura,
   syncAssinaturaPagamentosMercadoPago,
   upsertPagamentoAssinatura,
 };

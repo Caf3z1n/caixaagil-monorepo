@@ -26,7 +26,7 @@ const { buildPlanoSnapshot } = require('../services/planosService');
 const { sanitizeFiscalSettings } = require('../services/configuracaoSistemaService');
 const { decryptSecret } = require('../services/secretService');
 const {
-  cancelMercadoPagoPreapproval,
+  cancelMercadoPagoPreapprovalConfirmed,
   pauseMercadoPagoPreapproval,
   reactivateMercadoPagoPreapproval,
   updateMercadoPagoPreapprovalAmount,
@@ -35,9 +35,26 @@ const { calcularReguaInadimplencia } = require('../services/assinaturaInadimplen
 const {
   syncAssinaturaPagamentosMercadoPago,
 } = require('../services/pagamentosAssinaturaService');
+const {
+  CODIGO_ACESSO_SUPORTE_TTL_MS,
+  SESSAO_ACESSO_SUPORTE_SEGUNDOS,
+  buildSupportAccessUrl,
+  generateSupportCode,
+  hashSupportCode,
+} = require('../services/acessoSuporteService');
+const { getAppUrl } = require('../services/urlService');
 
 const remoteSupportProvider = 'rustdesk';
 const remoteSupportStatuses = new Set(['nao_configurado', 'configurando', 'configurado', 'erro']);
+const planLinkedSubscriptionStatuses = [
+  'ativa',
+  'pendente',
+  'cancelamento_agendado',
+  'pausada',
+  'pagamento_falhou',
+  'falha',
+];
+const mercadoPagoPlanSyncStatuses = new Set(['ativa', 'pendente', 'pausada', 'pagamento_falhou', 'falha']);
 
 function normalizeEmail(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -368,29 +385,54 @@ function buildSnapshotFromPlanPayload(planoId, payload, versao) {
   });
 }
 
-async function syncPersonalizedPlanSubscriptions({ planoId, payload, transaction, versao }) {
-  if (!payload.personalizado) {
-    return 0;
+async function syncPlanSubscriptions({ planoId, payload, transaction, versao }) {
+  const snapshot = buildSnapshotFromPlanPayload(planoId, payload, versao);
+  const assinaturas = await Assinatura.findAll({
+    attributes: ['id', 'mercado_pago_preapproval_id', 'moeda', 'status'],
+    where: {
+      plano: planoId,
+      status: {
+        [Op.in]: planLinkedSubscriptionStatuses,
+      },
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (assinaturas.length === 0) {
+    return {
+      assinaturasMercadoPago: [],
+      total: 0,
+    };
   }
 
-  const snapshot = buildSnapshotFromPlanPayload(planoId, payload, versao);
+  const ids = assinaturas.map(assinatura => assinatura.id);
   const [updatedCount] = await Assinatura.update(
     {
       plano_versao_id: versao.id,
       plano_snapshot: snapshot,
+      valor_recorrente_centavos: payload.valorCentavos,
     },
     {
       where: {
-        plano: planoId,
-        status: {
-          [Op.in]: ['ativa', 'pendente'],
-        },
+        id: { [Op.in]: ids },
       },
       transaction,
     }
   );
 
-  return updatedCount;
+  return {
+    assinaturasMercadoPago: assinaturas
+      .filter(assinatura =>
+        assinatura.mercado_pago_preapproval_id && mercadoPagoPlanSyncStatuses.has(assinatura.status)
+      )
+      .map(assinatura => ({
+        id: assinatura.id,
+        mercadoPagoPreapprovalId: assinatura.mercado_pago_preapproval_id,
+        moeda: assinatura.moeda || 'BRL',
+      })),
+    total: updatedCount,
+  };
 }
 
 async function getPlanoWithDetails(planoId, transaction = null) {
@@ -612,6 +654,8 @@ function buildAssinaturaAuditSnapshot(assinatura) {
     valor_primeiro_pagamento_centavos: data.valor_primeiro_pagamento_centavos,
     moeda: data.moeda,
     proximo_pagamento_em: data.proximo_pagamento_em,
+    renovacao_cancelada_em: data.renovacao_cancelada_em,
+    acesso_ate: data.acesso_ate,
     cancelada_em: data.cancelada_em,
     tipo_movimento: data.tipo_movimento,
     mercado_pago_preapproval_id: data.mercado_pago_preapproval_id || null,
@@ -1060,6 +1104,22 @@ module.exports = {
       return res.status(400).json({ message: payload.error });
     }
 
+    if (payload.valorCentavos === 0) {
+      const recorrenciasAtivas = await Assinatura.count({
+        where: {
+          mercado_pago_preapproval_id: { [Op.ne]: null },
+          plano: plano.id,
+          status: { [Op.in]: [...mercadoPagoPlanSyncStatuses] },
+        },
+      });
+
+      if (recorrenciasAtivas > 0) {
+        return res.status(409).json({
+          message: 'Este plano possui recorrencias ativas no Mercado Pago. Crie um plano gratuito e migre as contas para interromper as cobrancas com seguranca.',
+        });
+      }
+    }
+
     try {
       const result = await sequelize.transaction(async transaction => {
         const now = new Date();
@@ -1179,7 +1239,7 @@ module.exports = {
           }
         }
 
-        const assinaturasSincronizadas = await syncPersonalizedPlanSubscriptions({
+        const assinaturasSincronizadas = await syncPlanSubscriptions({
           planoId: plano.id,
           payload,
           transaction,
@@ -1188,13 +1248,40 @@ module.exports = {
         const updatedPlan = await getPlanoWithDetails(plano.id, transaction);
 
         return {
-          assinaturas_sincronizadas: assinaturasSincronizadas,
+          assinaturas_mercado_pago: assinaturasSincronizadas.assinaturasMercadoPago,
+          assinaturas_sincronizadas: assinaturasSincronizadas.total,
           codigo: serializeCodigoAssinatura(codigoPersonalizado),
           plano: sanitizePlano(updatedPlan),
         };
       });
 
-      return res.json(result);
+      const { assinaturas_mercado_pago: assinaturasMercadoPago = [], ...response } = result;
+      const mercadoPagoResults = await Promise.allSettled(
+        assinaturasMercadoPago.map(assinatura =>
+          updateMercadoPagoPreapprovalAmount(assinatura.mercadoPagoPreapprovalId, {
+            moeda: assinatura.moeda,
+            valorCentavos: payload.valorCentavos,
+          })
+        )
+      );
+      const mercadoPagoFalhas = mercadoPagoResults.reduce((total, syncResult, index) => {
+        if (syncResult.status === 'fulfilled') {
+          return total;
+        }
+
+        console.error('Falha ao sincronizar assinatura do plano no Mercado Pago.', {
+          assinaturaId: assinaturasMercadoPago[index]?.id,
+          error: syncResult.reason?.message || syncResult.reason,
+          planoId: plano.id,
+        });
+        return total + 1;
+      }, 0);
+
+      return res.json({
+        ...response,
+        mercado_pago_falhas: mercadoPagoFalhas,
+        mercado_pago_sincronizados: mercadoPagoResults.length - mercadoPagoFalhas,
+      });
     } catch (error) {
       if (error.name === 'SequelizeUniqueConstraintError') {
         return res.status(409).json({ message: 'Ja existe um plano ou codigo com estes dados.' });
@@ -1562,7 +1649,7 @@ module.exports = {
       const trintaDiasAtras = new Date();
       trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
 
-      let [assinaturas, pagamentos, pdvs, subcontas, configuracao, vendas30Dias, vendasTotal, auditoria] = await Promise.all([
+      let [assinaturas, pagamentos, pdvs, subcontas, configuracao, vendas30Dias, vendasTotal] = await Promise.all([
         Assinatura.findAll({
           where: { usuario_id: usuarioId },
           order: [['id', 'DESC']],
@@ -1610,21 +1697,6 @@ module.exports = {
           ],
           where: { usuario_id: usuarioId },
           raw: true,
-        }),
-        AcaoAdminAssinatura.findAll({
-          where: { usuario_id: usuarioId },
-          include: [
-            {
-              model: Administrador,
-              as: 'administrador',
-              attributes: ['id', 'nome', 'email'],
-            },
-          ],
-          order: [
-            ['created_at', 'DESC'],
-            ['id', 'DESC'],
-          ],
-          limit: 40,
         }),
       ]);
       const assinaturaAtualModelo = getCurrentSubscription(assinaturas);
@@ -1698,7 +1770,6 @@ module.exports = {
           };
         }),
         pagamentos: pagamentos.map(sanitizePagamentoAdmin).filter(Boolean),
-        auditoria: auditoria.map(sanitizeAcaoAdminAssinatura).filter(Boolean),
         pdvs: pdvs.map(sanitizePdvAdmin).filter(Boolean),
         subcontas: subcontas.map(toPlain),
         configuracao: configuracao ? {
@@ -1726,6 +1797,50 @@ module.exports = {
     } catch (error) {
       return res.status(500).json({
         message: 'Erro ao carregar detalhes do usuario.',
+        detail: error.message,
+      });
+    }
+  },
+
+  async createUserSupportAccess(req, res) {
+    try {
+      const usuarioId = Number(req.params.id);
+
+      if (!Number.isInteger(usuarioId) || usuarioId <= 0) {
+        return res.status(400).json({ message: 'Usuário inválido.' });
+      }
+
+      const usuario = await Usuario.unscoped().findByPk(usuarioId);
+
+      if (!usuario) {
+        return res.status(404).json({ message: 'Usuário não encontrado.' });
+      }
+
+      if (!usuario.ativo) {
+        return res.status(409).json({ message: 'Ative a conta antes de gerar o acesso administrativo.' });
+      }
+
+      const codigo = generateSupportCode();
+      const codigoExpiraEm = new Date(Date.now() + CODIGO_ACESSO_SUPORTE_TTL_MS);
+
+      usuario.codigo_acesso_suporte_hash = hashSupportCode(codigo);
+      usuario.codigo_acesso_suporte_expira_em = codigoExpiraEm;
+      usuario.codigo_acesso_suporte_admin_id = req.admin.id;
+      await usuario.save();
+
+      return res.status(201).json({
+        acesso_url: buildSupportAccessUrl(getAppUrl(req), usuario.id, codigo),
+        codigo,
+        codigo_expira_em: codigoExpiraEm,
+        sessao_duracao_segundos: SESSAO_ACESSO_SUPORTE_SEGUNDOS,
+        usuario: {
+          id: usuario.id,
+          email: usuario.email,
+        },
+      });
+    } catch (error) {
+      return res.status(500).json({
+        message: 'Não foi possível gerar o acesso administrativo.',
         detail: error.message,
       });
     }
@@ -1919,6 +2034,8 @@ module.exports = {
         assinatura.status = 'ativa';
         assinatura.ativada_em = assinatura.ativada_em || new Date();
         assinatura.cancelada_em = null;
+        assinatura.renovacao_cancelada_em = null;
+        assinatura.acesso_ate = null;
         assinatura.proximo_pagamento_em = proximoPagamentoEm;
         assinatura.tipo_movimento = 'prazo_gratis_admin';
         await assinatura.save({ transaction });
@@ -1974,7 +2091,9 @@ module.exports = {
 
       if (assinaturaAtual.mercado_pago_preapproval_id) {
         if (acao === 'cancelar') {
-          mercadoPagoSync = await cancelMercadoPagoPreapproval(assinaturaAtual.mercado_pago_preapproval_id);
+          mercadoPagoSync = await cancelMercadoPagoPreapprovalConfirmed(
+            assinaturaAtual.mercado_pago_preapproval_id
+          );
         } else if (acao === 'pausar') {
           mercadoPagoSync = await pauseMercadoPagoPreapproval(assinaturaAtual.mercado_pago_preapproval_id);
         } else {
@@ -1993,6 +2112,8 @@ module.exports = {
         if (acao === 'cancelar') {
           assinatura.status = 'cancelada';
           assinatura.cancelada_em = now;
+          assinatura.renovacao_cancelada_em = null;
+          assinatura.acesso_ate = null;
           assinatura.tipo_movimento = 'cancelamento_admin';
 
           await AlteracaoAssinatura.update(
@@ -2011,11 +2132,15 @@ module.exports = {
           );
         } else if (acao === 'pausar') {
           assinatura.status = 'pausada';
+          assinatura.renovacao_cancelada_em = null;
+          assinatura.acesso_ate = null;
           assinatura.tipo_movimento = 'pausa_admin';
         } else {
           assinatura.status = 'ativa';
           assinatura.ativada_em = assinatura.ativada_em || now;
           assinatura.cancelada_em = null;
+          assinatura.renovacao_cancelada_em = null;
+          assinatura.acesso_ate = null;
           assinatura.proximo_pagamento_em = assinatura.proximo_pagamento_em || addDays(now, 30);
           assinatura.tipo_movimento = 'reativacao_admin';
         }

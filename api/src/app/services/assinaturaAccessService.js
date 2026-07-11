@@ -26,7 +26,7 @@ function hasSubscriptionActivationEvidence(assinatura) {
   const data = toPlain(assinatura);
   const status = normalizeStatus(data?.status);
 
-  return status === 'ativa' || Boolean(data?.ativada_em);
+  return status === 'ativa' || status === 'cancelamento_agendado' || Boolean(data?.ativada_em);
 }
 
 function isIgnoredReferenceStatus(assinatura) {
@@ -37,7 +37,9 @@ function selectSubscriptionReference(assinaturas = []) {
   const validas = assinaturas.filter(Boolean);
 
   return (
-    validas.find(assinatura => normalizeStatus(toPlain(assinatura)?.status) === 'ativa') ||
+    validas.find(assinatura =>
+      ['ativa', 'cancelamento_agendado'].includes(normalizeStatus(toPlain(assinatura)?.status))
+    ) ||
     validas.find(assinatura => hasSubscriptionActivationEvidence(assinatura) && !isIgnoredReferenceStatus(assinatura)) ||
     validas.find(assinatura => !isIgnoredReferenceStatus(assinatura)) ||
     validas[0] ||

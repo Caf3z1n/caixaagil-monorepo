@@ -35,10 +35,6 @@ function findSnapshotItem(items, codigo) {
   return items.find(item => item?.codigo === codigo) || null;
 }
 
-function isSamePlanVersion(left, right) {
-  return String(left || '') === String(right || '');
-}
-
 function getSnapshotFeature(snapshot, codigo) {
   const recurso = findSnapshotItem(snapshot?.recursos, codigo);
 
@@ -100,12 +96,7 @@ async function getEffectivePlanSnapshot(assinatura) {
   try {
     const planoAtual = await getPlano(data?.plano);
 
-    if (
-      planoAtual?.personalizado &&
-      planoAtual.plano_versao_id &&
-      (!isSamePlanVersion(planoAtual.plano_versao_id, data?.plano_versao_id) ||
-        !isSamePlanVersion(planoAtual.plano_versao_id, snapshot?.plano_versao_id))
-    ) {
+    if (planoAtual?.plano_versao_id) {
       return buildPlanoSnapshot(planoAtual) || snapshot;
     }
   } catch {
@@ -123,10 +114,53 @@ function getAvailable(limit, usage) {
   return Math.max(limit - usage, 0);
 }
 
-async function getEntitlements(usuarioId) {
+function buildSupportBillingStatus(assinatura = null) {
+  const data = toPlain(assinatura);
+
+  return {
+    assinatura_id: data?.id || null,
+    assinatura_status: data?.status || null,
+    bloqueado: false,
+    bloqueia_em: null,
+    dias_em_atraso: 0,
+    dias_para_bloqueio: null,
+    fase: 'regular',
+    mensagem: 'Acesso administrativo temporário.',
+    motivo: 'acesso_suporte_admin',
+    permite_operacao: true,
+    proximo_pagamento_em: data?.proximo_pagamento_em || null,
+  };
+}
+
+async function getEntitlements(usuarioId, options = {}) {
   const assinatura = await getActiveSubscription(usuarioId);
 
   if (!assinatura) {
+    if (options.bypass) {
+      const uso = await getUsage(usuarioId);
+
+      return {
+        acesso_suporte: true,
+        assinatura_id: null,
+        plano_id: 'suporte_admin',
+        plano_nome: 'Acesso administrativo',
+        plano_snapshot: {},
+        recursos: {
+          emissao_fiscal: true,
+        },
+        limites: {
+          pdvs_ativos: null,
+          subcontas_ativas: null,
+        },
+        uso,
+        disponivel: {
+          pdvs_ativos: null,
+          subcontas_ativas: null,
+        },
+        billing_status: buildSupportBillingStatus(),
+      };
+    }
+
     throw createEntitlementError(
       'SUBSCRIPTION_REQUIRED',
       'Assinatura ativa obrigatória.',
@@ -144,7 +178,7 @@ async function getEntitlements(usuarioId) {
     subcontas_ativas: getSnapshotLimit(snapshot, 'subcontas_ativas'),
   };
 
-  return {
+  const entitlements = {
     assinatura_id: data.id,
     plano_id: data.plano,
     plano_nome: snapshot.nome || data.plano,
@@ -159,6 +193,28 @@ async function getEntitlements(usuarioId) {
       subcontas_ativas: getAvailable(limites.subcontas_ativas, uso.subcontas_ativas),
     },
     billing_status: billingStatus,
+  };
+
+  if (!options.bypass) {
+    return entitlements;
+  }
+
+  return {
+    ...entitlements,
+    acesso_suporte: true,
+    recursos: {
+      ...entitlements.recursos,
+      emissao_fiscal: true,
+    },
+    limites: {
+      pdvs_ativos: null,
+      subcontas_ativas: null,
+    },
+    disponivel: {
+      pdvs_ativos: null,
+      subcontas_ativas: null,
+    },
+    billing_status: buildSupportBillingStatus(assinatura),
   };
 }
 
@@ -175,8 +231,12 @@ function ensureBillingOperational(entitlements) {
   );
 }
 
-async function ensureFeature(usuarioId, codigo) {
-  const entitlements = await getEntitlements(usuarioId);
+async function ensureFeature(usuarioId, codigo, options = {}) {
+  const entitlements = await getEntitlements(usuarioId, options);
+
+  if (options.bypass) {
+    return entitlements;
+  }
 
   ensureBillingOperational(entitlements);
 
@@ -191,9 +251,19 @@ async function ensureFeature(usuarioId, codigo) {
   return entitlements;
 }
 
-async function getFeatureAccess(usuarioId, codigo) {
+async function getFeatureAccess(usuarioId, codigo, options = {}) {
   try {
-    const entitlements = await getEntitlements(usuarioId);
+    const entitlements = await getEntitlements(usuarioId, options);
+
+    if (options.bypass) {
+      return {
+        allowed: true,
+        code: null,
+        message: null,
+        entitlements,
+        statusCode: 200,
+      };
+    }
 
     if (entitlements?.billing_status?.bloqueado) {
       return {
@@ -233,14 +303,18 @@ async function getFeatureAccess(usuarioId, codigo) {
   }
 }
 
-async function isFeatureEnabled(usuarioId, codigo) {
-  const access = await getFeatureAccess(usuarioId, codigo);
+async function isFeatureEnabled(usuarioId, codigo, options = {}) {
+  const access = await getFeatureAccess(usuarioId, codigo, options);
 
   return access.allowed;
 }
 
 async function ensureLimitAvailable(usuarioId, codigo, options = {}) {
-  const entitlements = await getEntitlements(usuarioId);
+  const entitlements = await getEntitlements(usuarioId, options);
+
+  if (options.bypass) {
+    return entitlements;
+  }
   const incremento = Number.isInteger(options.incremento) && options.incremento > 0 ? options.incremento : 1;
   const limite = entitlements.limites[codigo];
   const uso = entitlements.uso[codigo] || 0;

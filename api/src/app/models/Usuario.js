@@ -62,6 +62,15 @@ Usuario.init(
     onboarding_concluido_em: {
       type: DataTypes.DATE,
     },
+    codigo_acesso_suporte_hash: {
+      type: DataTypes.STRING(64),
+    },
+    codigo_acesso_suporte_expira_em: {
+      type: DataTypes.DATE,
+    },
+    codigo_acesso_suporte_admin_id: {
+      type: DataTypes.INTEGER,
+    },
   },
   {
     sequelize,
@@ -79,6 +88,9 @@ Usuario.init(
           'token_redefinicao_senha_expira_em',
           'token_troca_email',
           'token_troca_email_expira_em',
+          'codigo_acesso_suporte_hash',
+          'codigo_acesso_suporte_expira_em',
+          'codigo_acesso_suporte_admin_id',
         ],
       },
     },
@@ -93,6 +105,15 @@ Usuario.init(
             'token_redefinicao_senha_expira_em',
             'token_troca_email',
             'token_troca_email_expira_em',
+          ],
+        },
+      },
+      withAcessoSuporte: {
+        attributes: {
+          include: [
+            'codigo_acesso_suporte_hash',
+            'codigo_acesso_suporte_expira_em',
+            'codigo_acesso_suporte_admin_id',
           ],
         },
       },

@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ArrowRight,
   AtSign,
+  Ban,
   Check,
   Copy,
   CreditCard,
@@ -52,7 +53,7 @@ type ContaTipo = "usuario" | "subconta";
 type ModalFeedback = { message: string; tone?: "success" | "danger" | "neutral" } | null;
 type AccountView = "menu" | "plan" | "pdvs" | "subcontas";
 type AccountStep = "menu" | "email" | "email-sent" | "password";
-type SubscriptionStep = "plan" | "payment";
+type SubscriptionStep = "plan" | "payment" | "cancel";
 type SubaccountStep = "email" | "password" | "permissions";
 type CustomCodeStatus = "idle" | "checking" | "applied" | "error";
 
@@ -157,6 +158,8 @@ type Assinatura = {
   iniciada_em?: string | null;
   ativada_em?: string | null;
   cancelada_em?: string | null;
+  renovacao_cancelada_em?: string | null;
+  acesso_ate?: string | null;
   createdAt?: string | null;
   created_at?: string | null;
   plano_snapshot?: {
@@ -190,6 +193,13 @@ type CheckoutResponse = {
   proximo_pagamento_em?: string | null;
   valorPrimeiroPagamentoCentavos?: number;
   valorRecorrenteCentavos?: number;
+};
+
+type CancelRenewalResponse = {
+  acesso_ate?: string | null;
+  message?: string;
+  proximo_pagamento_em?: string | null;
+  renovacao_cancelada_em?: string | null;
 };
 
 type ValidateSubscriptionCodeResponse = {
@@ -416,7 +426,7 @@ function normalizePaymentBrand(value?: string | null) {
     return normalized === "hiper" ? "hipercard" : normalized;
   }
 
-  return normalized;
+  return null;
 }
 
 function getStatusTone(status?: string | null) {
@@ -626,6 +636,45 @@ function addMonths(date: Date, months: number) {
   return next;
 }
 
+function addDaysToIso(value?: string | null, days = 0) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  date.setDate(date.getDate() + days);
+  return date.toISOString();
+}
+
+function addSubscriptionInterval(date: Date, assinatura: Assinatura, cycles = 1) {
+  const interval = assinatura.plano_snapshot?.intervalo === "dias" ? "dias" : "mensal";
+  const rawQuantity = Number(assinatura.plano_snapshot?.intervalo_quantidade || 1);
+  const quantity = Number.isFinite(rawQuantity) && rawQuantity > 0 ? Math.trunc(rawQuantity) : 1;
+  const amount = quantity * cycles;
+
+  if (interval === "dias") {
+    const next = new Date(date);
+    next.setDate(next.getDate() + amount);
+    return next;
+  }
+
+  return addMonths(date, amount);
+}
+
+function isDatePastOrNow(value?: string | null) {
+  if (!value) {
+    return false;
+  }
+
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.getTime() <= Date.now();
+}
+
 function getEstimatedNextPaymentDate(assinatura?: Assinatura | null) {
   if (!assinatura || normalizeStatus(assinatura.status) !== "ativa") {
     return null;
@@ -643,11 +692,11 @@ function getEstimatedNextPaymentDate(assinatura?: Assinatura | null) {
     return null;
   }
 
-  let nextDate = addMonths(baseDate, 1);
+  let nextDate = addSubscriptionInterval(baseDate, assinatura);
   const now = new Date();
 
   while (nextDate <= now) {
-    nextDate = addMonths(nextDate, 1);
+    nextDate = addSubscriptionInterval(nextDate, assinatura);
   }
 
   return nextDate.toISOString();
@@ -685,7 +734,7 @@ function getLocalProrationPreview(assinatura: Assinatura | null, plano: Plano | 
     return null;
   }
 
-  const cycleStartDate = addMonths(nextPaymentDate, -1);
+  const cycleStartDate = addSubscriptionInterval(nextPaymentDate, assinatura, -1);
   const cycleMs = nextPaymentDate.getTime() - cycleStartDate.getTime();
   const remainingMs = Math.max(nextPaymentDate.getTime() - now.getTime(), 0);
 
@@ -790,7 +839,7 @@ function getPaymentBrandForMark(summary?: FormaPagamentoResumo | null) {
     return null;
   }
 
-  return summary?.bandeira || summary?.forma_pagamento || null;
+  return normalizePaymentBrand(summary?.bandeira || summary?.forma_pagamento);
 }
 
 function formatDateTimeShort(value?: string | null) {
@@ -1073,6 +1122,7 @@ export default function PlatformAccountPage() {
   const [subaccountStep, setSubaccountStep] = useState<SubaccountStep>("email");
   const [subaccountForm, setSubaccountForm] = useState<SubaccountForm>(emptySubaccountForm);
   const [feedback, setFeedback] = useState<ModalFeedback>(null);
+  const [planFeedback, setPlanFeedback] = useState<ModalFeedback>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [emailValue, setEmailValue] = useState("");
   const [pendingEmail, setPendingEmail] = useState("");
@@ -1299,20 +1349,40 @@ export default function PlatformAccountPage() {
           ? "Carregando plano"
           : "Sem plano ativo";
   const currentPlanBillingSource = assinatura?.plano_snapshot || planoAtual || null;
-  const currentPlanMenuPriceLabel = assinatura
+  const hasRenewalCancellation = Boolean(assinatura?.renovacao_cancelada_em);
+  const currentRecurringValueCentavos = Number(
+    assinatura?.valor_recorrente_centavos ??
+      assinatura?.valor_centavos ??
+      assinatura?.plano_snapshot?.valor_centavos ??
+      planoAtual?.valor_centavos ??
+      0
+  );
+  const nextPaymentDate = assinatura?.proximo_pagamento_em || getEstimatedNextPaymentDate(assinatura);
+  const nextPaymentDaysLabel = getDaysUntilLabel(nextPaymentDate);
+  const cancellationAccessUntil = assinatura?.acesso_ate || (hasRenewalCancellation ? addDaysToIso(nextPaymentDate, 7) : null);
+  const estimatedCancellationAccessUntil = cancellationAccessUntil || addDaysToIso(nextPaymentDate, 7);
+  const hasCancellationAccessExpired = hasRenewalCancellation && isDatePastOrNow(cancellationAccessUntil);
+  const currentPlanMenuPriceLabel = hasRenewalCancellation
+    ? hasCancellationAccessExpired
+      ? "Plano encerrado"
+      : "Renovação cancelada"
+    : assinatura
     ? formatPlanMenuPrice(
-        assinatura.valor_recorrente_centavos ??
-          assinatura.valor_centavos ??
-          assinatura.plano_snapshot?.valor_centavos ??
-          planoAtual?.valor_centavos,
+        currentRecurringValueCentavos,
         assinatura.moeda || assinatura.plano_snapshot?.moeda || planoAtual?.moeda || "BRL",
         currentPlanBillingSource
       )
     : isAccountDataPending
       ? "Atualizando valor"
       : "Sem assinatura ativa";
-  const nextPaymentDate = assinatura?.proximo_pagamento_em || getEstimatedNextPaymentDate(assinatura);
-  const nextPaymentDaysLabel = getDaysUntilLabel(nextPaymentDate);
+  const currentSubscriptionStatus = normalizeStatus(assinatura?.status);
+  const canManageCurrentPlan = Boolean(assinatura && currentSubscriptionStatus === "ativa" && !hasRenewalCancellation);
+  const canCancelRenewal = Boolean(
+    assinatura &&
+      ["ativa", "pagamento_falhou"].includes(currentSubscriptionStatus) &&
+      !hasRenewalCancellation &&
+      currentRecurringValueCentavos > 0
+  );
 
   const paymentMethodBrand = getPaymentBrandForMark(paymentMethodSummary);
   const paymentTypeLabel = getPaymentTypeLabel(paymentMethodSummary);
@@ -1320,12 +1390,13 @@ export default function PlatformAccountPage() {
   const paymentMethodUpdatedLabel = paymentMethodSummary?.atualizado_em
     ? `Atualizado em ${formatDateOnly(paymentMethodSummary.atualizado_em)}`
     : "Atualização não informada";
-  const recurringValueLabel = assinatura
+  const recurringValueLabel = hasRenewalCancellation
+    ? hasCancellationAccessExpired
+      ? "Sem plano ativo"
+      : "Sem novas cobranças"
+    : assinatura
     ? formatPlanMenuPrice(
-        assinatura.valor_recorrente_centavos ??
-          assinatura.valor_centavos ??
-          assinatura.plano_snapshot?.valor_centavos ??
-          planoAtual?.valor_centavos,
+        currentRecurringValueCentavos,
         assinatura.moeda || assinatura.plano_snapshot?.moeda || planoAtual?.moeda || "BRL",
         currentPlanBillingSource
       )
@@ -1377,6 +1448,7 @@ export default function PlatformAccountPage() {
 
   function openSubscriptionModal(nextStep: SubscriptionStep) {
     resetModalState();
+    setPlanFeedback(null);
     setSelectedPlan(assinatura?.plano || planos[0]?.id || "inicial");
     setSubscriptionStep(nextStep);
   }
@@ -1991,6 +2063,34 @@ export default function PlatformAccountPage() {
     }
   }
 
+  async function handleCancelRenewal() {
+    if (!token || !canCancelRenewal) {
+      setFeedback({ message: "Não foi possível identificar uma renovação ativa para cancelar.", tone: "danger" });
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      setFeedback(null);
+
+      const result = await apiPost<CancelRenewalResponse>("/assinaturas/cancelar-renovacao", {}, { token });
+
+      await loadAccount();
+      closeSubscriptionModal();
+      setPlanFeedback({
+        message: result.message || "Renovação cancelada. Não haverá novas cobranças.",
+        tone: "success"
+      });
+    } catch (error) {
+      setFeedback({
+        message: getErrorMessage(error, "Não foi possível cancelar a renovação."),
+        tone: "danger"
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   function renderAccountMenuAction({
     detail,
     disabled,
@@ -2213,24 +2313,93 @@ export default function PlatformAccountPage() {
           <section className="platform-account-section platform-account-subscription-overview" aria-label="Resumo da assinatura">
             <div className="platform-account-plan-summary">
               <span className="platform-account-plan-main">
-                <small>Plano atual</small>
+                <small>{hasCancellationAccessExpired ? "Último plano" : "Plano atual"}</small>
                 <strong>{currentPlanTitle}</strong>
                 <em>{recurringValueLabel}</em>
               </span>
 
               <span className="platform-account-plan-main platform-account-plan-next-payment">
-                <small>Próximo pagamento</small>
-                <strong>{nextPaymentDate ? formatDateOnly(nextPaymentDate) : "Não informado"}</strong>
-                <em>{assinatura ? nextPaymentDaysLabel : "Sem assinatura ativa"}</em>
+                <small>
+                  {hasCancellationAccessExpired
+                    ? "Acesso encerrado em"
+                    : hasRenewalCancellation
+                      ? "Acesso até"
+                      : "Próximo pagamento"}
+                </small>
+                <strong>
+                  {hasRenewalCancellation
+                    ? cancellationAccessUntil
+                      ? formatDateOnly(cancellationAccessUntil)
+                      : "Não informado"
+                    : nextPaymentDate
+                      ? formatDateOnly(nextPaymentDate)
+                      : "Não informado"}
+                </strong>
+                <em>
+                  {hasRenewalCancellation
+                    ? hasCancellationAccessExpired
+                      ? "Sem plano ativo"
+                      : "Renovação cancelada"
+                    : assinatura
+                      ? nextPaymentDaysLabel
+                      : "Sem assinatura ativa"}
+                </em>
               </span>
             </div>
 
-            <div className="platform-account-plan-actions">
-              <button className="platform-primary-button platform-compact-button" disabled={!assinatura} type="button" onClick={() => openSubscriptionModal("plan")}>
-                Mudar plano
-                <ArrowRight aria-hidden="true" size={17} />
-              </button>
-            </div>
+            {planFeedback ? (
+              <AuthFeedback tone={planFeedback.tone === "danger" ? "error" : planFeedback.tone || "neutral"}>
+                {planFeedback.message}
+              </AuthFeedback>
+            ) : null}
+
+            {hasRenewalCancellation ? (
+              <div className="platform-account-renewal-status" role="status">
+                <span className="platform-account-renewal-status-icon">
+                  <Ban aria-hidden="true" size={18} />
+                </span>
+                <span>
+                  <strong>{hasCancellationAccessExpired ? "Plano encerrado" : "Renovação cancelada"}</strong>
+                  <small>
+                    {hasCancellationAccessExpired
+                      ? "O período de acesso terminou. Contrate um novo plano para continuar operando."
+                      : `Não haverá novas cobranças. O acesso continua até ${cancellationAccessUntil ? formatDateOnly(cancellationAccessUntil) : "a data informada pela assinatura"}.`}
+                  </small>
+                </span>
+              </div>
+            ) : (
+              <div className="platform-account-plan-actions">
+                <button
+                  className="platform-primary-button platform-compact-button"
+                  disabled={!canManageCurrentPlan}
+                  type="button"
+                  onClick={() => openSubscriptionModal("plan")}
+                >
+                  Mudar plano
+                  <ArrowRight aria-hidden="true" size={17} />
+                </button>
+                {currentRecurringValueCentavos > 0 ? (
+                  <button
+                    className="platform-secondary-button platform-compact-button platform-account-cancel-plan-button"
+                    disabled={!canCancelRenewal}
+                    type="button"
+                    onClick={() => openSubscriptionModal("cancel")}
+                  >
+                    <Ban aria-hidden="true" size={16} />
+                    Cancelar plano
+                  </button>
+                ) : null}
+              </div>
+            )}
+
+            {hasCancellationAccessExpired ? (
+              <div className="platform-account-plan-actions">
+                <a className="platform-primary-button platform-compact-button" href="/?recontratar=1#planos">
+                  Ver planos
+                  <ArrowRight aria-hidden="true" size={17} />
+                </a>
+              </div>
+            ) : null}
 
             {alteracaoAgendada ? (
               <div className="platform-subscription-scheduled-change" aria-label="Alteração de plano agendada">
@@ -3433,6 +3602,52 @@ export default function PlatformAccountPage() {
                   >
                     {isSaving ? "Abrindo" : "Abrir Mercado Pago"}
                     {isSaving ? <LoaderCircle className="platform-spin" aria-hidden="true" size={17} /> : <ArrowRight aria-hidden="true" size={17} />}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {visibleSubscriptionStep === "cancel" ? (
+              <div className="auth-step-panel platform-subaccount-flow">
+                <h2 id="platform-subscription-modal-title">Cancelar renovação?</h2>
+                <p>As próximas cobranças serão interrompidas no Mercado Pago.</p>
+                {modalFeedback}
+
+                <div className="platform-cancel-plan-summary" aria-label="Datas do cancelamento">
+                  <span className="platform-cancel-plan-icon">
+                    <Ban aria-hidden="true" size={20} />
+                  </span>
+                  <span>
+                    <small>Fim do ciclo atual</small>
+                    <strong>{nextPaymentDate ? formatDateOnly(nextPaymentDate) : "Não informado"}</strong>
+                  </span>
+                  <span>
+                    <small>Acesso com carência</small>
+                    <strong>
+                      {estimatedCancellationAccessUntil
+                        ? `Até ${formatDateOnly(estimatedCancellationAccessUntil)}`
+                        : "Será confirmado ao cancelar"}
+                    </strong>
+                  </span>
+                </div>
+
+                <p className="platform-payment-modal-note">
+                  Depois do fim do acesso, será necessário contratar um plano novamente para continuar operando.
+                </p>
+
+                <div className="auth-action-row">
+                  <button className="auth-secondary-action auth-action-light" disabled={isSaving} type="button" onClick={closeSubscriptionModal}>
+                    <ArrowLeft aria-hidden="true" size={17} />
+                    Voltar
+                  </button>
+                  <button
+                    className="auth-primary-action platform-danger-button"
+                    disabled={isSaving || !canCancelRenewal}
+                    type="button"
+                    onClick={() => void handleCancelRenewal()}
+                  >
+                    {isSaving ? "Cancelando" : "Confirmar cancelamento"}
+                    {isSaving ? <LoaderCircle className="platform-spin" aria-hidden="true" size={17} /> : <Ban aria-hidden="true" size={17} />}
                   </button>
                 </div>
               </div>

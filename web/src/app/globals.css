@@ -8763,6 +8763,80 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   background: var(--orange);
 }
 
+.platform-support-band {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  padding: 12px 16px 0;
+  background: var(--orange);
+}
+
+.platform-support-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: min(1120px, calc(100% - 32px));
+  min-height: 48px;
+  border: 1px solid oklch(0.8 0.07 235);
+  border-radius: 8px;
+  background: oklch(0.965 0.026 235);
+  color: oklch(0.36 0.1 235);
+  padding: 8px 10px 8px 12px;
+}
+
+.platform-support-banner > svg {
+  color: currentColor;
+}
+
+.platform-support-banner span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.platform-support-banner strong,
+.platform-support-banner small,
+.platform-support-banner em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-support-banner strong {
+  font-size: 0.88rem;
+  font-weight: 900;
+}
+
+.platform-support-banner small,
+.platform-support-banner em {
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 760;
+}
+
+.platform-support-banner button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid oklch(0.76 0.08 235);
+  border-radius: 8px;
+  background: var(--surface);
+  color: currentColor;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 900;
+}
+
+.platform-support-banner button:hover,
+.platform-support-banner button:focus-visible {
+  border-color: currentColor;
+  outline: none;
+}
+
 .platform-billing-alert {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -8821,6 +8895,7 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 }
 
 @media (max-width: 680px) {
+  .platform-support-band,
   .platform-billing-alert-band {
     padding: 10px 12px 0;
   }
@@ -8830,9 +8905,40 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
     width: 100%;
   }
 
+  .platform-support-banner {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    width: 100%;
+  }
+
+  .platform-support-banner em {
+    grid-column: 2;
+  }
+
+  .platform-support-banner button {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
   .platform-billing-alert em {
     grid-column: 2;
   }
+}
+
+.platform-support-entry-card {
+  gap: 14px;
+}
+
+.platform-support-entry-card p {
+  color: var(--muted);
+}
+
+.platform-support-entry-card .platform-primary-button {
+  margin-top: 8px;
+}
+
+.platform-support-entry-error {
+  background: oklch(0.95 0.045 29);
+  color: var(--danger);
 }
 
 .platform-header {
@@ -18207,9 +18313,9 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
 
 .platform-payment-history-list {
   display: grid;
-  gap: 0;
+  gap: 10px;
   margin-top: 15px;
-  overflow: hidden;
+  overflow: visible;
   border-top: 0;
 }
 
@@ -18239,12 +18345,16 @@ html[data-platform-flow-motion="backward"]::view-transition-new(platform-flow-pa
   align-items: center;
   gap: 18px;
   min-height: 70px;
-  padding: 16px 0;
-  border-bottom: 1px solid var(--line-cool);
+  padding: 13px 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 14px;
+  background: var(--surface);
 }
 
-.platform-payment-history-row:last-child {
-  border-bottom: 0;
+.platform-payment-history-row:hover,
+.platform-payment-history-row:focus-visible,
+.platform-payment-history-row:focus-within {
+  transform: none;
 }
 
 .platform-payment-history-row > span {
@@ -21368,12 +21478,66 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 
 .platform-account-plan-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-start;
+  gap: 10px;
   min-width: 0;
 }
 
 .platform-account-plan-actions .platform-primary-button {
   min-width: 148px;
+}
+
+.platform-account-cancel-plan-button {
+  border-color: oklch(0.86 0.08 27);
+  color: oklch(0.51 0.17 27);
+}
+
+.platform-account-cancel-plan-button:hover,
+.platform-account-cancel-plan-button:focus-visible {
+  border-color: oklch(0.68 0.16 27);
+  background: oklch(0.975 0.025 27);
+  color: oklch(0.46 0.18 27);
+}
+
+.platform-account-renewal-status {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid oklch(0.86 0.06 66);
+  border-radius: 12px;
+  background: oklch(0.978 0.022 72);
+}
+
+.platform-account-renewal-status-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: oklch(0.93 0.055 65);
+  color: oklch(0.48 0.14 48);
+}
+
+.platform-account-renewal-status > span:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.platform-account-renewal-status strong {
+  color: var(--ink-deep);
+  font-size: 0.9rem;
+  font-weight: 920;
+}
+
+.platform-account-renewal-status small {
+  color: var(--muted);
+  font-size: 0.79rem;
+  font-weight: 720;
+  line-height: 1.35;
 }
 
 .platform-account-summary-grid {
@@ -21572,9 +21736,9 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 }
 
 .platform-payment-brand-generic {
-  overflow: visible;
-  border-color: transparent;
-  background: transparent;
+  overflow: hidden;
+  border-color: oklch(0.88 0.018 245);
+  background: oklch(0.976 0.008 245);
   color: var(--orange);
 }
 
@@ -21679,7 +21843,48 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 
 .platform-account-history-section .platform-payment-history-row {
   min-height: 62px;
-  padding: 12px 0;
+  padding: 12px 14px;
+}
+
+.platform-cancel-plan-summary {
+  display: grid;
+  grid-template-columns: 42px repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 13px;
+  margin-top: 2px;
+  padding: 14px;
+  border: 1px solid var(--line-cool);
+  border-radius: 12px;
+  background: oklch(0.992 0.006 76);
+}
+
+.platform-cancel-plan-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: oklch(0.96 0.035 27);
+  color: oklch(0.54 0.18 27);
+}
+
+.platform-cancel-plan-summary > span:not(.platform-cancel-plan-icon) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.platform-cancel-plan-summary small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 780;
+}
+
+.platform-cancel-plan-summary strong {
+  color: var(--ink-deep);
+  font-size: 0.88rem;
+  font-weight: 920;
+  overflow-wrap: anywhere;
 }
 
 .platform-payment-history-method {
@@ -21891,8 +22096,22 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
     text-align: right;
   }
 
-  .platform-account-plan-actions .platform-primary-button {
+  .platform-account-plan-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .platform-account-plan-actions .platform-primary-button,
+  .platform-account-plan-actions .platform-secondary-button {
     width: 100%;
+  }
+
+  .platform-cancel-plan-summary {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .platform-cancel-plan-summary > span:last-child {
+    grid-column: 2;
   }
 
   .platform-account-summary-grid {
@@ -22129,4 +22348,8 @@ html[data-auth-step-motion="backward"]::view-transition-new(auth-step-panel) {
 ):not([class*="skeleton"]):not(:disabled):is(:hover, :focus-visible, :focus-within)::after {
   opacity: 1;
   transform: scale(1);
+}
+
+.platform-account-history-section .platform-payment-history-row:is(:hover, :focus-visible, :focus-within) {
+  transform: none;
 }

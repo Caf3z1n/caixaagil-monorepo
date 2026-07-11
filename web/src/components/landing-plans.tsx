@@ -246,6 +246,7 @@ function PlanCard({ plan }: { plan: DisplayPlan }) {
           buttonClassName={buttonClassName}
           buttonLabel={plan.cta}
           initialPlan={plan.isCustom ? undefined : plan.id}
+          planSelectionFlow
           triggerIcon="chevron"
         />
       </div>

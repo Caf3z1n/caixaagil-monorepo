@@ -210,6 +210,86 @@ async function cancelMercadoPagoPreapproval(preapprovalId) {
   }
 }
 
+function isMercadoPagoPreapprovalCanceled(preapproval) {
+  return ['canceled', 'cancelled'].includes(String(preapproval?.status || '').trim().toLowerCase());
+}
+
+function isUncertainMercadoPagoError(error) {
+  const statusCode = Number(error?.statusCode);
+
+  return !Number.isInteger(statusCode) || statusCode >= 500 || [408, 409, 429].includes(statusCode);
+}
+
+async function cancelMercadoPagoPreapprovalConfirmed(preapprovalId) {
+  if (!preapprovalId) {
+    const error = new Error('Assinatura Mercado Pago nao encontrada.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const preapprovalAntes = await getMercadoPagoPreapproval(preapprovalId);
+
+  if (isMercadoPagoPreapprovalCanceled(preapprovalAntes)) {
+    return {
+      jaCancelada: true,
+      preapprovalAntes,
+      preapprovalDepois: preapprovalAntes,
+      tentativas: 0,
+    };
+  }
+
+  let anyCancelSucceeded = false;
+  let lastCancelError = null;
+  let lastVerificationError = null;
+  let preapprovalDepois = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    lastCancelError = null;
+    lastVerificationError = null;
+
+    try {
+      await cancelMercadoPagoPreapproval(preapprovalId);
+      anyCancelSucceeded = true;
+    } catch (error) {
+      lastCancelError = error;
+    }
+
+    try {
+      preapprovalDepois = await getMercadoPagoPreapproval(preapprovalId);
+
+      if (isMercadoPagoPreapprovalCanceled(preapprovalDepois)) {
+        return {
+          jaCancelada: false,
+          preapprovalAntes,
+          preapprovalDepois,
+          tentativas: attempt,
+        };
+      }
+    } catch (error) {
+      lastVerificationError = error;
+    }
+
+    const shouldRetry =
+      attempt === 1 &&
+      (!lastCancelError ||
+        isUncertainMercadoPagoError(lastCancelError) ||
+        (lastVerificationError && isUncertainMercadoPagoError(lastVerificationError)));
+
+    if (!shouldRetry) {
+      break;
+    }
+  }
+
+  const providerError = lastVerificationError || lastCancelError;
+  const error = new Error('O Mercado Pago não confirmou o cancelamento da renovação. Tente novamente.');
+
+  error.statusCode = 502;
+  error.code = 'MERCADO_PAGO_CANCEL_CONFIRMATION_FAILED';
+  error.cancelRequestReachedProvider = anyCancelSucceeded;
+  error.providerError = providerError || null;
+  throw error;
+}
+
 async function updateMercadoPagoPreapprovalStatus(preapprovalId, status) {
   if (!preapprovalId) {
     return null;
@@ -354,6 +434,7 @@ async function createMercadoPagoPreapproval({
 
 module.exports = {
   cancelMercadoPagoPreapproval,
+  cancelMercadoPagoPreapprovalConfirmed,
   createMercadoPagoPreapproval,
   getMercadoPagoAuthorizedPayment,
   getMercadoPagoPayment,

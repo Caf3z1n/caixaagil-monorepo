@@ -123,6 +123,7 @@ function getValorRecorrenteCentavos(assinatura) {
 }
 
 function buildBillingStatus({
+  acessoAte = null,
   assinatura,
   bloqueado,
   bloqueiaEm = null,
@@ -140,6 +141,7 @@ function buildBillingStatus({
     permite_operacao: !bloqueado,
     motivo,
     mensagem,
+    acesso_ate: toIso(acessoAte),
     proximo_pagamento_em: toIso(proximoPagamentoEm),
     dias_em_atraso: Math.max(0, Number(diasEmAtraso) || 0),
     dias_para_bloqueio: diasParaBloqueio === null ? null : Math.max(0, Number(diasParaBloqueio) || 0),
@@ -180,6 +182,61 @@ function calcularReguaInadimplencia({ assinatura, pagamentos = [], now = new Dat
   const pagamentoReferencia = getPagamentoReferencia(pagamentosDaAssinatura);
   const assinaturaTemHistoricoOperacional =
     hasSubscriptionActivationEvidence(data) || pagamentosDaAssinatura.some(isPagamentoAprovado);
+
+  if (statusAssinatura === 'cancelamento_agendado') {
+    const proximoPagamentoEm = toDate(data.proximo_pagamento_em);
+    const acessoAte = toDate(data.acesso_ate);
+
+    if (!acessoAte) {
+      return buildBillingStatus({
+        assinatura: data,
+        bloqueado: true,
+        fase: 'bloqueada',
+        mensagem: 'A renovação foi cancelada, mas o prazo de acesso não pôde ser confirmado.',
+        motivo: 'cancelamento_sem_prazo_de_acesso',
+        pagamentoReferencia,
+        proximoPagamentoEm,
+      });
+    }
+
+    const diasEmAtraso = proximoPagamentoEm && referenciaAgora > proximoPagamentoEm
+      ? Math.max(0, Math.floor((referenciaAgora.getTime() - proximoPagamentoEm.getTime()) / UM_DIA_MS))
+      : 0;
+    const diasParaBloqueio = Math.max(
+      0,
+      Math.ceil((acessoAte.getTime() - referenciaAgora.getTime()) / UM_DIA_MS)
+    );
+
+    if (referenciaAgora >= acessoAte) {
+      return buildBillingStatus({
+        acessoAte,
+        assinatura: data,
+        bloqueado: true,
+        bloqueiaEm: acessoAte,
+        diasEmAtraso,
+        diasParaBloqueio: 0,
+        fase: 'bloqueada',
+        mensagem: 'Plano encerrado após o fim do período contratado e da carência.',
+        motivo: 'renovacao_cancelada_acesso_encerrado',
+        pagamentoReferencia,
+        proximoPagamentoEm,
+      });
+    }
+
+    return buildBillingStatus({
+      acessoAte,
+      assinatura: data,
+      bloqueado: false,
+      bloqueiaEm: acessoAte,
+      diasEmAtraso,
+      diasParaBloqueio,
+      fase: 'cancelamento_agendado',
+      mensagem: 'Renovação cancelada. O acesso permanece disponível até o fim do período contratado e da carência.',
+      motivo: 'renovacao_cancelada',
+      pagamentoReferencia,
+      proximoPagamentoEm,
+    });
+  }
 
   if (
     STATUS_ASSINATURA_BLOQUEADOS.has(statusAssinatura) &&

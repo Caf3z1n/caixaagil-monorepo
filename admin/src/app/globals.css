@@ -1499,6 +1499,98 @@ a {
   color: oklch(0.44 0.15 28);
 }
 
+.admin-support-access {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px dashed oklch(0.82 0.06 50);
+  border-radius: 8px;
+  background: oklch(0.99 0.014 62);
+  padding: 12px;
+}
+
+.admin-support-access-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: var(--orange);
+  color: var(--surface);
+}
+
+.admin-support-access-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-support-access-copy small,
+.admin-support-access-copy em {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-style: normal;
+  font-weight: 780;
+}
+
+.admin-support-access-copy strong {
+  color: var(--ink-deep);
+  font-size: 0.98rem;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  overflow-wrap: anywhere;
+}
+
+.admin-support-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.admin-support-access-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-deep);
+  padding: 0 11px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.admin-support-access-actions button:hover,
+.admin-support-access-actions button:focus-visible {
+  border-color: oklch(0.76 0.1 50);
+  outline: none;
+}
+
+.admin-support-access-actions .admin-support-access-open {
+  border-color: var(--orange);
+  background: var(--orange);
+  color: var(--surface);
+}
+
+.admin-support-access-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.admin-support-access-expired {
+  border-color: var(--line-cool);
+  background: var(--surface-2);
+}
+
+.admin-support-access-expired .admin-support-access-icon {
+  background: var(--muted);
+}
+
 .admin-inline-action-form {
   display: grid;
   gap: 12px;
@@ -1974,6 +2066,19 @@ a {
 @media (max-width: 820px) {
   .platform-shell {
     --platform-header-height: 108px;
+  }
+
+  .admin-support-access {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .admin-support-access-actions {
+    grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+
+  .admin-support-access-actions button {
+    flex: 1 1 140px;
   }
 
   .platform-header {
@@ -3902,5 +4007,348 @@ a {
   .admin-plan-dialog .admin-confirm-button,
   .admin-plan-dialog .admin-danger-button {
     width: 100%;
+  }
+}
+
+/* Account details: compact operational overview with progressive disclosure */
+.admin-account-detail-dialog {
+  gap: 14px;
+  width: min(860px, calc(100vw - 36px));
+  max-height: calc(100svh - 36px);
+  border-radius: 14px;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.admin-account-detail-dialog .admin-dialog-head {
+  align-items: start;
+}
+
+.admin-account-detail-dialog .admin-dialog-head h2 {
+  overflow: hidden;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-account-detail-dialog .admin-dialog-head p {
+  margin-top: 4px;
+  font-size: 0.8rem;
+}
+
+.admin-account-detail-dialog .admin-detail-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.admin-account-detail-dialog .admin-detail-metrics span {
+  min-height: 66px;
+  border: 0;
+  border-left: 1px solid var(--line-cool);
+  border-radius: 0;
+  padding: 11px 14px;
+}
+
+.admin-account-detail-dialog .admin-detail-metrics span:first-child {
+  border-left: 0;
+}
+
+.admin-account-detail-dialog .admin-detail-metrics strong {
+  font-size: 0.9rem;
+}
+
+.admin-account-detail-dialog .admin-detail-metrics small {
+  font-size: 0.72rem;
+}
+
+.admin-account-detail-dialog .admin-account-alert {
+  min-height: 48px;
+  padding: 9px 12px;
+}
+
+.admin-account-detail-dialog .admin-account-actions-section {
+  gap: 9px;
+  border-color: var(--line-cool);
+  padding: 12px;
+}
+
+.admin-account-detail-dialog .admin-account-actions-section header {
+  min-height: 24px;
+}
+
+.admin-account-detail-dialog .admin-subscription-actions button {
+  min-height: 34px;
+  padding-inline: 10px;
+  font-size: 0.76rem;
+}
+
+.admin-account-detail-dialog .admin-support-access {
+  padding: 9px 10px;
+}
+
+.admin-account-detail-links {
+  display: grid;
+  border: 1px solid var(--line-cool);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.admin-account-detail-links > button {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto 18px;
+  gap: 11px;
+  align-items: center;
+  min-height: 58px;
+  border: 0;
+  border-top: 1px solid var(--line-cool);
+  background: var(--surface);
+  color: var(--ink-deep);
+  padding: 9px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 160ms ease-out, color 160ms ease-out;
+}
+
+.admin-account-detail-links > button:first-child {
+  border-top: 0;
+}
+
+.admin-account-detail-links > button:hover,
+.admin-account-detail-links > button:focus-visible {
+  background: oklch(0.98 0.014 55);
+  outline: none;
+}
+
+.admin-account-detail-links > button:focus-visible {
+  box-shadow: inset 3px 0 0 var(--orange);
+}
+
+.admin-account-detail-link-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  background: oklch(0.97 0.025 55);
+  color: var(--orange-deep);
+}
+
+.admin-account-detail-links > button > span:nth-child(2) {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.admin-account-detail-links strong,
+.admin-account-detail-links small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-account-detail-links strong {
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
+.admin-account-detail-links small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.admin-account-detail-links em {
+  min-width: 28px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 850;
+  text-align: right;
+}
+
+.admin-account-detail-links > button > svg {
+  color: oklch(0.6 0.02 255);
+  transition: transform 160ms ease-out, color 160ms ease-out;
+}
+
+.admin-account-detail-links > button:hover > svg,
+.admin-account-detail-links > button:focus-visible > svg {
+  color: var(--orange-deep);
+  transform: translateX(2px);
+}
+
+.admin-subdialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: oklch(0.12 0.03 255 / 0.54);
+  backdrop-filter: blur(9px);
+  -webkit-backdrop-filter: blur(9px);
+}
+
+.admin-account-subdialog {
+  gap: 0;
+  width: min(720px, calc(100vw - 36px));
+  max-height: min(720px, calc(100svh - 48px));
+  border-radius: 14px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.admin-account-subdialog > .admin-dialog-head {
+  border-bottom: 1px solid var(--line-cool);
+  padding: 20px 22px 16px;
+}
+
+.admin-account-subdialog .admin-dialog-head h2 {
+  margin-top: 3px;
+  font-size: 1.2rem;
+}
+
+.admin-account-subdialog .admin-dialog-head p {
+  margin-top: 4px;
+  font-size: 0.78rem;
+}
+
+.admin-subdialog-eyebrow {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-subdialog-content {
+  min-height: 140px;
+  overflow-y: auto;
+  padding: 4px 22px 16px;
+}
+
+.admin-subdialog-content > .admin-feedback {
+  margin-top: 14px;
+}
+
+.admin-subdialog-list > div {
+  min-height: 62px;
+  padding-block: 12px;
+}
+
+.admin-subdialog-list strong {
+  font-size: 0.86rem;
+}
+
+.admin-subdialog-list small {
+  font-size: 0.74rem;
+}
+
+.admin-subdialog-empty {
+  padding: 34px 12px;
+  text-align: center;
+}
+
+.admin-remote-support-statuses {
+  display: flex !important;
+  grid-auto-flow: column;
+  gap: 6px !important;
+  justify-content: end;
+}
+
+@media (max-width: 760px) {
+  .admin-account-detail-dialog .admin-detail-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-account-detail-dialog .admin-detail-metrics span,
+  .admin-account-detail-dialog .admin-detail-metrics span:first-child {
+    border-top: 1px solid var(--line-cool);
+    border-left: 0;
+  }
+
+  .admin-account-detail-dialog .admin-detail-metrics span:first-child {
+    border-top: 0;
+  }
+
+  .admin-account-detail-dialog .admin-detail-metrics strong,
+  .admin-account-detail-dialog .admin-detail-metrics small {
+    white-space: normal;
+  }
+
+  .admin-account-detail-dialog .admin-detail-section header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .admin-support-access {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .admin-support-access-actions {
+    grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+
+  .admin-support-access-actions button {
+    flex: 1 1 120px;
+  }
+
+  .admin-subdialog-backdrop {
+    padding: 14px;
+  }
+
+  .admin-account-subdialog {
+    width: calc(100vw - 28px);
+    max-height: calc(100svh - 28px);
+  }
+
+  .admin-remote-support-list > div {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-remote-support-side {
+    justify-items: start;
+  }
+
+  .admin-remote-support-statuses,
+  .admin-remote-support-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 520px) {
+  .admin-account-detail-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100svh - 20px);
+    padding: 18px;
+  }
+
+  .admin-account-detail-dialog .admin-dialog-head h2 {
+    font-size: 1.08rem;
+  }
+
+  .admin-account-detail-links > button {
+    grid-template-columns: 32px minmax(0, 1fr) 16px;
+  }
+
+  .admin-account-detail-links em {
+    display: none;
+  }
+
+  .admin-subdialog-content {
+    padding-inline: 16px;
+  }
+
+  .admin-account-subdialog > .admin-dialog-head {
+    padding-inline: 16px;
   }
 }

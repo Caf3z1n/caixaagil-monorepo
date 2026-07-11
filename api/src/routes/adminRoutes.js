@@ -17,6 +17,7 @@ router.put('/planos/:id', adminController.updatePlan);
 router.delete('/planos/:id', adminController.deletePlan);
 router.get('/usuarios', adminController.listUsers);
 router.get('/usuarios/:id', adminController.showUser);
+router.post('/usuarios/:id/acesso-suporte', adminController.createUserSupportAccess);
 router.post('/usuarios/:id/verificar-email', adminController.verifyUserEmail);
 router.get('/usuarios/:id/pdvs/:pdvId/suporte-remoto/credenciais', adminController.showUserPdvRemoteSupportCredentials);
 router.post('/usuarios/:id/assinaturas/:assinaturaId/valor', adminController.updateUserSubscriptionValue);

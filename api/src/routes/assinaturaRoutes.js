@@ -13,6 +13,7 @@ router.get('/:id/status', controller.showStatus);
 router.use(auth);
 router.get('/entitlements', controller.entitlements);
 router.get('/', controller.list);
+router.post('/cancelar-renovacao', controller.cancelRenewal);
 router.post('/gerenciar-checkout', controller.createManagementCheckout);
 router.get('/:id/pagamentos', controller.listPayments);
 

@@ -86,6 +86,7 @@ type AuthFlowModalProps = {
   initialEmail?: string;
   initialPlan?: PlanId;
   initialStep?: AuthFlowInitialStep;
+  planSelectionFlow?: boolean;
   triggerIcon?: "lock" | "chevron" | "none";
 };
 
@@ -204,6 +205,23 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
+function getStoredSubscriptionRecoveryEmail() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const recoveryRequested =
+    new URLSearchParams(window.location.search).get("recontratar") === "1" ||
+    document.documentElement.dataset.subscriptionRecovery === "true";
+  const accountType = window.localStorage.getItem(PLATFORM_ACCOUNT_TYPE_STORAGE_KEY);
+  const token = window.localStorage.getItem(PLATFORM_AUTH_TOKEN_STORAGE_KEY);
+  const storedEmail = window.localStorage.getItem(PLATFORM_ACCOUNT_EMAIL_STORAGE_KEY) || "";
+
+  return recoveryRequested && accountType !== "subconta" && token && isValidEmail(storedEmail)
+    ? storedEmail.trim()
+    : null;
+}
+
 export function AuthFlowModal({
   buttonClassName = "login-action",
   buttonLabel = "Entrar",
@@ -211,6 +229,7 @@ export function AuthFlowModal({
   initialEmail = "",
   initialPlan,
   initialStep = "email",
+  planSelectionFlow = false,
   triggerIcon = "lock"
 }: AuthFlowModalProps = {}) {
   const router = useRouter();
@@ -252,13 +271,14 @@ export function AuthFlowModal({
   const [submittedPassword, setSubmittedPassword] = useState(false);
   const [submittedNewPassword, setSubmittedNewPassword] = useState(false);
   const [isEnteringPlatform, setIsEnteringPlatform] = useState(false);
+  const [isSubscriptionRecoveryFlow, setIsSubscriptionRecoveryFlow] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const resetAutoSentEmailRef = useRef<string | null>(null);
   const isPresetLoginFlow = initialStep === "password" && isValidEmail(initialEmail);
   const isVerifiedPlanFlow = initialStep === "plan" && isValidEmail(initialEmail);
-  const isPlanSignupFlow = Boolean(initialPlan);
+  const isPlanSignupFlow = planSelectionFlow || Boolean(initialPlan);
   const isCheckoutFlowStep =
     isPlanSignupFlow ||
     requiresActivationFlow ||
@@ -360,6 +380,7 @@ export function AuthFlowModal({
     setSubmittedPassword(false);
     setSubmittedNewPassword(false);
     setIsEnteringPlatform(false);
+    setIsSubscriptionRecoveryFlow(false);
     resetAutoSentEmailRef.current = null;
   }
 
@@ -435,7 +456,18 @@ export function AuthFlowModal({
   }
 
   function openModal() {
+    const recoveryEmail = isPlanSignupFlow ? getStoredSubscriptionRecoveryEmail() : null;
+
     resetFlow();
+
+    if (recoveryEmail) {
+      setStep("plan");
+      setEmail(recoveryEmail);
+      setAccountMode("existing");
+      setRequiresActivationFlow(true);
+      setIsSubscriptionRecoveryFlow(true);
+    }
+
     setIsOpen(true);
   }
 
@@ -549,6 +581,15 @@ export function AuthFlowModal({
       }
 
       window.localStorage.setItem(PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY, String(Date.now()));
+
+      if ((isPlanSignupFlow || requiresActivationFlow) && checkoutStatus !== "confirmed") {
+        setEmail(accountEmail);
+        setAccountMode("existing");
+        setRequiresActivationFlow(true);
+        setIsEnteringPlatform(false);
+        moveToStep("plan");
+        return;
+      }
 
       router.push("/meu-sistema");
     } catch (error) {
@@ -704,6 +745,11 @@ export function AuthFlowModal({
       setCheckoutMessage("");
       moveToStep("plan");
     } else if (step === "plan") {
+      if (isSubscriptionRecoveryFlow) {
+        closeModal();
+        return;
+      }
+
       moveToStep(isVerifiedPlanFlow ? "verify-email" : accountMode === "existing" ? "password" : "verify-email");
     } else if (step === "verify-email") {
       setVerificationStatus("idle");
@@ -1433,7 +1479,9 @@ export function AuthFlowModal({
                   <>
                     <h2 id={titleId}>Assinatura confirmada</h2>
                     <p id={descriptionId}>
-                      O Mercado Pago confirmou a contratação. Sua conta já pode acessar a plataforma.
+                      {isSubscriptionRecoveryFlow
+                        ? "O Mercado Pago confirmou a nova contratação. O acesso da sua conta foi restabelecido."
+                        : "O Mercado Pago confirmou a contratação. Sua conta já pode acessar a plataforma."}
                     </p>
 
                     <div className="auth-payment-wait" aria-live="polite">
@@ -1443,7 +1491,9 @@ export function AuthFlowModal({
                       <span>
                         <strong>Acesso liberado</strong>
                         <small>
-                          Use a senha cadastrada para entrar no Caixa Ágil.
+                          {isSubscriptionRecoveryFlow
+                            ? "Você pode voltar ao Caixa Ágil com a sessão atual."
+                            : "Use a senha cadastrada para entrar no Caixa Ágil."}
                         </small>
                       </span>
                     </div>
@@ -1475,17 +1525,33 @@ export function AuthFlowModal({
                         className="auth-secondary-action auth-action-light"
                         type="button"
                         onClick={() => {
+                          if (isSubscriptionRecoveryFlow) {
+                            closeModal();
+                            router.push("/conta");
+                            return;
+                          }
+
                           setRequiresActivationFlow(false);
                           moveToStep("password");
                         }}
                       >
-                        <ArrowLeft aria-hidden="true" size={17} />
-                        Ir para login
+                        {isSubscriptionRecoveryFlow ? (
+                          <X aria-hidden="true" size={17} />
+                        ) : (
+                          <ArrowLeft aria-hidden="true" size={17} />
+                        )}
+                        {isSubscriptionRecoveryFlow ? "Voltar à conta" : "Ir para login"}
                       </button>
                       <button
                         className="auth-primary-action auth-action-orange"
                         type="button"
                         onClick={() => {
+                          if (isSubscriptionRecoveryFlow) {
+                            closeModal();
+                            router.push("/meu-sistema");
+                            return;
+                          }
+
                           if (newPassword) {
                             setPassword(newPassword);
                           }

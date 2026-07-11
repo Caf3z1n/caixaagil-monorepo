@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, Ban, CreditCard } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
 
 import {
   loadSubscriptionEntitlements,
@@ -26,6 +27,14 @@ function formatDate(value?: string | null) {
 }
 
 function getBillingTitle(status: SubscriptionBillingStatus) {
+  if (status.motivo === "renovacao_cancelada_acesso_encerrado") {
+    return "Plano encerrado";
+  }
+
+  if (status.motivo === "renovacao_cancelada") {
+    return "Renovação cancelada";
+  }
+
   if (status.bloqueado || status.fase === "bloqueada") {
     return "Conta bloqueada por pagamento";
   }
@@ -51,6 +60,8 @@ function getBillingMessage(status: SubscriptionBillingStatus) {
 
 export function PlatformBillingAlert() {
   const [billingStatus, setBillingStatus] = useState<SubscriptionBillingStatus | null>(null);
+  const pathname = usePathname();
+  const router = useRouter();
 
   useEffect(() => {
     let cancelled = false;
@@ -63,7 +74,13 @@ export function PlatformBillingAlert() {
     loadSubscriptionEntitlements(token)
       .then((entitlements) => {
         if (!cancelled) {
-          setBillingStatus(entitlements.billing_status ?? null);
+          const nextBillingStatus = entitlements.billing_status ?? null;
+
+          setBillingStatus(nextBillingStatus);
+
+          if (nextBillingStatus?.bloqueado && pathname !== "/conta") {
+            router.replace("/conta");
+          }
         }
       })
       .catch(() => {
@@ -75,13 +92,18 @@ export function PlatformBillingAlert() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pathname, router]);
 
   if (!billingStatus || billingStatus.fase === "regular") {
     return null;
   }
 
-  const Icon = billingStatus.bloqueado ? Ban : billingStatus.fase === "atrasada" ? AlertTriangle : CreditCard;
+  const isRenewalCancellation = billingStatus.motivo?.startsWith("renovacao_cancelada") === true;
+  const Icon = billingStatus.bloqueado || isRenewalCancellation
+    ? Ban
+    : billingStatus.fase === "atrasada"
+      ? AlertTriangle
+      : CreditCard;
   const toneClass = billingStatus.bloqueado
     ? "platform-billing-alert-danger"
     : billingStatus.fase === "atrasada"
@@ -97,7 +119,7 @@ export function PlatformBillingAlert() {
           <small>{getBillingMessage(billingStatus)}</small>
         </span>
         {billingStatus.bloqueia_em ? (
-          <em>Bloqueio em {formatDate(billingStatus.bloqueia_em)}</em>
+          <em>{billingStatus.bloqueado ? "Bloqueado em" : "Bloqueio em"} {formatDate(billingStatus.bloqueia_em)}</em>
         ) : null}
       </section>
     </div>

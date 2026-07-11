@@ -16,7 +16,8 @@ export type SubscriptionBillingStatus = {
 };
 
 export type SubscriptionEntitlements = {
-  assinatura_id: number;
+  acesso_suporte?: boolean;
+  assinatura_id: number | null;
   plano_id: string;
   plano_nome: string;
   recursos: {

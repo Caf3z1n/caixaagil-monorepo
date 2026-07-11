@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const authConfig = require('../../config/auth');
-const { Subconta, Usuario } = require('../models');
+const { Administrador, Subconta, Usuario } = require('../models');
 const { getPlatformAccess } = require('../services/assinaturaAccessService');
 const { isEmailVerified } = require('../services/emailVerificationPolicyService');
 
@@ -81,6 +81,26 @@ function isMainAccountOnlyRoute(req) {
   );
 }
 
+function isSubscriptionRecoveryRoute(req) {
+  const baseUrl = req.baseUrl || '';
+
+  return baseUrl.startsWith('/conta') || baseUrl.startsWith('/assinaturas');
+}
+
+function isCancellationAccessBlocked(assinatura, now = new Date()) {
+  const status = String(assinatura?.status || '').trim().toLowerCase();
+  const hasScheduledCancellation =
+    status === 'cancelamento_agendado' || Boolean(assinatura?.renovacao_cancelada_em);
+
+  if (!hasScheduledCancellation) {
+    return false;
+  }
+
+  const accessUntil = new Date(assinatura.acesso_ate);
+
+  return Number.isNaN(accessUntil.getTime()) || now >= accessUntil;
+}
+
 function hasAnyRequiredPermission(permissoes, requiredPermissions) {
   if (!Array.isArray(requiredPermissions) || requiredPermissions.length === 0) {
     return true;
@@ -104,6 +124,7 @@ module.exports = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, authConfig.secret);
+    const isSupportAccess = decoded.acesso_suporte === true && Boolean(decoded.admin_id);
     const usuario = await Usuario.findByPk(decoded.id, {
       attributes: ['id', 'email', 'ativo', 'email_verificado_em', 'onboarding_concluido_em'],
     });
@@ -112,7 +133,23 @@ module.exports = async (req, res, next) => {
       return res.status(401).json({ message: 'Usuário não encontrado.' });
     }
 
-    if (!isEmailVerified(usuario)) {
+    if (isSupportAccess) {
+      const administrador = await Administrador.findOne({
+        where: {
+          ativo: true,
+          id: decoded.admin_id,
+        },
+        attributes: ['id', 'nome', 'email'],
+      });
+
+      if (!administrador) {
+        return res.status(401).json({ message: 'Acesso administrativo encerrado.' });
+      }
+
+      req.supportAdmin = administrador.get({ plain: true });
+    }
+
+    if (!isSupportAccess && !isEmailVerified(usuario)) {
       return res.status(403).json({
         code: 'EMAIL_NOT_VERIFIED',
         message: 'Confirme seu e-mail para continuar.',
@@ -153,10 +190,21 @@ module.exports = async (req, res, next) => {
 
     const platformAccess = await getPlatformAccess(usuario.id);
 
-    if (!platformAccess.allowed) {
+    if (!platformAccess.allowed && !isSupportAccess) {
       return res.status(403).json({
         code: 'SUBSCRIPTION_REQUIRED',
         message: 'Assinatura ativa obrigatória para acessar este recurso.',
+      });
+    }
+
+    if (
+      !isSupportAccess &&
+      isCancellationAccessBlocked(platformAccess.assinatura) &&
+      !isSubscriptionRecoveryRoute(req)
+    ) {
+      return res.status(402).json({
+        code: 'SUBSCRIPTION_BLOCKED',
+        message: 'Plano encerrado. Contrate um novo plano para continuar.',
       });
     }
 
@@ -166,6 +214,8 @@ module.exports = async (req, res, next) => {
       subconta_id: subconta?.id || null,
       permissoes: subconta ? subconta.permissoes || [] : ['*'],
       email_acesso: subconta?.email || usuario.email,
+      acesso_suporte: isSupportAccess,
+      admin_id: isSupportAccess ? decoded.admin_id : null,
     };
     req.subscriptionAccess = platformAccess;
     req.subconta = subconta ? subconta.get({ plain: true }) : null;

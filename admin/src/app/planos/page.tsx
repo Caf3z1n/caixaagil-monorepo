@@ -103,6 +103,14 @@ type PlanosResponse = {
 type SavePlanResponse = {
   plano: PlanoAdmin;
   codigo?: CodigoAssinatura | null;
+  assinaturas_sincronizadas?: number;
+  mercado_pago_sincronizados?: number;
+  mercado_pago_falhas?: number;
+};
+
+type SaveFeedback = {
+  tone: "success" | "error";
+  message: string;
 };
 
 type DeletePlanResponse = {
@@ -315,6 +323,7 @@ export default function AdminPlanosPage() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [form, setForm] = useState<PlanFormState>(initialFormState);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedback | null>(null);
   const [filter, setFilter] = useState<PlanFilter>("todos");
 
   const planosVisiveis = useMemo(
@@ -378,6 +387,7 @@ export default function AdminPlanosPage() {
     setForm(initialFormState);
     setIsModalOpen(true);
     setFeedback(null);
+    setSaveFeedback(null);
   }
 
   function openEditModal(plano: PlanoAdmin) {
@@ -386,6 +396,7 @@ export default function AdminPlanosPage() {
     setForm(buildFormFromPlan(plano));
     setIsModalOpen(true);
     setFeedback(null);
+    setSaveFeedback(null);
   }
 
   function closeModal() {
@@ -426,6 +437,7 @@ export default function AdminPlanosPage() {
     try {
       setIsSubmitting(true);
       setFeedback(null);
+      setSaveFeedback(null);
 
       const payload = {
         nome: form.nome,
@@ -440,17 +452,29 @@ export default function AdminPlanosPage() {
         emissao_fiscal: form.emissaoFiscal,
         observacao: personalizado ? form.observacao : ""
       };
-      if (editingPlan) {
-        await apiPut<SavePlanResponse>(`/admin/planos/${editingPlan.id}`, payload, { token });
-      } else {
-        await apiPost<SavePlanResponse>("/admin/planos", payload, { token });
-      }
+      const result = editingPlan
+        ? await apiPut<SavePlanResponse>(`/admin/planos/${editingPlan.id}`, payload, { token })
+        : await apiPost<SavePlanResponse>("/admin/planos", payload, { token });
 
       setIsModalOpen(false);
       setEditingPlan(null);
       setConfirmingDelete(false);
       setForm(initialFormState);
       await loadPlanos(token);
+      const syncedAccounts = result.assinaturas_sincronizadas || 0;
+      const mercadoPagoFailures = result.mercado_pago_falhas || 0;
+
+      setSaveFeedback(mercadoPagoFailures > 0
+        ? {
+            tone: "error",
+            message: `Plano salvo e aplicado a ${syncedAccounts} conta${syncedAccounts === 1 ? "" : "s"}, mas ${mercadoPagoFailures} recorrência${mercadoPagoFailures === 1 ? "" : "s"} não pôde ser atualizada no Mercado Pago.`
+          }
+        : {
+            tone: "success",
+            message: editingPlan
+              ? `Plano atualizado${syncedAccounts > 0 ? ` e aplicado a ${syncedAccounts} conta${syncedAccounts === 1 ? "" : "s"}` : ""}.`
+              : "Plano criado com sucesso."
+          });
     } catch (error) {
       setFeedback(getErrorMessage(error, "Não foi possível salvar o plano."));
     } finally {
@@ -532,6 +556,13 @@ export default function AdminPlanosPage() {
             <div className="admin-feedback admin-feedback-error" role="alert">
               <AlertTriangle aria-hidden="true" size={17} />
               <span>{feedback}</span>
+            </div>
+          ) : null}
+
+          {saveFeedback ? (
+            <div className={`admin-feedback admin-feedback-${saveFeedback.tone}`} role={saveFeedback.tone === "error" ? "alert" : "status"}>
+              {saveFeedback.tone === "error" ? <AlertTriangle aria-hidden="true" size={17} /> : <CheckCircle2 aria-hidden="true" size={17} />}
+              <span>{saveFeedback.message}</span>
             </div>
           ) : null}
 

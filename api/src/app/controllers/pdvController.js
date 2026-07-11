@@ -2190,7 +2190,7 @@ module.exports = {
 
       const pairing = createPairingCode();
 
-      await ensureLimitAvailable(req.user.id, 'pdvs_ativos');
+      await ensureLimitAvailable(req.user.id, 'pdvs_ativos', { bypass: req.user.acesso_suporte });
 
       const pdv = await Pdv.create({
         usuario_id: req.user.id,
@@ -2285,7 +2285,7 @@ module.exports = {
       }
 
       if (!pdv.ativo) {
-        await ensureLimitAvailable(req.user.id, 'pdvs_ativos');
+        await ensureLimitAvailable(req.user.id, 'pdvs_ativos', { bypass: req.user.acesso_suporte });
 
         await pdv.update({
           ativo: true,

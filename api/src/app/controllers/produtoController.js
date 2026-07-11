@@ -839,7 +839,7 @@ module.exports = {
       const payload = buildProdutoPayload(req.body);
 
       if (payload.grupo_fiscal_id) {
-        await ensureFeature(req.user.id, 'emissao_fiscal');
+        await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
       }
 
       const validationError = await validateProdutoPayload(req.user.id, payload, {
@@ -921,7 +921,7 @@ module.exports = {
       const payload = buildProdutoPayload(req.body);
 
       if (payload.grupo_fiscal_id && payload.grupo_fiscal_id !== produto.grupo_fiscal_id) {
-        await ensureFeature(req.user.id, 'emissao_fiscal');
+        await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
       }
 
       const validationError = await validateProdutoPayload(req.user.id, payload, {

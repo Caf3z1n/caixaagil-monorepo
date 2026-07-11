@@ -4,6 +4,7 @@ const sequelize = require('../../database');
 const { Assinatura, CodigoAssinatura, PagamentoAssinatura, Usuario } = require('../models');
 const {
   cancelMercadoPagoPreapproval,
+  cancelMercadoPagoPreapprovalConfirmed,
   createMercadoPagoPreapproval,
   getMercadoPagoPreapproval,
   updateMercadoPagoPreapprovalAmount,
@@ -31,6 +32,7 @@ const {
   findSubscriptionForPlatformAccess,
   hasSubscriptionActivationEvidence,
 } = require('../services/assinaturaAccessService');
+const { DIAS_TOLERANCIA_BLOQUEIO } = require('../services/assinaturaInadimplenciaService');
 const configuracaoSistemaService = require('../services/configuracaoSistemaService');
 const { getPublicAppUrl } = require('../services/urlService');
 
@@ -95,6 +97,10 @@ function isCheckoutTokenCurrent(assinatura) {
 }
 
 function getStatusFromPreapproval(preapprovalStatus, assinatura = null) {
+  if (assinatura?.renovacao_cancelada_em) {
+    return 'cancelamento_agendado';
+  }
+
   const normalized = String(preapprovalStatus || '').toLowerCase();
 
   if (normalized === 'authorized') {
@@ -123,6 +129,16 @@ function toDate(value) {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getPagamentoDataReferencia(pagamento) {
+  return toDate(
+    pagamento?.pago_em ||
+      pagamento?.processado_em ||
+      pagamento?.vencimento_em ||
+      pagamento?.createdAt ||
+      pagamento?.created_at
+  );
 }
 
 function addMonths(date, months) {
@@ -162,6 +178,27 @@ function addSubscriptionInterval(date, assinatura, direction = 1) {
   return intervalo === 'dias' ? addDays(date, amount) : addMonths(date, amount);
 }
 
+function reconcileNextPaymentWithApprovedPayments(nextPaymentDate, assinatura, pagamentos = []) {
+  let reconciledDate = toDate(nextPaymentDate);
+
+  if (!reconciledDate) {
+    return null;
+  }
+
+  const approvedPaymentDates = pagamentos
+    .map(getPagamentoDataReferencia)
+    .filter(Boolean)
+    .sort((left, right) => left.getTime() - right.getTime());
+
+  for (const paymentDate of approvedPaymentDates) {
+    if (paymentDate >= reconciledDate) {
+      reconciledDate = addSubscriptionInterval(reconciledDate, assinatura);
+    }
+  }
+
+  return reconciledDate;
+}
+
 function getEstimatedNextPaymentDate(assinatura) {
   const baseValue = assinatura?.ativada_em || assinatura?.iniciada_em || assinatura?.createdAt || assinatura?.created_at;
   const baseDate = toDate(baseValue);
@@ -188,6 +225,33 @@ function getFutureNextPaymentDate(assinatura) {
   }
 
   return getEstimatedNextPaymentDate(assinatura);
+}
+
+function getRenewalCancellationNextPaymentDate(assinatura, preapproval) {
+  return toDate(preapproval?.next_payment_date) || toDate(assinatura?.proximo_pagamento_em);
+}
+
+function getLatestDate(...values) {
+  return values
+    .map(toDate)
+    .filter(Boolean)
+    .sort((left, right) => right.getTime() - left.getTime())[0] || null;
+}
+
+function createRenewalCancellationError(message, statusCode = 409) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function serializeRenewalCancellation(assinatura) {
+  return {
+    acesso_ate: assinatura.acesso_ate || null,
+    assinatura_id: assinatura.id,
+    proximo_pagamento_em: assinatura.proximo_pagamento_em || null,
+    renovacao_cancelada_em: assinatura.renovacao_cancelada_em || null,
+    status: assinatura.status,
+  };
 }
 
 function getFutureStartDate(value) {
@@ -500,7 +564,11 @@ async function syncAssinaturaFromMercadoPago(assinatura) {
     }
   }
 
-  if (nextPaymentDate && String(assinatura.proximo_pagamento_em || '') !== String(nextPaymentDate)) {
+  if (
+    !assinatura.renovacao_cancelada_em &&
+    nextPaymentDate &&
+    String(assinatura.proximo_pagamento_em || '') !== String(nextPaymentDate)
+  ) {
     assinatura.proximo_pagamento_em = nextPaymentDate;
     shouldSave = true;
   }
@@ -587,7 +655,7 @@ async function finalizeActivatedSubscription(assinatura) {
       id: assinatura.assinatura_anterior_id,
       usuario_id: assinatura.usuario_id,
       status: {
-        [Op.in]: ['ativa', 'pagamento_falhou'],
+        [Op.in]: ['ativa', 'cancelamento_agendado', 'pagamento_falhou'],
       },
     },
   });
@@ -1005,13 +1073,213 @@ module.exports = {
 
   async entitlements(req, res) {
     try {
-      const entitlements = await getEntitlements(req.user.id);
+      const entitlements = await getEntitlements(req.user.id, {
+        bypass: req.user.acesso_suporte,
+      });
 
       return res.json(entitlements);
     } catch (error) {
       return res.status(error.statusCode || 500).json({
         code: error.code,
         message: error.message || 'Erro ao carregar permissões da assinatura.',
+      });
+    }
+  },
+
+  async cancelRenewal(req, res) {
+    try {
+      await applyDueScheduledChanges({ usuarioId: req.user.id });
+
+      const assinaturaAtual = await findSubscriptionForPlatformAccess(req.user.id);
+
+      if (!assinaturaAtual) {
+        return res.status(404).json({ message: 'Assinatura não encontrada.' });
+      }
+
+      const cancelamentoPersistido = await sequelize.transaction(async transaction => {
+        const assinatura = await Assinatura.findOne({
+          where: {
+            id: assinaturaAtual.id,
+            usuario_id: req.user.id,
+          },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+        if (!assinatura?.renovacao_cancelada_em || !assinatura?.acesso_ate) {
+          return null;
+        }
+
+        if (assinatura.status !== 'cancelamento_agendado' || assinatura.cancelada_em) {
+          assinatura.status = 'cancelamento_agendado';
+          assinatura.cancelada_em = null;
+          assinatura.tipo_movimento = 'cancelamento_renovacao_cliente';
+          await assinatura.save({ transaction });
+        }
+
+        return assinatura;
+      });
+
+      if (cancelamentoPersistido) {
+        return res.json({
+          ...serializeRenewalCancellation(cancelamentoPersistido),
+          idempotente: true,
+          message: 'Renovação já cancelada. O acesso continua disponível até o fim do período e da carência.',
+        });
+      }
+
+      const statusAtual = String(assinaturaAtual.status || '').trim().toLowerCase();
+      const statusPermitidos = new Set([
+        'ativa',
+        'pagamento_falhou',
+      ]);
+
+      if (
+        !statusPermitidos.has(statusAtual) ||
+        !hasSubscriptionActivationEvidence(assinaturaAtual)
+      ) {
+        throw createRenewalCancellationError('Esta assinatura não permite cancelar a renovação.');
+      }
+
+      if (statusAtual === 'pagamento_falhou') {
+        const ultimoPagamento = await PagamentoAssinatura.findOne({
+          where: { assinatura_id: assinaturaAtual.id },
+          order: [
+            ['processado_em', 'DESC'],
+            ['pago_em', 'DESC'],
+            ['id', 'DESC'],
+          ],
+        });
+        const ultimoStatusPagamento = String(ultimoPagamento?.status || '').trim().toLowerCase();
+
+        if (['charged_back', 'refunded'].includes(ultimoStatusPagamento)) {
+          throw createRenewalCancellationError(
+            'Esta assinatura não possui um período pago disponível para cancelar ao fim do ciclo.'
+          );
+        }
+      }
+
+      if (!assinaturaAtual.mercado_pago_preapproval_id) {
+        throw createRenewalCancellationError('Esta assinatura não possui renovação recorrente no Mercado Pago.');
+      }
+
+      const preapprovalAntes = await getMercadoPagoPreapproval(
+        assinaturaAtual.mercado_pago_preapproval_id
+      );
+      const proximoPagamentoCapturado = getRenewalCancellationNextPaymentDate(
+        assinaturaAtual,
+        preapprovalAntes
+      );
+
+      if (!proximoPagamentoCapturado) {
+        throw createRenewalCancellationError(
+          'Não foi possível confirmar o fim do período atual antes de cancelar a renovação.'
+        );
+      }
+
+      const confirmacaoMercadoPago = await cancelMercadoPagoPreapprovalConfirmed(
+        assinaturaAtual.mercado_pago_preapproval_id
+      );
+      const proximoPagamentoConfirmado = getLatestDate(
+        proximoPagamentoCapturado,
+        confirmacaoMercadoPago.preapprovalAntes?.next_payment_date,
+        confirmacaoMercadoPago.preapprovalDepois?.next_payment_date
+      );
+
+      try {
+        await syncAssinaturaPagamentosMercadoPago(assinaturaAtual);
+      } catch {
+        // O cancelamento segue com as datas confirmadas mesmo se a conciliação oscilar.
+      }
+
+      const agora = new Date();
+      const result = await sequelize.transaction(async transaction => {
+        const assinatura = await Assinatura.findOne({
+          where: {
+            id: assinaturaAtual.id,
+            usuario_id: req.user.id,
+          },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+        if (!assinatura) {
+          throw createRenewalCancellationError('Assinatura não encontrada.', 404);
+        }
+
+        const statusBloqueadoPorConcorrencia = ['abandonada', 'substituida'].includes(
+          String(assinatura.status || '').trim().toLowerCase()
+        );
+
+        if (
+          statusBloqueadoPorConcorrencia ||
+          (assinatura.status === 'cancelada' && assinatura.tipo_movimento === 'cancelamento_admin')
+        ) {
+          throw createRenewalCancellationError(
+            'A assinatura foi alterada enquanto o cancelamento era processado.'
+          );
+        }
+
+        const cancelamentoJaPersistido = Boolean(
+          assinatura.renovacao_cancelada_em && assinatura.acesso_ate
+        );
+        let proximoPagamentoEm =
+          cancelamentoJaPersistido && assinatura.proximo_pagamento_em
+            ? toDate(assinatura.proximo_pagamento_em)
+            : proximoPagamentoConfirmado;
+
+        if (!cancelamentoJaPersistido) {
+          const pagamentosAprovados = await PagamentoAssinatura.findAll({
+            where: {
+              assinatura_id: assinatura.id,
+              status: {
+                [Op.in]: ['approved', 'accredited', 'paid', 'processed'],
+              },
+            },
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          });
+
+          proximoPagamentoEm = reconcileNextPaymentWithApprovedPayments(
+            proximoPagamentoEm,
+            assinatura,
+            pagamentosAprovados
+          );
+        }
+
+        const acessoAte = cancelamentoJaPersistido
+          ? toDate(assinatura.acesso_ate)
+          : addDays(proximoPagamentoEm, DIAS_TOLERANCIA_BLOQUEIO);
+
+        assinatura.status = 'cancelamento_agendado';
+        assinatura.proximo_pagamento_em = proximoPagamentoEm;
+        assinatura.renovacao_cancelada_em = assinatura.renovacao_cancelada_em || agora;
+        assinatura.acesso_ate = acessoAte;
+        assinatura.cancelada_em = null;
+        assinatura.tipo_movimento = 'cancelamento_renovacao_cliente';
+
+        await cancelScheduledChangesForSubscription(
+          assinatura.id,
+          'renovacao_cancelada_pelo_cliente',
+          { transaction }
+        );
+        await assinatura.save({ transaction });
+
+        return {
+          assinatura,
+          cancelamentoJaPersistido,
+        };
+      });
+
+      return res.json({
+        ...serializeRenewalCancellation(result.assinatura),
+        idempotente: result.cancelamentoJaPersistido || confirmacaoMercadoPago.jaCancelada,
+        message: 'Renovação cancelada. O acesso continuará disponível até o fim do período e da carência.',
+      });
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        code: error.code || undefined,
+        message: error.message || 'Não foi possível cancelar a renovação.',
       });
     }
   },

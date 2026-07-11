@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { LoaderCircle } from "lucide-react";
 
-import { apiGet } from "@/lib/api-client";
+import { ApiError, apiGet } from "@/lib/api-client";
 import {
   clearPlatformSession,
   getStoredPlatformAuthToken,
@@ -143,11 +143,18 @@ export function PlatformAccessGuard({ children }: PlatformAccessGuardProps) {
 
         window.localStorage.setItem(PLATFORM_ACCESS_VALIDATED_AT_STORAGE_KEY, String(Date.now()));
         setIsAllowed(true);
-      } catch {
-        if (!cancelled) {
-          clearPlatformSession();
-          router.replace("/");
+      } catch (error) {
+        if (cancelled) {
+          return;
         }
+
+        if (error instanceof ApiError && error.code === "SUBSCRIPTION_BLOCKED") {
+          router.replace("/conta");
+          return;
+        }
+
+        clearPlatformSession();
+        router.replace("/");
       }
     }
 

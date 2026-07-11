@@ -66,6 +66,12 @@ Assinatura.init(
     proximo_pagamento_em: {
       type: DataTypes.DATE,
     },
+    renovacao_cancelada_em: {
+      type: DataTypes.DATE,
+    },
+    acesso_ate: {
+      type: DataTypes.DATE,
+    },
     cancelada_em: {
       type: DataTypes.DATE,
     },

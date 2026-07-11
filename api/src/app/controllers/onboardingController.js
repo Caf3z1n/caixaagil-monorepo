@@ -45,8 +45,14 @@ module.exports = {
   async show(req, res) {
     try {
       const pdvsSnapshot = await pdvController.getUserPdvsSnapshot(req.user.id);
+      const status = buildOnboardingStatus(pdvsSnapshot, req.user);
 
-      return res.json(buildOnboardingStatus(pdvsSnapshot, req.user));
+      if (req.user.acesso_suporte) {
+        status.precisa_onboarding = false;
+        status.etapa_atual = 'concluido';
+      }
+
+      return res.json(status);
     } catch (error) {
       return res.status(500).json({
         message: 'Erro ao consultar configuração inicial.',

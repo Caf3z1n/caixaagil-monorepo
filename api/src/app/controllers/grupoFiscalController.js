@@ -257,7 +257,7 @@ function handleGrupoFiscalError(res, error, defaultMessage) {
 module.exports = {
   async showFiscalConfiguration(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
 
@@ -274,7 +274,7 @@ module.exports = {
 
   async list(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const [grupos, produtosPorGrupo, fiscalTaxRegime] = await Promise.all([
         GrupoFiscal.findAll({
@@ -318,7 +318,7 @@ module.exports = {
 
   async create(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const fiscalTaxRegime = await configuracaoSistemaService.getFiscalTaxRegime(req.user.id);
       const fiscalTaxRegimeError = getFiscalTaxRegimeOrError(fiscalTaxRegime);
@@ -347,7 +347,7 @@ module.exports = {
 
   async update(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 
@@ -392,7 +392,7 @@ module.exports = {
 
   async remove(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 
@@ -436,7 +436,7 @@ module.exports = {
 
   async activate(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const grupoFiscal = await findUserGrupoFiscal(req.user.id, req.params.id);
 

@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const sequelize = require('../../database');
 const { Assinatura, PagamentoAssinatura } = require('../models');
 const {
   cancelMercadoPagoPreapproval,
@@ -11,8 +12,8 @@ const {
 const {
   normalizeMercadoPagoAuthorizedPayment,
   normalizeMercadoPagoPayment,
+  processarPagamentoAssinatura,
   syncAssinaturaPagamentosMercadoPago,
-  upsertPagamentoAssinatura,
 } = require('../services/pagamentosAssinaturaService');
 const {
   applyDueScheduledChangeForSubscription,
@@ -42,6 +43,10 @@ function getEventDataId(req) {
 }
 
 function getAssinaturaStatus(paymentStatus, assinatura = null) {
+  if (assinatura?.renovacao_cancelada_em) {
+    return 'cancelamento_agendado';
+  }
+
   const normalized = String(paymentStatus || '').toLowerCase();
 
   if (['approved', 'accredited', 'paid', 'processed'].includes(normalized)) {
@@ -68,6 +73,10 @@ function getAssinaturaStatus(paymentStatus, assinatura = null) {
 }
 
 function getAssinaturaStatusFromPreapproval(preapprovalStatus, assinatura = null) {
+  if (assinatura?.renovacao_cancelada_em) {
+    return 'cancelamento_agendado';
+  }
+
   const normalized = String(preapprovalStatus || '').toLowerCase();
 
   if (normalized === 'authorized') {
@@ -160,18 +169,20 @@ async function findAssinaturaByPreapproval(preapproval) {
 }
 
 async function normalizeRecurringAmountIfNeeded(assinatura) {
+  const assinaturaAtual = await Assinatura.findByPk(assinatura?.id);
+
   if (
-    !assinatura.normalizar_valor_apos_primeiro_pagamento ||
-    assinatura.valor_normalizado_em ||
-    !assinatura.mercado_pago_preapproval_id ||
-    !assinatura.valor_recorrente_centavos
+    !assinaturaAtual?.normalizar_valor_apos_primeiro_pagamento ||
+    assinaturaAtual.valor_normalizado_em ||
+    !assinaturaAtual.mercado_pago_preapproval_id ||
+    !assinaturaAtual.valor_recorrente_centavos
   ) {
     return;
   }
 
   const confirmedPaymentCount = await PagamentoAssinatura.count({
     where: {
-      assinatura_id: assinatura.id,
+      assinatura_id: assinaturaAtual.id,
       status: {
         [Op.in]: ['approved', 'accredited', 'paid', 'authorized', 'processed'],
       },
@@ -182,13 +193,29 @@ async function normalizeRecurringAmountIfNeeded(assinatura) {
     return;
   }
 
-  await updateMercadoPagoPreapprovalAmount(assinatura.mercado_pago_preapproval_id, {
-    valorCentavos: assinatura.valor_recorrente_centavos,
-    moeda: assinatura.moeda || 'BRL',
+  await updateMercadoPagoPreapprovalAmount(assinaturaAtual.mercado_pago_preapproval_id, {
+    valorCentavos: assinaturaAtual.valor_recorrente_centavos,
+    moeda: assinaturaAtual.moeda || 'BRL',
   });
 
-  assinatura.valor_normalizado_em = new Date();
-  assinatura.normalizar_valor_apos_primeiro_pagamento = false;
+  await sequelize.transaction(async transaction => {
+    const assinaturaBloqueada = await Assinatura.findByPk(assinaturaAtual.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (
+      !assinaturaBloqueada ||
+      !assinaturaBloqueada.normalizar_valor_apos_primeiro_pagamento ||
+      assinaturaBloqueada.valor_normalizado_em
+    ) {
+      return;
+    }
+
+    assinaturaBloqueada.valor_normalizado_em = new Date();
+    assinaturaBloqueada.normalizar_valor_apos_primeiro_pagamento = false;
+    await assinaturaBloqueada.save({ transaction });
+  });
 }
 
 async function cancelPreviousActiveSubscriptions(assinatura) {
@@ -197,7 +224,7 @@ async function cancelPreviousActiveSubscriptions(assinatura) {
       id: { [Op.ne]: assinatura.id },
       usuario_id: assinatura.usuario_id,
       status: {
-        [Op.in]: ['ativa', 'pagamento_falhou'],
+        [Op.in]: ['ativa', 'cancelamento_agendado', 'pagamento_falhou'],
       },
     },
   });
@@ -211,106 +238,157 @@ async function cancelPreviousActiveSubscriptions(assinatura) {
       }
     }
 
-    assinaturaAnterior.status = 'substituida';
-    assinaturaAnterior.cancelada_em = assinaturaAnterior.cancelada_em || new Date();
-    await cancelScheduledChangesForSubscription(assinaturaAnterior.id, 'assinatura_substituida');
-    await assinaturaAnterior.save();
+    await sequelize.transaction(async transaction => {
+      const assinaturaBloqueada = await Assinatura.findByPk(assinaturaAnterior.id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!assinaturaBloqueada || assinaturaBloqueada.status === 'substituida') {
+        return;
+      }
+
+      assinaturaBloqueada.status = 'substituida';
+      assinaturaBloqueada.cancelada_em = assinaturaBloqueada.cancelada_em || new Date();
+      await cancelScheduledChangesForSubscription(
+        assinaturaBloqueada.id,
+        'assinatura_substituida',
+        { transaction }
+      );
+      await assinaturaBloqueada.save({ transaction });
+    });
   }
 }
 
 async function updateAssinaturaFromPreapproval(assinatura, preapproval) {
-  if (!assinatura) {
+  if (!assinatura?.id) {
     return;
   }
 
-  const assinaturaStatus = getAssinaturaStatusFromPreapproval(preapproval?.status, assinatura);
   const nextPaymentDate = toDate(preapproval?.next_payment_date);
-  let shouldSave = false;
+  const assinaturaAtual = await sequelize.transaction(async transaction => {
+    const assinaturaBloqueada = await Assinatura.findByPk(assinatura.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
 
-  if (assinaturaStatus && assinatura.status !== assinaturaStatus) {
-    assinatura.status = assinaturaStatus;
-    shouldSave = true;
-
-    if (assinaturaStatus === 'ativa' && !assinatura.ativada_em) {
-      assinatura.ativada_em = new Date();
+    if (!assinaturaBloqueada) {
+      return null;
     }
 
-    if (['cancelada', 'pagamento_falhou'].includes(assinaturaStatus) && !assinatura.cancelada_em) {
-      assinatura.cancelada_em = new Date();
+    const assinaturaStatus = getAssinaturaStatusFromPreapproval(
+      preapproval?.status,
+      assinaturaBloqueada
+    );
+    let shouldSave = false;
+
+    if (assinaturaStatus && assinaturaBloqueada.status !== assinaturaStatus) {
+      assinaturaBloqueada.status = assinaturaStatus;
+      shouldSave = true;
+
+      if (assinaturaStatus === 'ativa' && !assinaturaBloqueada.ativada_em) {
+        assinaturaBloqueada.ativada_em = new Date();
+      }
+
+      if (
+        ['cancelada', 'pagamento_falhou'].includes(assinaturaStatus) &&
+        !assinaturaBloqueada.cancelada_em
+      ) {
+        assinaturaBloqueada.cancelada_em = new Date();
+      }
     }
-  }
 
-  if (nextPaymentDate && String(assinatura.proximo_pagamento_em || '') !== String(nextPaymentDate)) {
-    assinatura.proximo_pagamento_em = nextPaymentDate;
-    shouldSave = true;
-  }
+    if (
+      !assinaturaBloqueada.renovacao_cancelada_em &&
+      nextPaymentDate &&
+      String(assinaturaBloqueada.proximo_pagamento_em || '') !== String(nextPaymentDate)
+    ) {
+      assinaturaBloqueada.proximo_pagamento_em = nextPaymentDate;
+      shouldSave = true;
+    }
 
-  if (shouldSave) {
-    await assinatura.save();
-  }
+    if (shouldSave) {
+      await assinaturaBloqueada.save({ transaction });
+    }
 
-  if (assinatura.status === 'ativa') {
-    const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+    return assinaturaBloqueada;
+  });
+
+  if (assinaturaAtual?.status === 'ativa') {
+    const appliedChanges = await applyDueScheduledChangeForSubscription(assinaturaAtual);
 
     if (appliedChanges.length > 0) {
-      await assinatura.reload();
+      await assinaturaAtual.reload();
     }
 
-    await cancelPreviousActiveSubscriptions(assinatura);
+    await cancelPreviousActiveSubscriptions(assinaturaAtual);
   }
 }
 
 async function updateAssinaturaStatus(assinatura, paymentStatus) {
-  if (!assinatura) {
+  if (!assinatura?.id) {
     return;
   }
 
-  const assinaturaStatus = getAssinaturaStatus(paymentStatus, assinatura);
-
-  if (!assinaturaStatus) {
-    return;
-  }
-
-  assinatura.status = assinaturaStatus;
-
-  if (assinaturaStatus === 'ativa' && !assinatura.ativada_em) {
-    assinatura.ativada_em = new Date();
-  }
-
-  if (assinaturaStatus === 'cancelada' && !assinatura.cancelada_em) {
-    assinatura.cancelada_em = new Date();
-  }
+  let nextPaymentDate = null;
 
   if (assinatura.mercado_pago_preapproval_id) {
     try {
       const preapproval = await getMercadoPagoPreapproval(assinatura.mercado_pago_preapproval_id);
-      const nextPaymentDate = toDate(preapproval?.next_payment_date);
-
-      if (nextPaymentDate) {
-        assinatura.proximo_pagamento_em = nextPaymentDate;
-      }
+      nextPaymentDate = toDate(preapproval?.next_payment_date);
     } catch {
       // O webhook deve continuar processando o status mesmo se a consulta da assinatura falhar.
     }
   }
 
-  await assinatura.save();
+  const assinaturaAtual = await sequelize.transaction(async transaction => {
+    const assinaturaBloqueada = await Assinatura.findByPk(assinatura.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
 
-  if (assinaturaStatus === 'ativa') {
+    if (!assinaturaBloqueada) {
+      return null;
+    }
+
+    const assinaturaStatus = getAssinaturaStatus(paymentStatus, assinaturaBloqueada);
+
+    if (!assinaturaStatus) {
+      return assinaturaBloqueada;
+    }
+
+    assinaturaBloqueada.status = assinaturaStatus;
+
+    if (assinaturaStatus === 'ativa' && !assinaturaBloqueada.ativada_em) {
+      assinaturaBloqueada.ativada_em = new Date();
+    }
+
+    if (assinaturaStatus === 'cancelada' && !assinaturaBloqueada.cancelada_em) {
+      assinaturaBloqueada.cancelada_em = new Date();
+    }
+
+    if (!assinaturaBloqueada.renovacao_cancelada_em && nextPaymentDate) {
+      assinaturaBloqueada.proximo_pagamento_em = nextPaymentDate;
+    }
+
+    await assinaturaBloqueada.save({ transaction });
+    return assinaturaBloqueada;
+  });
+
+  if (assinaturaAtual?.status === 'ativa') {
     try {
-      await normalizeRecurringAmountIfNeeded(assinatura);
-      await assinatura.save();
+      await normalizeRecurringAmountIfNeeded(assinaturaAtual);
     } catch {
       // A normalização será tentada novamente no próximo webhook ou consulta de status.
     }
 
-    const appliedChanges = await applyDueScheduledChangeForSubscription(assinatura);
+    const appliedChanges = await applyDueScheduledChangeForSubscription(assinaturaAtual);
 
     if (appliedChanges.length > 0) {
-      await assinatura.reload();
+      await assinaturaAtual.reload();
     }
 
-    await cancelPreviousActiveSubscriptions(assinatura);
+    await cancelPreviousActiveSubscriptions(assinaturaAtual);
   }
 }
 
@@ -388,7 +466,7 @@ module.exports = {
       }
 
       const assinatura = await findAssinatura(paymentData);
-      const pagamento = await upsertPagamentoAssinatura(paymentData, assinatura);
+      const { pagamento } = await processarPagamentoAssinatura(paymentData, assinatura);
 
       await updateAssinaturaStatus(assinatura, paymentData.status);
 

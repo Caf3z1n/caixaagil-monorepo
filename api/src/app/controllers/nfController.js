@@ -1502,7 +1502,7 @@ function buildReportFileName(report) {
 module.exports = {
   async list(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const limit = normalizeInteger(req.query.limit, 50, { min: 1, max: 100 });
       const offset = normalizeInteger(req.query.offset, 0, { min: 0, max: 1000000 });
@@ -1535,7 +1535,7 @@ module.exports = {
 
   async downloadXmls(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const nfs = await findFilteredNfs(req.user.id, req.query, { includeHistorico: true });
       const manifest = [
@@ -1582,7 +1582,7 @@ module.exports = {
 
   async downloadReports(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const [configuracao, nfs] = await Promise.all([
         configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id),
@@ -1624,7 +1624,7 @@ module.exports = {
 
   async create(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const body = req.body || {};
       const configuracao = await configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id);
@@ -1706,7 +1706,7 @@ module.exports = {
 
   async show(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
     const nf = await findNfForUser(req.user.id, req.params.id, {
       include: [
@@ -1744,7 +1744,7 @@ module.exports = {
 
   async updateStatus(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const nf = await findNfForUser(req.user.id, req.params.id);
 

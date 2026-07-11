@@ -17,7 +17,9 @@ function handleConfiguracaoError(res, error, defaultMessage) {
 module.exports = {
   async show(req, res) {
     try {
-      const fiscalEnabled = await isFeatureEnabled(req.user.id, 'emissao_fiscal');
+      const fiscalEnabled = await isFeatureEnabled(req.user.id, 'emissao_fiscal', {
+        bypass: req.user.acesso_suporte,
+      });
       const configuracao = await configuracaoSistemaService.getConfiguracaoSnapshot(req.user.id, {
         disableFiscalEmission: !fiscalEnabled,
       });
@@ -41,7 +43,7 @@ module.exports = {
 
   async updateFiscal(req, res) {
     try {
-      await ensureFeature(req.user.id, 'emissao_fiscal');
+      await ensureFeature(req.user.id, 'emissao_fiscal', { bypass: req.user.acesso_suporte });
 
       const fiscal = req.body?.fiscal ?? req.body;
       const configuracao = await configuracaoSistemaService.updateFiscalSettings(req.user.id, fiscal);

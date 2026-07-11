@@ -231,7 +231,7 @@ module.exports = {
         return res.status(400).json({ message: 'Senha não atende aos requisitos mínimos.' });
       }
 
-      await ensureLimitAvailable(req.user.id, 'subcontas_ativas');
+      await ensureLimitAvailable(req.user.id, 'subcontas_ativas', { bypass: req.user.acesso_suporte });
 
       const subconta = await Subconta.create({
         usuario_id: req.user.id,
@@ -445,7 +445,7 @@ module.exports = {
       }
 
       if (!subconta.ativo) {
-        await ensureLimitAvailable(req.user.id, 'subcontas_ativas');
+        await ensureLimitAvailable(req.user.id, 'subcontas_ativas', { bypass: req.user.acesso_suporte });
 
         await subconta.update({ ativo: true });
       }
