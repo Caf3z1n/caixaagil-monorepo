@@ -716,38 +716,37 @@ function getNfArchiveBaseName(nf) {
   return `${model}-serie-${serie}-${numero}${key}`;
 }
 
-function collectNfXmlFiles(nf) {
+function getNfXmlFileForExport(nf) {
   const data = getPlain(nf);
-  const files = [];
-  const seen = new Set();
+  const terminalXmlType = getTerminalNfEventXmlType(data.status);
 
-  function addFile(kind, arquivo) {
-    const file = getPlain(arquivo);
+  if (!terminalXmlType) {
+    const file = getPlain(data.xml_autorizado);
 
-    if (!file?.id || seen.has(file.id)) {
-      return;
-    }
-
-    seen.add(file.id);
-    files.push({ kind, file });
+    return file?.id ? { kind: 'autorizado', file } : null;
   }
 
-  if (data.status === 'cancelada' || data.status === 'inutilizada') {
-    for (const event of data.historico || []) {
-      addFile(normalizeText(event.tipo, 40) || data.status, event.arquivo_xml);
-    }
-  }
+  const terminalEvent = (data.historico || [])
+    .map(getPlain)
+    .filter(event => {
+      const file = getPlain(event.arquivo_xml);
+      const eventDescriptor = `${event.tipo || ''} ${event.status || ''}`
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
 
-  addFile('autorizado', data.xml_autorizado);
-  addFile('enviado', data.xml_enviado);
+      return file?.id && (event.status === data.status || eventDescriptor.includes(terminalXmlType));
+    })
+    .sort((left, right) => {
+      const leftTime = new Date(left.ocorrido_em || left.created_at || 0).getTime();
+      const rightTime = new Date(right.ocorrido_em || right.created_at || 0).getTime();
 
-  if (data.status !== 'cancelada' && data.status !== 'inutilizada') {
-    for (const event of data.historico || []) {
-      addFile(normalizeText(event.tipo, 40) || 'evento', event.arquivo_xml);
-    }
-  }
+      return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+    })[0];
 
-  return files;
+  return terminalEvent
+    ? { kind: terminalXmlType, file: getPlain(terminalEvent.arquivo_xml) }
+    : null;
 }
 
 function sendZipResponse(res, fileName) {
@@ -1566,21 +1565,23 @@ module.exports = {
       for (const nf of nfs) {
         const baseName = getNfArchiveBaseName(nf);
         const data = getPlain(nf);
+        const selectedXml = getNfXmlFileForExport(nf);
 
-        for (const { kind, file } of collectNfXmlFiles(nf)) {
-          const absolutePath = toAbsolutePath(file.caminho_relativo);
-          const fallbackName = `${baseName}-${sanitizeFilePart(kind, 'xml')}.xml`;
-          const originalName = sanitizeFilePart(file.nome_original || fallbackName, fallbackName);
-          const zipPath = `${baseName}/${originalName}`;
-
-          if (!absolutePath || !fs.existsSync(absolutePath)) {
-            manifest.push(`${baseName};${data.status};${originalName};arquivo fisico nao encontrado`);
-            continue;
-          }
-
-          entries.push({ absolutePath, zipPath });
-          manifest.push(`${baseName};${data.status};${zipPath};incluido`);
+        if (!selectedXml) {
+          manifest.push(`${baseName};${data.status};;xml fiscal definitivo nao encontrado`);
+          continue;
         }
+
+        const absolutePath = toAbsolutePath(selectedXml.file.caminho_relativo);
+        const zipPath = `${baseName}-${sanitizeFilePart(selectedXml.kind, 'xml')}.xml`;
+
+        if (!absolutePath || !fs.existsSync(absolutePath)) {
+          manifest.push(`${baseName};${data.status};${zipPath};arquivo fisico nao encontrado`);
+          continue;
+        }
+
+        entries.push({ absolutePath, zipPath });
+        manifest.push(`${baseName};${data.status};${zipPath};incluido`);
       }
 
       const archive = sendZipResponse(res, buildFilteredExportName('documentos-fiscais-xml', req.query));
