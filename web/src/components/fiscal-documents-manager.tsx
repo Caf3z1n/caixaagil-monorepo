@@ -1433,7 +1433,7 @@ export function FiscalDocumentsManager() {
                 <input
                   value={searchValue}
                   onChange={event => handleSearchChange(event.target.value)}
-                  placeholder="Buscar por número ou protocolo"
+                  placeholder="Buscar por nome, número ou protocolo"
                 />
                 {searchValue ? (
                   <button type="button" aria-label="Limpar busca" onClick={() => handleSearchChange("")}>

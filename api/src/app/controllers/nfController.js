@@ -1,5 +1,5 @@
 const { ulid } = require('ulid');
-const { Op } = require('sequelize');
+const { Op, col, fn, literal, where: whereExpression } = require('sequelize');
 const archiver = require('archiver');
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
@@ -560,6 +560,25 @@ function handleNfError(res, error, defaultMessage) {
   });
 }
 
+function buildFiscalDocumentNameSearchCondition(term) {
+  const documentName = fn(
+    'concat',
+    literal(`CASE
+      WHEN "Nf"."modelo" = '65' THEN 'NFC-e'
+      WHEN "Nf"."modelo" = '55' THEN 'NF-e'
+      ELSE CONCAT('Modelo ', "Nf"."modelo")
+    END`),
+    ' ',
+    col('Nf.serie'),
+    '/',
+    col('Nf.numero')
+  );
+
+  return whereExpression(documentName, {
+    [Op.iLike]: `%${term}%`,
+  });
+}
+
 function buildNfWhereFromQuery(usuarioId, query = {}) {
   const where = {
     usuario_id: usuarioId,
@@ -589,6 +608,7 @@ function buildNfWhereFromQuery(usuarioId, query = {}) {
     const searchConditions = [
       { chave_acesso: { [Op.iLike]: `%${termo}%` } },
       { protocolo_autorizacao: { [Op.iLike]: `%${termo}%` } },
+      buildFiscalDocumentNameSearchCondition(termo),
     ];
 
     if (Number.isInteger(numero)) {
