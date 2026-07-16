@@ -4222,6 +4222,88 @@ button {
   padding: 0 2px;
 }
 
+.pdv-payment-context-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 42px;
+}
+
+.pdv-consumer-document-status-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: opacity 180ms ease-out;
+}
+
+.pdv-consumer-document-status-button:hover {
+  opacity: 0.76;
+}
+
+.pdv-consumer-document-status-button:focus-visible {
+  outline: 3px solid currentColor;
+  outline-offset: 5px;
+  border-radius: 2px;
+}
+
+.pdv-consumer-document-status-button > svg {
+  flex: 0 0 auto;
+}
+
+.pdv-consumer-document-status-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pdv-consumer-document-status-copy strong,
+.pdv-consumer-document-status-copy em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdv-consumer-document-status-copy strong {
+  font-size: 0.8rem;
+  font-weight: 920;
+  line-height: 1.1;
+}
+
+.pdv-consumer-document-status-copy em {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-style: normal;
+  font-weight: 760;
+  line-height: 1.1;
+}
+
+.pdv-consumer-document-status-button-missing {
+  color: var(--danger);
+}
+
+.pdv-consumer-document-status-button-informed {
+  color: oklch(0.46 0.14 151);
+}
+
+.pdv-consumer-document-modal-form {
+  padding-top: 2px;
+}
+
+.pdv-consumer-document-modal-form > p {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
 .pdv-payment-method-section {
   display: grid;
   gap: 12px;
@@ -6237,6 +6319,22 @@ button {
 }
 
 @media (max-width: 640px) {
+  .pdv-payment-context-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: stretch;
+    gap: 8px;
+  }
+
+  .pdv-consumer-document-status-button {
+    justify-self: start;
+  }
+
+  .pdv-payment-total-inline {
+    justify-self: end;
+    justify-content: flex-end;
+  }
+
   .pdv-app-scale-surface-center {
     padding: 18px 14px;
   }

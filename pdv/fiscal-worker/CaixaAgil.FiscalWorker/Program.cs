@@ -1911,6 +1911,7 @@ internal static class Program
         var ide = FirstXmlElement(infNFe, "ide") ?? throw new InvalidOperationException("XML da NFC-e sem ide.");
         var emit = FirstXmlElement(infNFe, "emit");
         var ender = FirstXmlElement(emit, "enderEmit");
+        var dest = FirstXmlElement(infNFe, "dest");
         var icmsTotal = FirstXmlElement(infNFe, "ICMSTot");
         var chave = OnlyDigits(infNFe.Attribute("Id")?.Value);
 
@@ -1953,6 +1954,8 @@ internal static class Program
             PaymentMethod: "dinheiro",
             Emitter: config.Emitente,
             Recipient: null,
+            ConsumerDocument: NormalizeConsumerDocument(
+                FirstNonBlank(ReadXmlValue(dest, "CPF"), ReadXmlValue(dest, "CNPJ"))),
             Lines: new List<NfceLine>
             {
                 new(
@@ -1990,6 +1993,15 @@ internal static class Program
         var chave = BuildAccessKey(codigoUf, issueDate, cnpj, modelo, serie, numero, cNf, "1");
         var lines = BuildNfceLines(items, sale, modelo);
         var recipient = modelo == "55" ? BuildRecipientConfig(payload) : null;
+        var consumerDocument = modelo == "65"
+            ? NormalizeConsumerDocument(FirstNonBlank(
+                GetString(payload, "consumerDocument"),
+                GetString(payload, "documento_consumidor"),
+                GetString(payload, "documentoConsumidor"),
+                GetString(sale, "consumerDocument"),
+                GetString(sale, "documento_consumidor"),
+                GetString(sale, "documentoConsumidor")))
+            : null;
 
         if (lines.Count == 0)
         {
@@ -2029,6 +2041,7 @@ internal static class Program
             PaymentMethod: paymentMethod,
             Emitter: config.Emitente,
             Recipient: recipient,
+            ConsumerDocument: consumerDocument,
             Lines: lines);
     }
 
@@ -2122,7 +2135,7 @@ internal static class Program
                 OptionalTag("dhCont", emission.DhCont?.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture)) +
                 OptionalTag("xJust", emission.XJust)) +
             BuildEmitterXml(emission.Emitter, emission.Uf) +
-            (emission.Modelo == "55" ? BuildRecipientXml(emission) : "") +
+            (emission.Modelo == "55" ? BuildRecipientXml(emission) : BuildConsumerRecipientXml(emission)) +
             details +
             BuildTotalXml(totalProducts, emission.Lines, emission.Emitter.Crt, emission.Ambiente) +
             Wrap("transp", Tag("modFrete", "9")) +
@@ -2312,6 +2325,25 @@ internal static class Program
             Tag("indIEDest", indIeDest) +
             OptionalTag("IE", ie) +
             OptionalTag("email", Limit(recipient.Email, 60)));
+    }
+
+    private static string BuildConsumerRecipientXml(NfceEmission emission)
+    {
+        var document = emission.ConsumerDocument;
+
+        if (string.IsNullOrWhiteSpace(document))
+        {
+            return string.Empty;
+        }
+
+        var recipientName = emission.Ambiente == "producao"
+            ? "CONSUMIDOR FINAL"
+            : "NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL";
+
+        return Wrap("dest",
+            (document.Length == 11 ? Tag("CPF", document) : Tag("CNPJ", document)) +
+            Tag("xNome", recipientName) +
+            Tag("indIEDest", "9"));
     }
 
     private static string BuildNfceDetailXml(NfceLine line, int index, string ambiente, string? crt)
@@ -3210,6 +3242,75 @@ internal static class Program
         return cst is "04" or "05" or "06" or "07" or "08" or "09";
     }
 
+    private static string? NormalizeConsumerDocument(string? value)
+    {
+        var digits = OnlyDigits(value);
+
+        if (digits.Length == 0)
+        {
+            return null;
+        }
+
+        if ((digits.Length != 11 && digits.Length != 14) || !HasValidConsumerDocumentCheckDigits(digits))
+        {
+            throw new InvalidOperationException("Informe um CPF ou CNPJ valido para o consumidor.");
+        }
+
+        return digits;
+    }
+
+    private static bool HasValidConsumerDocumentCheckDigits(string digits)
+    {
+        if (digits.All(digit => digit == digits[0]))
+        {
+            return false;
+        }
+
+        if (digits.Length == 11)
+        {
+            int CalculateCpfDigit(int length)
+            {
+                var sum = 0;
+
+                for (var index = 0; index < length; index++)
+                {
+                    sum += (digits[index] - '0') * (length + 1 - index);
+                }
+
+                var remainder = sum * 10 % 11;
+                return remainder == 10 ? 0 : remainder;
+            }
+
+            return CalculateCpfDigit(9) == digits[9] - '0' &&
+                CalculateCpfDigit(10) == digits[10] - '0';
+        }
+
+        if (digits.Length == 14)
+        {
+            int CalculateCnpjDigit(int length)
+            {
+                var sum = 0;
+                var firstWeight = length == 12 ? 5 : 6;
+
+                for (var index = 0; index < length; index++)
+                {
+                    var weight = index < firstWeight - 1
+                        ? firstWeight - index
+                        : (length == 12 ? 13 - index : 14 - index);
+                    sum += (digits[index] - '0') * weight;
+                }
+
+                var remainder = sum % 11;
+                return remainder < 2 ? 0 : 11 - remainder;
+            }
+
+            return CalculateCnpjDigit(12) == digits[12] - '0' &&
+                CalculateCnpjDigit(13) == digits[13] - '0';
+        }
+
+        return false;
+    }
+
     private static int ParseInt(string? value, int fallback)
     {
         return int.TryParse(OnlyDigits(value), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
@@ -3234,6 +3335,7 @@ internal static class Program
         string PaymentMethod,
         EmitterConfig Emitter,
         RecipientConfig? Recipient,
+        string? ConsumerDocument,
         List<NfceLine> Lines);
 
     private sealed record RecipientConfig(

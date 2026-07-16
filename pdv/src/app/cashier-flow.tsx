@@ -63,6 +63,8 @@ import {
   Trash2,
   Utensils,
   UserRound,
+  UserRoundCheck,
+  UserRoundX,
   Warehouse,
   WalletCards,
   Wrench,
@@ -227,6 +229,7 @@ type ApiAgreementReceipt = {
   cliente_nome?: string | null;
   cliente_tipo_pessoa?: "fisica" | "juridica" | string | null;
   nome_consumidor?: string | null;
+  documento_consumidor?: string | null;
   observacao?: string | null;
   itens_count?: number;
   itens?: unknown[];
@@ -301,6 +304,7 @@ type SaleRecord = {
   clienteConvenioTipoPessoa?: "fisica" | "juridica" | null;
   clienteConvenioDadosFiscais?: Record<string, unknown> | null;
   clientName?: string | null;
+  consumerDocument?: string | null;
   consumerName?: string | null;
   consumerObservation?: string | null;
   installmentPlan?: InstallmentPaymentPlan | null;
@@ -346,6 +350,7 @@ type AgreementReceiptRecord = {
   clientId: number | null;
   clientName: string;
   clientPersonType: "fisica" | "juridica";
+  consumerDocument?: string | null;
   consumerName?: string | null;
   consumerObservation?: string | null;
   itemsCount: number;
@@ -1059,6 +1064,74 @@ function formatCompanyDocument(value: unknown) {
   return digits;
 }
 
+function normalizeConsumerDocument(value: unknown) {
+  return String(value ?? "").replace(/\D/g, "").slice(0, 14);
+}
+
+function formatConsumerDocumentInput(value: unknown) {
+  const digits = normalizeConsumerDocument(value);
+
+  if (digits.length <= 11) {
+    const part1 = digits.slice(0, 3);
+    const part2 = digits.slice(3, 6);
+    const part3 = digits.slice(6, 9);
+    const part4 = digits.slice(9, 11);
+
+    if (digits.length <= 3) return part1;
+    if (digits.length <= 6) return `${part1}.${part2}`;
+    if (digits.length <= 9) return `${part1}.${part2}.${part3}`;
+    return `${part1}.${part2}.${part3}-${part4}`;
+  }
+
+  const part1 = digits.slice(0, 2);
+  const part2 = digits.slice(2, 5);
+  const part3 = digits.slice(5, 8);
+  const part4 = digits.slice(8, 12);
+  const part5 = digits.slice(12, 14);
+
+  if (digits.length <= 12) return `${part1}.${part2}.${part3}/${part4}`;
+  return `${part1}.${part2}.${part3}/${part4}-${part5}`;
+}
+
+function hasValidConsumerDocumentCheckDigits(value: unknown) {
+  const digits = normalizeConsumerDocument(value);
+
+  if (!digits || /^(\d)\1+$/.test(digits)) {
+    return false;
+  }
+
+  if (digits.length === 11) {
+    const calculateDigit = (length: number) => {
+      const sum = digits
+        .slice(0, length)
+        .split("")
+        .reduce((total, digit, index) => total + Number(digit) * (length + 1 - index), 0);
+      const remainder = (sum * 10) % 11;
+      return remainder === 10 ? 0 : remainder;
+    };
+
+    return calculateDigit(9) === Number(digits[9]) && calculateDigit(10) === Number(digits[10]);
+  }
+
+  if (digits.length === 14) {
+    const calculateDigit = (length: number) => {
+      const weights = length === 12
+        ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+        : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+      const sum = digits
+        .slice(0, length)
+        .split("")
+        .reduce((total, digit, index) => total + Number(digit) * weights[index], 0);
+      const remainder = sum % 11;
+      return remainder < 2 ? 0 : 11 - remainder;
+    };
+
+    return calculateDigit(12) === Number(digits[12]) && calculateDigit(13) === Number(digits[13]);
+  }
+
+  return false;
+}
+
 function getShiftSummaryCompanyName(fiscalSettings: Record<string, unknown> | null, pdvIdentity: string) {
   const emitente = asRecord(fiscalSettings?.emitente);
   const name = compactReceiptText(
@@ -1639,6 +1712,7 @@ function mapAgreementReceipt(receipt: ApiAgreementReceipt): AgreementReceiptReco
     clientId: receipt.cliente_convenio_id ?? null,
     clientName: receipt.cliente_nome || "Cliente",
     clientPersonType: receipt.cliente_tipo_pessoa === "juridica" ? "juridica" : "fisica",
+    consumerDocument: normalizeConsumerDocument(receipt.documento_consumidor) || null,
     consumerName: receipt.nome_consumidor ?? null,
     consumerObservation: receipt.observacao ?? null,
     itemsCount,
@@ -1788,6 +1862,7 @@ function buildAgreementReceiptFromSale(sale: SaleRecord, client: AgreementClient
     clientId: client.id,
     clientName: client.name,
     clientPersonType: client.personType,
+    consumerDocument: sale.consumerDocument ?? null,
     consumerName: sale.consumerName ?? null,
     consumerObservation: sale.consumerObservation ?? null,
     itemsCount: getCartQuantity(sale.items),
@@ -2302,6 +2377,7 @@ function mergeSaleWithFiscalDocumentSnapshot(sale: SaleRecord, document: FiscalD
     "nome_cliente"
   ]);
   const consumerName = getFirstKnownText(sources, ["consumerName", "nome_consumidor"]);
+  const consumerDocument = getFirstKnownText(sources, ["consumerDocument", "documento_consumidor"]);
   const consumerObservation = getFirstKnownText(sources, ["consumerObservation", "observacao"]);
   const totalCents = getFirstKnownNumber(sources, ["totalCents", "total_centavos"]);
   const createdAt = getFirstKnownText(sources, ["createdAt", "created_at", "issuedAt", "emittedAt"]);
@@ -2318,6 +2394,7 @@ function mergeSaleWithFiscalDocumentSnapshot(sale: SaleRecord, document: FiscalD
     ) ?? sale.clienteConvenioTipoPessoa ?? null,
     clienteConvenioDadosFiscais: fiscalData ?? sale.clienteConvenioDadosFiscais ?? null,
     clientName: sale.clientName || clientName,
+    consumerDocument: sale.consumerDocument || normalizeConsumerDocument(consumerDocument) || null,
     consumerName: sale.consumerName || consumerName,
     consumerObservation: sale.consumerObservation || consumerObservation,
     originCommandTitle: sale.originCommandTitle || getFirstKnownText(sources, ["originCommandTitle", "origemComandaNome"])
@@ -2793,6 +2870,8 @@ export function DesktopCashierFlow({
   const shiftSummaryPrintingLockRef = useRef(false);
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
+  const [paymentConsumerDocument, setPaymentConsumerDocument] = useState("");
+  const [isConsumerDocumentOpen, setIsConsumerDocumentOpen] = useState(false);
   const [isCashPaymentOpen, setIsCashPaymentOpen] = useState(false);
   const [cashPaymentTarget, setCashPaymentTarget] = useState<"sale" | "agreement-receipt" | "installment-receipt">("sale");
   const [isAgreementPaymentOpen, setIsAgreementPaymentOpen] = useState(false);
@@ -4720,6 +4799,9 @@ export function DesktopCashierFlow({
       emittedAt: fiscalIssuedAt,
       dhEmi: fiscalIssuedAt,
       itens,
+      ...(fiscalModel === "65" && sale.consumerDocument
+        ? { consumerDocument: normalizeConsumerDocument(sale.consumerDocument) }
+        : {}),
       ...(fiscalModel === "55" ? { destinatario: clientFiscalData } : {}),
       session: activeSession,
       sale: {
@@ -5487,6 +5569,7 @@ export function DesktopCashierFlow({
     const consumerObservation = method === "convenio"
       ? compactReceiptText(agreementAdditionalData.consumerObservation).slice(0, 1000) || null
       : null;
+    const consumerDocument = normalizeConsumerDocument(paymentConsumerDocument) || null;
 
     if (!session || sourceItems.length === 0) {
       return;
@@ -5555,6 +5638,7 @@ export function DesktopCashierFlow({
       clienteConvenioTipoPessoa: paymentClient?.personType ?? null,
       clienteConvenioDadosFiscais: paymentClient?.fiscalData ?? null,
       clientName: paymentClient?.name ?? null,
+      consumerDocument,
       consumerName,
       consumerObservation,
       installmentPlan: normalizedInstallmentPlan
@@ -5588,6 +5672,8 @@ export function DesktopCashierFlow({
       clearSale();
     }
     setIsPaymentOpen(false);
+    setPaymentConsumerDocument("");
+    setIsConsumerDocumentOpen(false);
     setIsAgreementPaymentOpen(false);
     setIsInstallmentPaymentOpen(false);
     setCompletedSale(nextSale);
@@ -5602,6 +5688,7 @@ export function DesktopCashierFlow({
       clienteConvenioNome: paymentClient?.name ?? null,
       clienteConvenioTipoPessoa: paymentClient?.personType ?? null,
       clienteConvenioDadosFiscais: paymentClient?.fiscalData ?? null,
+      consumerDocument,
       consumerName,
       consumerObservation,
       parcelamento: nextSale.installmentPlan
@@ -5666,6 +5753,8 @@ export function DesktopCashierFlow({
 
   function closePaymentFlow() {
     setIsPaymentOpen(false);
+    setPaymentConsumerDocument("");
+    setIsConsumerDocumentOpen(false);
     setIsCashPaymentOpen(false);
     setCashPaymentTarget("sale");
     setIsAgreementPaymentOpen(false);
@@ -5678,6 +5767,8 @@ export function DesktopCashierFlow({
   }
 
   function requestPaymentConfirmation(method: PaymentMethod) {
+    setIsConsumerDocumentOpen(false);
+
     if (!paymentSettings[method]) {
       onSystemMessage("Essa forma de pagamento está desativada nas configurações do PDV.");
       closePaymentFlow();
@@ -8154,11 +8245,27 @@ export function DesktopCashierFlow({
         ) : null}
         {isPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
           <PaymentModal
+            consumerDocument={paymentConsumerDocument}
             items={paymentItems}
             options={enabledPaymentOptions}
             totalCents={paymentTotalCents}
             onClose={closePaymentFlow}
+            onOpenConsumerDocument={() => setIsConsumerDocumentOpen(true)}
             onConfirm={requestPaymentConfirmation}
+          />
+        ) : null}
+        {isPaymentOpen && isConsumerDocumentOpen ? (
+          <ConsumerDocumentModal
+            document={paymentConsumerDocument}
+            onClose={() => setIsConsumerDocumentOpen(false)}
+            onRemove={() => {
+              setPaymentConsumerDocument("");
+              setIsConsumerDocumentOpen(false);
+            }}
+            onSave={(document) => {
+              setPaymentConsumerDocument(document);
+              setIsConsumerDocumentOpen(false);
+            }}
           />
         ) : null}
         {isCashPaymentOpen && (!commandPaymentRequest || isCommandsEnabled) ? (
@@ -9868,27 +9975,40 @@ function ExpenseModal({
 }
 
 function PaymentModal({
+  consumerDocument,
   items,
   options,
   totalCents,
   onClose,
+  onOpenConsumerDocument,
   onConfirm
 }: {
+  consumerDocument: string;
   items: CartItem[];
   options: typeof paymentOptions;
   totalCents: number;
   onClose: () => void;
+  onOpenConsumerDocument: () => void;
   onConfirm: (method: PaymentMethod) => void;
 }) {
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod | null>(null);
   const selectedOption = selectedMethod ? getPaymentOption(selectedMethod) : null;
   const SelectedIcon = selectedOption?.icon ?? CreditCard;
+  const normalizedConsumerDocument = normalizeConsumerDocument(consumerDocument);
 
   useEffect(() => {
     if (selectedMethod && !options.some((option) => option.id === selectedMethod)) {
       setSelectedMethod(null);
     }
   }, [options, selectedMethod]);
+
+  function handleConfirm() {
+    if (!selectedMethod) {
+      return;
+    }
+
+    onConfirm(selectedMethod);
+  }
 
   return (
     <CashierModal
@@ -9904,7 +10024,7 @@ function PaymentModal({
           <button
             className="pdv-confirm-action"
             type="button"
-            onClick={() => selectedMethod && onConfirm(selectedMethod)}
+            onClick={handleConfirm}
             disabled={!selectedMethod}
           >
             {selectedMethod === "dinheiro" ? (
@@ -9966,9 +10086,36 @@ function PaymentModal({
           </div>
         </section>
 
-        <div className="pdv-sale-total-inline pdv-payment-total-inline" aria-live="polite">
-          <span>Total da venda</span>
-          <strong>{formatCurrency(totalCents)}</strong>
+        <div className="pdv-payment-context-row">
+          <button
+            className={
+              normalizedConsumerDocument
+                ? "pdv-consumer-document-status-button pdv-consumer-document-status-button-informed"
+                : "pdv-consumer-document-status-button pdv-consumer-document-status-button-missing"
+            }
+            type="button"
+            onClick={onOpenConsumerDocument}
+            aria-label={
+              normalizedConsumerDocument
+                ? `Consumidor informado: ${formatCompanyDocument(normalizedConsumerDocument)}. Editar CPF ou CNPJ.`
+                : "Informar CPF ou CNPJ do consumidor"
+            }
+            title={normalizedConsumerDocument ? "Editar consumidor" : "Informar consumidor"}
+          >
+            {normalizedConsumerDocument ? (
+              <UserRoundCheck aria-hidden="true" size={21} strokeWidth={2.2} />
+            ) : (
+              <UserRoundX aria-hidden="true" size={21} strokeWidth={2.2} />
+            )}
+            <span className="pdv-consumer-document-status-copy">
+              <strong>{normalizedConsumerDocument ? "Consumidor informado" : "Consumidor não informado"}</strong>
+              {normalizedConsumerDocument ? <em>{formatCompanyDocument(normalizedConsumerDocument)}</em> : null}
+            </span>
+          </button>
+          <div className="pdv-sale-total-inline pdv-payment-total-inline" aria-live="polite">
+            <span>Total da venda</span>
+            <strong>{formatCurrency(totalCents)}</strong>
+          </div>
         </div>
 
         <section className="pdv-payment-method-section" aria-label="Formas de pagamento">
@@ -9995,6 +10142,81 @@ function PaymentModal({
           </div>
         </section>
       </div>
+    </CashierModal>
+  );
+}
+
+function ConsumerDocumentModal({
+  document,
+  onClose,
+  onRemove,
+  onSave
+}: {
+  document: string;
+  onClose: () => void;
+  onRemove: () => void;
+  onSave: (document: string) => void;
+}) {
+  const [draft, setDraft] = useState(() => normalizeConsumerDocument(document));
+  const [error, setError] = useState("");
+  const normalizedDraft = normalizeConsumerDocument(draft);
+  const hasSavedDocument = Boolean(normalizeConsumerDocument(document));
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!normalizedDraft || !hasValidConsumerDocumentCheckDigits(normalizedDraft)) {
+      setError("Informe um CPF ou CNPJ válido.");
+      return;
+    }
+
+    onSave(normalizedDraft);
+  }
+
+  return (
+    <CashierModal
+      title="Consumidor"
+      size="sm"
+      className="pdv-consumer-document-modal"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="pdv-secondary-action" type="button" onClick={onClose}>
+            Cancelar
+          </button>
+          {hasSavedDocument ? (
+            <button className="pdv-danger-action" type="button" onClick={onRemove}>
+              <Trash2 aria-hidden="true" size={16} />
+              Remover
+            </button>
+          ) : null}
+          <button className="pdv-confirm-action" type="submit" form="pdv-consumer-document-form" disabled={!normalizedDraft}>
+            <Check aria-hidden="true" size={16} />
+            Salvar
+          </button>
+        </>
+      }
+    >
+      <form className="pdv-modal-form pdv-consumer-document-modal-form" id="pdv-consumer-document-form" onSubmit={handleSubmit}>
+        <label htmlFor="pdv-consumer-document-input">
+          <span>CPF ou CNPJ</span>
+          <input
+            autoFocus
+            id="pdv-consumer-document-input"
+            value={formatConsumerDocumentInput(draft)}
+            onChange={(event) => {
+              setDraft(normalizeConsumerDocument(event.target.value));
+              setError("");
+            }}
+            inputMode="numeric"
+            autoComplete="off"
+            placeholder="Informe o documento"
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? "pdv-consumer-document-error" : undefined}
+          />
+        </label>
+        {error ? <p id="pdv-consumer-document-error" role="alert">{error}</p> : null}
+      </form>
     </CashierModal>
   );
 }

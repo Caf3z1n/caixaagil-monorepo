@@ -587,6 +587,7 @@ function sanitizeDesktopConvenioRecebimento(venda) {
     cliente_nome: getVendaClienteConvenioNome(data),
     cliente_tipo_pessoa: data.cliente_convenio?.tipo_pessoa || null,
     nome_consumidor: data.nome_consumidor || null,
+    documento_consumidor: data.documento_consumidor || null,
     observacao: data.observacao || null,
     itens_count: Number(data.quantidade_itens || 0),
     itens: normalizeSaleItems(data.itens),
@@ -1009,6 +1010,14 @@ async function processSaleCompleted(pdv, payload, transaction) {
       installmentPlan?.customerName,
     120
   ) || null;
+  const consumerDocument = String(
+    sale.consumerDocument ||
+      sale.documento_consumidor ||
+      sale.documentoConsumidor ||
+      payload.consumerDocument ||
+      payload.documento_consumidor ||
+      ''
+  ).replace(/\D/g, '').slice(0, 14) || null;
   const consumerObservation = normalizeText(
     sale.consumerObservation ||
       sale.observacao ||
@@ -1050,6 +1059,7 @@ async function processSaleCompleted(pdv, payload, transaction) {
       cliente_convenio_id: isCustomerPayment ? clientConvenioId : null,
       nome_cliente: isCustomerPayment ? convenioClientName : null,
       nome_consumidor: consumerName,
+      documento_consumidor: consumerDocument,
       rotulo_origem: origemComandaNome || 'Caixa',
       canal: 'pdv',
       itens: items,
