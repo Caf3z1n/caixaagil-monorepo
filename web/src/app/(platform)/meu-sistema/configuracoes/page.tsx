@@ -21,6 +21,7 @@ import {
   PlugZap,
   Printer,
   QrCode,
+  RefreshCcw,
   ReceiptText,
   Settings2,
   UsersRound,
@@ -57,6 +58,9 @@ type CommandSettings = {
 type ShiftSummarySettings = {
   ativo: boolean;
 };
+type CashierReopenSettings = {
+  ativo: boolean;
+};
 type ExpenseSettings = {
   ativo: boolean;
 };
@@ -84,6 +88,7 @@ type ConfiguracaoSistema = {
   formas_pagamento: Partial<PaymentSettings>;
   comandas?: Partial<CommandSettings> | null;
   resumo_turno?: Partial<ShiftSummarySettings> | null;
+  reabrir_caixa?: Partial<CashierReopenSettings> | null;
   lancar_despesas?: Partial<ExpenseSettings> | null;
   controle_funcionarios?: Partial<EmployeeSettings> | null;
   fiscal?: Partial<FiscalSettings> | null;
@@ -128,6 +133,10 @@ const defaultCommandSettings: CommandSettings = {
 };
 
 const defaultShiftSummarySettings: ShiftSummarySettings = {
+  ativo: false
+};
+
+const defaultCashierReopenSettings: CashierReopenSettings = {
   ativo: false
 };
 
@@ -215,6 +224,12 @@ function normalizeCommandSettings(value?: Partial<CommandSettings> | null): Comm
 }
 
 function normalizeShiftSummarySettings(value?: Partial<ShiftSummarySettings> | null): ShiftSummarySettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
+function normalizeCashierReopenSettings(value?: Partial<CashierReopenSettings> | null): CashierReopenSettings {
   return {
     ativo: value?.ativo === true
   };
@@ -509,6 +524,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
   const [commandSettings, setCommandSettings] = useState<CommandSettings>(defaultCommandSettings);
   const [shiftSummarySettings, setShiftSummarySettings] = useState<ShiftSummarySettings>(defaultShiftSummarySettings);
+  const [cashierReopenSettings, setCashierReopenSettings] = useState<CashierReopenSettings>(defaultCashierReopenSettings);
   const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(defaultExpenseSettings);
   const [employeeSettings, setEmployeeSettings] = useState<EmployeeSettings>(defaultEmployeeSettings);
   const [fiscalSettings, setFiscalSettings] = useState<FiscalSettings>(defaultFiscalSettings);
@@ -518,6 +534,7 @@ export default function MeuSistemaConfiguracoesPage() {
   const [savingMethod, setSavingMethod] = useState<PaymentMethodKey | null>(null);
   const [isSavingCommands, setIsSavingCommands] = useState(false);
   const [isSavingShiftSummary, setIsSavingShiftSummary] = useState(false);
+  const [isSavingCashierReopen, setIsSavingCashierReopen] = useState(false);
   const [isSavingExpenses, setIsSavingExpenses] = useState(false);
   const [isSavingEmployees, setIsSavingEmployees] = useState(false);
   const [isSavingFiscalEmission, setIsSavingFiscalEmission] = useState(false);
@@ -639,6 +656,7 @@ export default function MeuSistemaConfiguracoesPage() {
         setPaymentSettings(normalizePaymentSettings(configuracao.formas_pagamento));
         setCommandSettings(normalizeCommandSettings(configuracao.comandas));
         setShiftSummarySettings(normalizeShiftSummarySettings(configuracao.resumo_turno));
+        setCashierReopenSettings(normalizeCashierReopenSettings(configuracao.reabrir_caixa));
         setExpenseSettings(normalizeExpenseSettings(configuracao.lancar_despesas));
         setEmployeeSettings(normalizeEmployeeSettings(configuracao.controle_funcionarios));
         setFiscalSettings(normalizeFiscalSettings(configuracao.fiscal));
@@ -988,6 +1006,56 @@ export default function MeuSistemaConfiguracoesPage() {
       });
     } finally {
       setIsSavingShiftSummary(false);
+    }
+  }
+
+  async function updateCashierReopenSettings(active: boolean) {
+    if (isSavingCashierReopen) {
+      return;
+    }
+
+    const token = getStoredPlatformAuthToken();
+
+    if (!token) {
+      setFeedback({
+        tone: "error",
+        message: "Sessão expirada. Entre novamente para salvar."
+      });
+      return;
+    }
+
+    const previousSettings = cashierReopenSettings;
+    const nextSettings = { ativo: active };
+
+    setCashierReopenSettings(nextSettings);
+    setIsSavingCashierReopen(true);
+    setFeedback(null);
+
+    try {
+      const configuracao = await apiPut<ConfiguracaoSistema>(
+        "/configuracoes/reabrir-caixa",
+        {
+          reabrir_caixa: nextSettings
+        },
+        { token }
+      );
+
+      setCashierReopenSettings(normalizeCashierReopenSettings(configuracao.reabrir_caixa));
+      setFeedback({
+        tone: "success",
+        message: active ? "Reabertura de caixa ativada." : "Reabertura de caixa desativada."
+      });
+    } catch (error) {
+      setCashierReopenSettings(previousSettings);
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof ApiError || error instanceof Error
+            ? error.message
+            : "Não foi possível atualizar a reabertura de caixa."
+      });
+    } finally {
+      setIsSavingCashierReopen(false);
     }
   }
 
@@ -1692,6 +1760,50 @@ export default function MeuSistemaConfiguracoesPage() {
                       >
                         <span className="configuration-switch" aria-hidden="true">
                           {isSavingShiftSummary ? (
+                            <LoaderCircle className="configuration-switch-loader" size={15} />
+                          ) : (
+                            <span />
+                          )}
+                        </span>
+                      </button>
+                    </article>
+
+                    <article
+                      className={
+                        cashierReopenSettings.ativo
+                          ? "configuration-setting-row configuration-setting-fiscal-option"
+                          : "configuration-setting-row configuration-setting-fiscal-option configuration-setting-fiscal-option-disabled"
+                      }
+                      onBlur={stopConfigurationWave}
+                      onPointerEnter={startConfigurationPointerWave}
+                      onPointerLeave={stopConfigurationWave}
+                    >
+                      <span className="configuration-setting-fiscal-entry configuration-setting-fiscal-entry-static">
+                        <span className="configuration-setting-icon" aria-hidden="true">
+                          <RefreshCcw size={19} />
+                        </span>
+
+                        <span className="configuration-setting-copy">
+                          <strong>Reabrir caixa fechado</strong>
+                          <small>Permite retomar caixas que ainda não foram conferidos.</small>
+                        </span>
+                      </span>
+
+                      <button
+                        aria-checked={cashierReopenSettings.ativo}
+                        aria-label={cashierReopenSettings.ativo ? "Desativar reabertura de caixa" : "Ativar reabertura de caixa"}
+                        className={
+                          cashierReopenSettings.ativo
+                            ? "configuration-setting-fiscal-toggle configuration-setting-fiscal-toggle-active"
+                            : "configuration-setting-fiscal-toggle"
+                        }
+                        disabled={isLoading || isSavingCashierReopen}
+                        role="switch"
+                        type="button"
+                        onClick={() => void updateCashierReopenSettings(!cashierReopenSettings.ativo)}
+                      >
+                        <span className="configuration-switch" aria-hidden="true">
+                          {isSavingCashierReopen ? (
                             <LoaderCircle className="configuration-switch-loader" size={15} />
                           ) : (
                             <span />

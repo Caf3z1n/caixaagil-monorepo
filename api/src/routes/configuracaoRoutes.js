@@ -10,6 +10,7 @@ router.put('/formas-pagamento', controller.updatePaymentMethods);
 router.put('/fiscal', controller.updateFiscal);
 router.put('/comandas', controller.updateCommands);
 router.put('/resumo-turno', controller.updateShiftSummary);
+router.put('/reabrir-caixa', controller.updateCashierReopen);
 router.put('/despesas', controller.updateExpenses);
 router.put('/funcionarios', controller.updateEmployees);
 router.put('/integracoes', controller.updateIntegrations);

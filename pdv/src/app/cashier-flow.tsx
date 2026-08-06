@@ -189,6 +189,7 @@ type BillingStatus = {
 type ApiPdvSettings = {
   comandas?: Partial<CommandSettings> | null;
   resumo_turno?: Partial<ShiftSummarySettings> | null;
+  reabrir_caixa?: Partial<CashierReopenSettings> | null;
   lancar_despesas?: Partial<ExpenseSettings> | null;
   controle_funcionarios?: Partial<EmployeeControlSettings> | null;
   formas_pagamento?: Partial<Record<PaymentMethod, boolean>> | null;
@@ -278,6 +279,41 @@ type ShiftPreviewResponse = {
   billing_status?: BillingStatus | null;
 };
 
+type ReopenableCashier = {
+  id: string;
+  data_operacao_chave: string;
+  data_operacao_rotulo: string;
+  numero_turno: number;
+  aberto_em: string;
+  fechado_em: string;
+  funcionario_abertura_id?: string | null;
+  funcionario_abertura_nome?: string | null;
+  funcionario_fechamento_id?: string | null;
+  funcionario_fechamento_nome?: string | null;
+};
+
+type ReopenableCashiersResponse = {
+  gerado_em: string;
+  caixas: ReopenableCashier[];
+};
+
+type ReopenCashierError = {
+  title: string;
+  message: string;
+};
+
+type ReopenedCashierResponse = {
+  caixa: ReopenableCashier & {
+    reaberto_em: string;
+    funcionario_reabertura_id?: number | null;
+    funcionario_reabertura_nome?: string | null;
+  };
+  vendas: SaleRecord[];
+  despesas: CashExpenseRecord[];
+  recebimentos_convenio: AgreementReceiptRecord[];
+  billing_status?: BillingStatus | null;
+};
+
 type CartItem = Product & {
   quantity: number;
 };
@@ -290,6 +326,9 @@ type CashierSession = {
   openedByEmployeeName?: string | null;
   closedByEmployeeId?: number | null;
   closedByEmployeeName?: string | null;
+  reopenedAt?: string | null;
+  reopenedByEmployeeId?: number | null;
+  reopenedByEmployeeName?: string | null;
 };
 
 type SaleRecord = {
@@ -530,6 +569,7 @@ type LocalCashierState = {
   catalogCategories: ProductCategory[];
   commandSettings?: CommandSettings;
   shiftSummarySettings?: ShiftSummarySettings;
+  cashierReopenSettings?: CashierReopenSettings;
   expenseSettings?: ExpenseSettings;
   employeeControlSettings?: EmployeeControlSettings;
   paymentSettings?: PaymentSettings;
@@ -622,6 +662,10 @@ type ShiftSummarySettings = {
   ativo: boolean;
 };
 
+type CashierReopenSettings = {
+  ativo: boolean;
+};
+
 type ExpenseSettings = {
   ativo: boolean;
 };
@@ -638,10 +682,11 @@ type EmployeeRecord = {
   updatedAt?: string | null;
 };
 
-type EmployeeAuthMode = "open" | "close-confirm";
+type EmployeeAuthMode = "open" | "close-confirm" | "reopen";
 
 type EmployeeAuthRequest = {
   mode: EmployeeAuthMode;
+  cashier?: ReopenableCashier;
 };
 
 const defaultPaymentSettings: PaymentSettings = {
@@ -657,6 +702,10 @@ const defaultCommandSettings: CommandSettings = {
 };
 
 const defaultShiftSummarySettings: ShiftSummarySettings = {
+  ativo: false
+};
+
+const defaultCashierReopenSettings: CashierReopenSettings = {
   ativo: false
 };
 
@@ -1984,6 +2033,12 @@ function normalizeShiftSummarySettings(value?: Partial<ShiftSummarySettings> | n
   };
 }
 
+function normalizeCashierReopenSettings(value?: Partial<CashierReopenSettings> | null): CashierReopenSettings {
+  return {
+    ativo: value?.ativo === true
+  };
+}
+
 function normalizeExpenseSettings(value?: Partial<ExpenseSettings> | null): ExpenseSettings {
   return {
     ativo: value?.ativo !== false
@@ -2720,10 +2775,12 @@ function EmployeeAuthModal({
   onConfirm: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const [showCode, setShowCode] = useState(false);
-  const title = mode === "open" ? "Abrir caixa" : "Fechar caixa";
+  const title = mode === "open" ? "Abrir caixa" : mode === "reopen" ? "Reabrir caixa" : "Fechar caixa";
   const description = mode === "open"
     ? "Informe a senha do funcionário responsável pelo turno."
-    : "Informe a senha do funcionário responsável pelo fechamento.";
+    : mode === "reopen"
+      ? "Informe a senha do funcionário responsável pela reabertura."
+      : "Informe a senha do funcionário responsável pelo fechamento.";
 
   return (
     <CashierModal
@@ -2780,6 +2837,104 @@ function EmployeeAuthModal({
   );
 }
 
+function ReopenCashierModal({
+  cashiers,
+  error,
+  isLoading,
+  reopeningCashierId,
+  onClose,
+  onRefresh,
+  onSelect
+}: {
+  cashiers: ReopenableCashier[];
+  error: ReopenCashierError | null;
+  isLoading: boolean;
+  reopeningCashierId: string | null;
+  onClose: () => void;
+  onRefresh: () => void;
+  onSelect: (cashier: ReopenableCashier) => void;
+}) {
+  const isSubmitting = Boolean(reopeningCashierId);
+
+  return (
+    <CashierModal
+      title="Reabrir caixa fechado"
+      description="Selecione um caixa deste PDV que ainda não foi conferido."
+      onClose={onClose}
+      size="md"
+      dismissible={!isSubmitting}
+      footer={
+        <>
+          <button className="pdv-secondary-action" type="button" onClick={onClose} disabled={isSubmitting}>
+            Cancelar
+          </button>
+          <button className="pdv-secondary-action" type="button" onClick={onRefresh} disabled={isLoading || isSubmitting}>
+            {isLoading ? <LoaderCircle className="pdv-spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}
+            Atualizar
+          </button>
+        </>
+      }
+    >
+      <div className="pdv-reopen-cashier-content">
+        {isLoading ? (
+          <div className="pdv-reopen-cashier-skeleton" aria-label="Carregando caixas fechados" aria-live="polite">
+            <span />
+            <span />
+            <span />
+          </div>
+        ) : error ? (
+          <div className="pdv-reopen-cashier-empty" role="alert">
+            <AlertTriangle aria-hidden="true" size={22} />
+            <strong>{error.title}</strong>
+            <span>{error.message}</span>
+          </div>
+        ) : cashiers.length === 0 ? (
+          <div className="pdv-reopen-cashier-empty">
+            <ShieldCheck aria-hidden="true" size={22} />
+            <strong>Nenhum caixa disponível</strong>
+            <span>Todos os caixas fechados deste PDV já foram conferidos.</span>
+          </div>
+        ) : (
+          <div className="pdv-reopen-cashier-list">
+            {cashiers.map((cashier) => {
+              const openedAt = new Date(cashier.aberto_em);
+              const closedAt = new Date(cashier.fechado_em);
+              const isReopening = reopeningCashierId === cashier.id;
+
+              return (
+                <button
+                  className="pdv-reopen-cashier-item"
+                  disabled={isSubmitting}
+                  key={cashier.id}
+                  type="button"
+                  onClick={() => onSelect(cashier)}
+                >
+                  <span className="pdv-reopen-cashier-icon" aria-hidden="true">
+                    {isReopening ? <LoaderCircle className="pdv-spin" size={19} /> : <History size={19} />}
+                  </span>
+                  <span className="pdv-reopen-cashier-copy">
+                    <strong>{cashier.data_operacao_rotulo} · Turno {cashier.numero_turno}</strong>
+                    <small>
+                      Aberto {Number.isNaN(openedAt.getTime()) ? cashier.data_operacao_rotulo : dateTimeFormatter.format(openedAt)}
+                      {cashier.funcionario_abertura_nome ? ` por ${cashier.funcionario_abertura_nome}` : ""}
+                    </small>
+                    <small>
+                      Fechado {Number.isNaN(closedAt.getTime()) ? "anteriormente" : dateTimeFormatter.format(closedAt)}
+                      {cashier.funcionario_fechamento_nome ? ` por ${cashier.funcionario_fechamento_nome}` : ""}
+                    </small>
+                  </span>
+                  <span className="pdv-reopen-cashier-action-label">{isReopening ? "Reabrindo" : "Selecionar"}</span>
+                  <ArrowRight aria-hidden="true" size={18} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </CashierModal>
+  );
+}
+
 export function DesktopCashierFlow({
   connectivity,
   deviceCredential,
@@ -2829,6 +2984,9 @@ export function DesktopCashierFlow({
   const [shiftSummarySettings, setShiftSummarySettings] = useState<ShiftSummarySettings>(() =>
     normalizeShiftSummarySettings(initialSettings?.resumo_turno)
   );
+  const [cashierReopenSettings, setCashierReopenSettings] = useState<CashierReopenSettings>(() =>
+    normalizeCashierReopenSettings(initialSettings?.reabrir_caixa)
+  );
   const [expenseSettings, setExpenseSettings] = useState<ExpenseSettings>(() =>
     normalizeExpenseSettings(initialSettings?.lancar_despesas)
   );
@@ -2842,6 +3000,11 @@ export function DesktopCashierFlow({
   const [employeeAuthCode, setEmployeeAuthCode] = useState("");
   const [employeeAuthError, setEmployeeAuthError] = useState("");
   const [isEmployeeAuthSubmitting, setIsEmployeeAuthSubmitting] = useState(false);
+  const [isReopenCashierOpen, setIsReopenCashierOpen] = useState(false);
+  const [reopenableCashiers, setReopenableCashiers] = useState<ReopenableCashier[]>([]);
+  const [isReopenCashiersLoading, setIsReopenCashiersLoading] = useState(false);
+  const [reopenCashierError, setReopenCashierError] = useState<ReopenCashierError | null>(null);
+  const [reopeningCashierId, setReopeningCashierId] = useState<string | null>(null);
   const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
   const [isFiscalEmissionEnabled, setIsFiscalEmissionEnabled] = useState(() =>
     isFiscalEmissionActiveConfig(initialSettings?.fiscal ?? null)
@@ -2868,6 +3031,7 @@ export function DesktopCashierFlow({
   const [shiftSummaryPrintModal, setShiftSummaryPrintModal] = useState<ShiftSummaryPrintModalState | null>(null);
   const [isShiftSummaryPrinting, setIsShiftSummaryPrinting] = useState(false);
   const shiftSummaryPrintingLockRef = useRef(false);
+  const activeShiftSummaryPrintJobRef = useRef<string | null>(null);
   const [saleCancelRequest, setSaleCancelRequest] = useState<SaleRecord | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [paymentConsumerDocument, setPaymentConsumerDocument] = useState("");
@@ -2939,6 +3103,7 @@ export function DesktopCashierFlow({
   );
   const isCommandsEnabled = commandSettings.ativo;
   const isShiftSummaryPrintEnabled = shiftSummarySettings.ativo;
+  const isCashierReopenEnabled = cashierReopenSettings.ativo;
   const isExpensesEnabled = expenseSettings.ativo;
   const isEmployeeControlEnabled = employeeControlSettings.ativo;
   const activeEmployees = useMemo(
@@ -3261,6 +3426,7 @@ export function DesktopCashierFlow({
 
     setCommandSettings(normalizeCommandSettings(initialSettings.comandas));
     setShiftSummarySettings(normalizeShiftSummarySettings(initialSettings.resumo_turno));
+    setCashierReopenSettings(normalizeCashierReopenSettings(initialSettings.reabrir_caixa));
     setExpenseSettings(normalizeExpenseSettings(initialSettings.lancar_despesas));
     setEmployeeControlSettings(normalizeEmployeeControlSettings(initialSettings.controle_funcionarios));
     setPaymentSettings(normalizePaymentSettings(initialSettings.formas_pagamento));
@@ -3313,6 +3479,7 @@ export function DesktopCashierFlow({
       catalogCategories,
       commandSettings,
       shiftSummarySettings,
+      cashierReopenSettings,
       expenseSettings,
       employeeControlSettings,
       paymentSettings
@@ -4114,6 +4281,7 @@ export function DesktopCashierFlow({
       const nextEmployees = mergeEmployees((response.funcionarios ?? []).map(mapEmployee));
       const nextCommandSettings = normalizeCommandSettings(response.configuracoes?.comandas);
       const nextShiftSummarySettings = normalizeShiftSummarySettings(response.configuracoes?.resumo_turno);
+      const nextCashierReopenSettings = normalizeCashierReopenSettings(response.configuracoes?.reabrir_caixa);
       const nextExpenseSettings = normalizeExpenseSettings(response.configuracoes?.lancar_despesas);
       const nextEmployeeControlSettings = normalizeEmployeeControlSettings(response.configuracoes?.controle_funcionarios);
       const nextPaymentSettings = normalizePaymentSettings(response.configuracoes?.formas_pagamento);
@@ -4133,6 +4301,7 @@ export function DesktopCashierFlow({
       setEmployees(nextEmployees);
       setCommandSettings(nextCommandSettings);
       setShiftSummarySettings(nextShiftSummarySettings);
+      setCashierReopenSettings(nextCashierReopenSettings);
       setExpenseSettings(nextExpenseSettings);
       setEmployeeControlSettings(nextEmployeeControlSettings);
       setPaymentSettings(nextPaymentSettings);
@@ -5994,7 +6163,7 @@ export function DesktopCashierFlow({
     confirmInstallmentPayment(method, paymentRequest);
   }
 
-  function requestEmployeeAuth(mode: EmployeeAuthMode) {
+  function requestEmployeeAuth(mode: EmployeeAuthMode, cashier?: ReopenableCashier) {
     if (activeEmployees.length === 0) {
       onSystemMessage("Funcionários ativados, mas nenhum funcionário foi sincronizado para este PDV.");
       return false;
@@ -6002,7 +6171,7 @@ export function DesktopCashierFlow({
 
     setEmployeeAuthCode("");
     setEmployeeAuthError("");
-    setEmployeeAuthRequest({ mode });
+    setEmployeeAuthRequest({ mode, cashier });
     return true;
   }
 
@@ -6011,9 +6180,15 @@ export function DesktopCashierFlow({
       return;
     }
 
+    const shouldReturnToCashierSelection = employeeAuthRequest?.mode === "reopen";
+
     setEmployeeAuthRequest(null);
     setEmployeeAuthCode("");
     setEmployeeAuthError("");
+
+    if (shouldReturnToCashierSelection) {
+      setIsReopenCashierOpen(true);
+    }
   }
 
   async function confirmEmployeeAuth(event?: FormEvent<HTMLFormElement>) {
@@ -6042,7 +6217,8 @@ export function DesktopCashierFlow({
         return;
       }
 
-      const mode = employeeAuthRequest.mode;
+      const authRequest = employeeAuthRequest;
+      const mode = authRequest.mode;
 
       setEmployeeAuthRequest(null);
       setEmployeeAuthCode("");
@@ -6054,6 +6230,11 @@ export function DesktopCashierFlow({
 
       if (mode === "close-confirm") {
         completeCloseSession(employee);
+        return;
+      }
+
+      if (mode === "reopen" && authRequest.cashier) {
+        await completeReopenCashier(authRequest.cashier, employee, normalizedCode);
         return;
       }
     } finally {
@@ -6126,6 +6307,151 @@ export function DesktopCashierFlow({
     }
 
     await completeOpenSession(null);
+  }
+
+  async function loadReopenableCashiers() {
+    if (!deviceCredential || !deviceId) {
+      setReopenCashierError({
+        title: "Não foi possível carregar os caixas",
+        message: "PDV sem credencial ativa para consultar os caixas."
+      });
+      return;
+    }
+
+    if (connectivity !== "online") {
+      setReopenCashierError({
+        title: "Não foi possível carregar os caixas",
+        message: "Conecte o PDV à internet para reabrir um caixa fechado."
+      });
+      return;
+    }
+
+    setIsReopenCashiersLoading(true);
+    setReopenCashierError(null);
+
+    try {
+      await syncPendingOutboundQueues({ forceOnline: true });
+      const response = await apiPost<ReopenableCashiersResponse>("/pdvs/turno/pendentes-reabertura", {
+        credencial_dispositivo: deviceCredential,
+        dispositivo_id: deviceId
+      });
+
+      setReopenableCashiers(response.caixas ?? []);
+    } catch (error) {
+      setReopenableCashiers([]);
+      setReopenCashierError({
+        title: "Não foi possível carregar os caixas",
+        message: error instanceof Error ? error.message : "Não foi possível carregar os caixas fechados."
+      });
+    } finally {
+      setIsReopenCashiersLoading(false);
+    }
+  }
+
+  function openReopenCashierModal() {
+    if (!isCashierReopenEnabled || session || isOpeningSession || reopeningCashierId) {
+      return;
+    }
+
+    setIsReopenCashierOpen(true);
+    setReopenableCashiers([]);
+    setReopenCashierError(null);
+    void loadReopenableCashiers();
+  }
+
+  function closeReopenCashierModal() {
+    if (reopeningCashierId) {
+      return;
+    }
+
+    setIsReopenCashierOpen(false);
+    setReopenCashierError(null);
+  }
+
+  function selectReopenableCashier(cashier: ReopenableCashier) {
+    if (reopeningCashierId) {
+      return;
+    }
+
+    if (isEmployeeControlEnabled) {
+      setIsReopenCashierOpen(false);
+
+      if (!requestEmployeeAuth("reopen", cashier)) {
+        setIsReopenCashierOpen(true);
+      }
+      return;
+    }
+
+    void completeReopenCashier(cashier, null, "");
+  }
+
+  async function completeReopenCashier(
+    cashier: ReopenableCashier,
+    employee: EmployeeRecord | null,
+    employeeCode: string
+  ) {
+    if (!deviceCredential || !deviceId || reopeningCashierId || session) {
+      return;
+    }
+
+    setReopeningCashierId(cashier.id);
+    setReopenCashierError(null);
+
+    try {
+      const response = await apiPost<ReopenedCashierResponse>(
+        `/pdvs/turno/${encodeURIComponent(cashier.id)}/reabrir`,
+        {
+          credencial_dispositivo: deviceCredential,
+          dispositivo_id: deviceId,
+          senha_funcionario: employeeCode
+        }
+      );
+      const reopenedCashier = response.caixa;
+      const openedByEmployeeId = Number(reopenedCashier.funcionario_abertura_id || 0);
+      const reopenedSession: CashierSession = {
+        id: reopenedCashier.id,
+        shiftNumber: reopenedCashier.numero_turno,
+        openedAt: reopenedCashier.aberto_em,
+        openedByEmployeeId: Number.isInteger(openedByEmployeeId) && openedByEmployeeId > 0 ? openedByEmployeeId : null,
+        openedByEmployeeName: reopenedCashier.funcionario_abertura_nome ?? null,
+        reopenedAt: reopenedCashier.reaberto_em,
+        reopenedByEmployeeId: employee?.id ?? reopenedCashier.funcionario_reabertura_id ?? null,
+        reopenedByEmployeeName: employee?.name ?? reopenedCashier.funcionario_reabertura_nome ?? null
+      };
+
+      setSession(reopenedSession);
+      setCartItems([]);
+      setSales(Array.isArray(response.vendas) ? response.vendas : []);
+      setExpenses(Array.isArray(response.despesas) ? response.despesas : []);
+      setAgreementReceipts((currentReceipts) =>
+        mergeAgreementReceipts(currentReceipts, Array.isArray(response.recebimentos_convenio) ? response.recebimentos_convenio : [])
+      );
+      setCommands([]);
+      setCommandEditor(null);
+      setCommandNameRequest(null);
+      setCommandDeleteRequest(null);
+      setCommandPaymentRequest(null);
+      setSelectedSale(null);
+      setView("sale");
+      setIsReopenCashierOpen(false);
+      updateBillingStatus(response.billing_status ?? billingStatusRef.current);
+      onSystemMessage(
+        employee
+          ? `Turno ${reopenedSession.shiftNumber} reaberto por ${employee.name}.`
+          : `Turno ${reopenedSession.shiftNumber} reaberto.`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível reabrir o caixa.";
+
+      setReopenCashierError({
+        title: "Não foi possível reabrir o caixa",
+        message
+      });
+      setIsReopenCashierOpen(true);
+      onSystemMessage(message);
+    } finally {
+      setReopeningCashierId(null);
+    }
   }
 
   async function getShiftSummaryPrinterName() {
@@ -6425,8 +6751,10 @@ export function DesktopCashierFlow({
     }
 
     const store = getLocalPdvStore();
+    const printJobId = `resumo-turno-${state.snapshot.session.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     shiftSummaryPrintingLockRef.current = true;
+    activeShiftSummaryPrintJobRef.current = printJobId;
     setIsShiftSummaryPrinting(true);
     setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
       ? {
@@ -6451,16 +6779,24 @@ export function DesktopCashierFlow({
           }
         : current);
       onSystemMessage(`Resumo do turno não impresso: ${message}`);
-      shiftSummaryPrintingLockRef.current = false;
-      setIsShiftSummaryPrinting(false);
+      if (activeShiftSummaryPrintJobRef.current === printJobId) {
+        activeShiftSummaryPrintJobRef.current = null;
+        shiftSummaryPrintingLockRef.current = false;
+        setIsShiftSummaryPrinting(false);
+      }
       return;
     }
 
     try {
       const result: PrintShiftSummaryResult = await store.printShiftSummary({
         documentKey: state.snapshot.session.id,
+        printJobId,
         payload: state.payload
       });
+
+      if (activeShiftSummaryPrintJobRef.current !== printJobId) {
+        return;
+      }
 
       setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
         ? {
@@ -6476,6 +6812,10 @@ export function DesktopCashierFlow({
         : current);
       onSystemMessage(`Resumo do turno enviado para ${result.printer}.`);
     } catch (error) {
+      if (activeShiftSummaryPrintJobRef.current !== printJobId) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : "Não foi possível imprimir o resumo do turno.";
 
       setShiftSummaryPrintModal(current => current?.snapshot.session.id === state.snapshot.session.id
@@ -6489,8 +6829,11 @@ export function DesktopCashierFlow({
         : current);
       onSystemMessage(`Não foi possível imprimir o resumo do turno: ${message}`);
     } finally {
-      shiftSummaryPrintingLockRef.current = false;
-      setIsShiftSummaryPrinting(false);
+      if (activeShiftSummaryPrintJobRef.current === printJobId) {
+        activeShiftSummaryPrintJobRef.current = null;
+        shiftSummaryPrintingLockRef.current = false;
+        setIsShiftSummaryPrinting(false);
+      }
     }
   }
 
@@ -6524,6 +6867,37 @@ export function DesktopCashierFlow({
     void runShiftSummaryPrint(shiftSummaryPrintModal, { reprint: true });
   }
 
+  function cancelShiftSummaryPrintFromModal() {
+    const printJobId = activeShiftSummaryPrintJobRef.current;
+
+    activeShiftSummaryPrintJobRef.current = null;
+    shiftSummaryPrintingLockRef.current = false;
+    setIsShiftSummaryPrinting(false);
+    setShiftSummaryPrintModal(null);
+    onSystemMessage("Cancelamento da impressão do resumo do turno solicitado.");
+
+    if (!printJobId) {
+      return;
+    }
+
+    const store = getLocalPdvStore();
+
+    if (!store?.cancelShiftSummaryPrint) {
+      return;
+    }
+
+    void store.cancelShiftSummaryPrint({ printJobId })
+      .then(result => {
+        if (!result.canceled) {
+          onSystemMessage("A impressão do resumo já havia sido finalizada antes do cancelamento.");
+        }
+      })
+      .catch(error => {
+        console.warn("Não foi possível confirmar o cancelamento da impressão do resumo do turno.", error);
+        onSystemMessage("A tela foi liberada, mas não foi possível confirmar o cancelamento na impressora.");
+      });
+  }
+
   useEffect(() => {
     let shouldIgnore = false;
     const store = getLocalPdvStore();
@@ -6551,6 +6925,9 @@ export function DesktopCashierFlow({
         const nextShiftSummarySettings = initialSettings
           ? normalizeShiftSummarySettings(initialSettings.resumo_turno)
           : normalizeShiftSummarySettings(savedState.shiftSummarySettings);
+        const nextCashierReopenSettings = initialSettings
+          ? normalizeCashierReopenSettings(initialSettings.reabrir_caixa)
+          : normalizeCashierReopenSettings(savedState.cashierReopenSettings);
         const nextExpenseSettings = initialSettings
           ? normalizeExpenseSettings(initialSettings.lancar_despesas)
           : normalizeExpenseSettings(savedState.expenseSettings);
@@ -6559,6 +6936,7 @@ export function DesktopCashierFlow({
           : normalizeEmployeeControlSettings(savedState.employeeControlSettings);
         setCommandSettings(nextCommandSettings);
         setShiftSummarySettings(nextShiftSummarySettings);
+        setCashierReopenSettings(nextCashierReopenSettings);
         setExpenseSettings(nextExpenseSettings);
         setEmployeeControlSettings(nextEmployeeControlSettings);
         setAccountFiscalSettings(initialSettings ? asRecord(initialSettings.fiscal) ?? null : null);
@@ -6693,6 +7071,7 @@ export function DesktopCashierFlow({
     catalogCategories,
     commandSettings,
     shiftSummarySettings,
+    cashierReopenSettings,
     expenseSettings,
     employeeControlSettings,
     paymentSettings
@@ -6750,7 +7129,7 @@ export function DesktopCashierFlow({
   }, [isExpensesEnabled, onSystemMessage, session, view]);
 
   useEffect(() => {
-    if (session || view !== "menu" || shiftSummaryPrintModal) {
+    if (session || view !== "menu" || shiftSummaryPrintModal || isReopenCashierOpen || employeeAuthRequest) {
       return;
     }
 
@@ -6775,7 +7154,7 @@ export function DesktopCashierFlow({
     return () => {
       window.removeEventListener("keydown", handleOpenTurnShortcut);
     };
-  }, [session, shiftSummaryPrintModal, view]);
+  }, [employeeAuthRequest, isReopenCashierOpen, session, shiftSummaryPrintModal, view]);
 
   useEffect(() => {
     if (
@@ -7094,8 +7473,11 @@ export function DesktopCashierFlow({
     setView("menu");
     onSystemMessage(employee ? `Turno fechado por ${employee.name}.` : "Turno fechado neste computador.");
     enqueueLocalEvent("turno_fechado", "turno", closedSession.id, {
+      eventId: closedSession.reopenedAt
+        ? `turno_fechado-${closedSession.id}-${closedSession.reopenedAt}`
+        : `turno_fechado-${closedSession.id}`,
       session: closedSession,
-      sales: sessionActiveSales,
+      sales: sessionRecordedSales,
       expenses: sessionExpenseRecords,
       agreementReceipts: sessionAgreementReceipts,
       totals: {
@@ -7219,6 +7601,18 @@ export function DesktopCashierFlow({
             <span className="pdv-open-turn-shortcut">{isOpenTurnBlocked ? "ASSINATURA" : "[ENTER]"}</span>
             <ArrowRight aria-hidden="true" size={19} />
           </button>
+
+          {isCashierReopenEnabled ? (
+            <button
+              className="pdv-reopen-turn-action"
+              type="button"
+              onClick={openReopenCashierModal}
+              disabled={isOpeningSession || Boolean(reopeningCashierId) || isOpenTurnBlocked}
+            >
+              <span>Reabrir caixa fechado</span>
+              <ArrowRight aria-hidden="true" size={15} />
+            </button>
+          ) : null}
         </section>
       );
     }
@@ -8406,6 +8800,17 @@ export function DesktopCashierFlow({
             onConfirm={confirmEmployeeAuth}
           />
         ) : null}
+        {isReopenCashierOpen && !employeeAuthRequest ? (
+          <ReopenCashierModal
+            cashiers={reopenableCashiers}
+            error={reopenCashierError}
+            isLoading={isReopenCashiersLoading}
+            reopeningCashierId={reopeningCashierId}
+            onClose={closeReopenCashierModal}
+            onRefresh={() => void loadReopenableCashiers()}
+            onSelect={selectReopenableCashier}
+          />
+        ) : null}
         {isSettingsOpen ? (
           <PdvSettingsModal
             appScale={appScale}
@@ -8495,6 +8900,7 @@ export function DesktopCashierFlow({
           <ShiftSummaryPrintModal
             isPrinting={isShiftSummaryPrinting}
             state={shiftSummaryPrintModal}
+            onCancel={cancelShiftSummaryPrintFromModal}
             onClose={() => setShiftSummaryPrintModal(null)}
             onPrint={printShiftSummaryFromModal}
           />
@@ -11656,11 +12062,13 @@ function FiscalEmissionModal({
 function ShiftSummaryPrintModal({
   state,
   isPrinting,
+  onCancel,
   onClose,
   onPrint
 }: {
   state: ShiftSummaryPrintModalState;
   isPrinting: boolean;
+  onCancel: () => void;
   onClose: () => void;
   onPrint: () => void;
 }) {
@@ -11696,7 +12104,12 @@ function ShiftSummaryPrintModal({
               {isPrinting ? "Reimprimindo" : "Reimprimir resumo"}
             </button>
           </>
-        ) : null
+        ) : (
+          <button className="pdv-secondary-action" type="button" onClick={onCancel}>
+            <X aria-hidden="true" size={17} />
+            Cancelar impressão
+          </button>
+        )
       }
     >
       <div className={`pdv-fiscal-emission pdv-shift-summary-print ${toneClassName}`}>

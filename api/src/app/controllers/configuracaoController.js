@@ -76,6 +76,17 @@ module.exports = {
     }
   },
 
+  async updateCashierReopen(req, res) {
+    try {
+      const reabrirCaixa = req.body?.reabrir_caixa ?? req.body?.reabrirCaixa ?? req.body;
+      const configuracao = await configuracaoSistemaService.updateCashierReopenSettings(req.user.id, reabrirCaixa);
+
+      return res.json(configuracao);
+    } catch (error) {
+      return handleConfiguracaoError(res, error, 'Erro ao atualizar configuração de reabertura do caixa.');
+    }
+  },
+
   async updateExpenses(req, res) {
     try {
       const lancarDespesas = req.body?.lancar_despesas ?? req.body?.despesas ?? req.body;

@@ -194,8 +194,12 @@ export type LocalPdvStoreBridge = {
   }): Promise<FiscalDocumentRecord[]>;
   printShiftSummary?(payload: {
     documentKey?: string;
+    printJobId?: string;
     payload: NonFiscalReceiptPayload;
   }): Promise<PrintShiftSummaryResult>;
+  cancelShiftSummaryPrint?(payload: {
+    printJobId: string;
+  }): Promise<{ ok: true; canceled: boolean }>;
   printPromissoryNote?(payload: {
     documentKey?: string;
     payload: NonFiscalReceiptPayload;

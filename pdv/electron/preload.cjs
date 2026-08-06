@@ -89,6 +89,9 @@ contextBridge.exposeInMainWorld("caixaAgilPdv", {
   printShiftSummary(payload) {
     return ipcRenderer.invoke("pdv-print:shift-summary", payload);
   },
+  cancelShiftSummaryPrint(payload) {
+    return invokeOptional("pdv-print:cancel-shift-summary", payload, { ok: true, canceled: false });
+  },
   printPromissoryNote(payload) {
     return ipcRenderer.invoke("pdv-print:promissory-note", payload);
   },

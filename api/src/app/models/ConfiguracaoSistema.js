@@ -54,6 +54,13 @@ ConfiguracaoSistema.init(
         ativo: false,
       },
     },
+    reabrir_caixa: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {
+        ativo: false,
+      },
+    },
     fiscal: {
       type: DataTypes.JSONB,
       allowNull: false,

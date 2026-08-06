@@ -55,6 +55,10 @@ type ShiftSummarySettings = {
   ativo?: boolean;
 };
 
+type CashierReopenSettings = {
+  ativo?: boolean;
+};
+
 type ExpenseSettings = {
   ativo?: boolean;
 };
@@ -66,6 +70,7 @@ type EmployeeControlSettings = {
 type ApiPdvSettings = {
   comandas?: CommandSettings | null;
   resumo_turno?: ShiftSummarySettings | null;
+  reabrir_caixa?: CashierReopenSettings | null;
   lancar_despesas?: ExpenseSettings | null;
   controle_funcionarios?: EmployeeControlSettings | null;
   formas_pagamento?: Record<string, boolean> | null;

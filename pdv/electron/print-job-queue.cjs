@@ -9,8 +9,37 @@ function normalizeOptionalText(value) {
   return normalizedValue || null;
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function createCanceledError() {
+  const error = new Error("Impressão cancelada pelo operador.");
+  error.code = "PRINT_CANCELED";
+  return error;
+}
+
+function throwIfCanceled(signal) {
+  if (signal?.aborted) {
+    throw createCanceledError();
+  }
+}
+
+function delay(ms, signal) {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  throwIfCanceled(signal);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }, ms);
+    const handleAbort = () => {
+      clearTimeout(timeout);
+      reject(createCanceledError());
+    };
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
 }
 
 function getPowerShellExecutable() {
@@ -97,12 +126,15 @@ async function waitForPrinterQueueIdle(printerName, options = {}) {
   const timeoutMs = Number(options.timeoutMs ?? 30_000);
   const pollMs = Number(options.pollMs ?? 700);
   const settleMs = Number(options.settleMs ?? 0);
+  const signal = options.signal;
   const startedAt = Date.now();
   let lastJobs = [];
 
+  throwIfCanceled(signal);
+
   if (!normalizedPrinterName || process.platform !== "win32") {
     if (settleMs > 0) {
-      await delay(settleMs);
+      await delay(settleMs, signal);
     }
 
     return {
@@ -114,11 +146,13 @@ async function waitForPrinterQueueIdle(printerName, options = {}) {
   }
 
   do {
+    throwIfCanceled(signal);
     lastJobs = await getPrinterJobs(normalizedPrinterName);
+    throwIfCanceled(signal);
 
     if (lastJobs.length === 0) {
       if (settleMs > 0) {
-        await delay(settleMs);
+        await delay(settleMs, signal);
       }
 
       return {
@@ -129,7 +163,7 @@ async function waitForPrinterQueueIdle(printerName, options = {}) {
       };
     }
 
-    await delay(pollMs);
+    await delay(pollMs, signal);
   } while (Date.now() - startedAt < timeoutMs);
 
   return {
@@ -201,17 +235,23 @@ function createPrintJobQueue() {
     const clearBeforeTimeout = options?.clearBeforeTimeout !== false;
     const clearAfterTimeout = options?.clearAfterTimeout !== false;
     const failAfterTimeout = options?.failAfterTimeout !== false;
+    const signal = options?.signal;
     const shouldWaitAfterResult = typeof options?.shouldWaitAfterResult === "function"
       ? options.shouldWaitAfterResult
       : () => afterTimeoutMs > 0;
 
+    throwIfCanceled(signal);
+
     if (printerName) {
       const beforeState = await waitForPrinterQueueIdle(printerName, {
         timeoutMs: beforeTimeoutMs,
-        settleMs: 250
+        settleMs: 250,
+        signal
       });
 
       if (beforeState.status !== "idle") {
+        throwIfCanceled(signal);
+
         if (!clearBeforeTimeout) {
           throw createQueueBusyError(printerName, beforeState, "before");
         }
@@ -220,7 +260,8 @@ function createPrintJobQueue() {
 
         const recoveredState = await waitForPrinterQueueIdle(printerName, {
           timeoutMs: 10_000,
-          settleMs: 250
+          settleMs: 250,
+          signal
         });
 
         if (recoveredState.status !== "idle") {
@@ -229,12 +270,15 @@ function createPrintJobQueue() {
       }
     }
 
+    throwIfCanceled(signal);
     const result = await task();
+    throwIfCanceled(signal);
 
     if (printerName && afterTimeoutMs > 0 && shouldWaitAfterResult(result)) {
       const afterState = await waitForPrinterQueueIdle(printerName, {
         timeoutMs: afterTimeoutMs,
-        settleMs: afterSettleMs
+        settleMs: afterSettleMs,
+        signal
       });
 
       if (afterState.status !== "idle") {
@@ -244,7 +288,8 @@ function createPrintJobQueue() {
           await clearPrinterJobs(printerName);
           await waitForPrinterQueueIdle(printerName, {
             timeoutMs: 10_000,
-            settleMs: 250
+            settleMs: 250,
+            signal
           }).catch(() => null);
         }
 
@@ -255,7 +300,7 @@ function createPrintJobQueue() {
         return attachPrintQueueWarning(result, printerName, afterState, error.message);
       }
     } else if (afterSettleMs > 0) {
-      await delay(afterSettleMs);
+      await delay(afterSettleMs, signal);
     }
 
     return result;

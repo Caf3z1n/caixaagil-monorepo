@@ -9,6 +9,8 @@ router.post('/sessao', controller.showDesktopSession);
 router.post('/suporte-remoto/config', controller.showRemoteSupportConfig);
 router.post('/suporte-remoto/status', controller.updateRemoteSupportStatus);
 router.post('/turno/previa', controller.showDesktopShiftPreview);
+router.post('/turno/pendentes-reabertura', controller.listDesktopReopenableCashiers);
+router.post('/turno/:caixaId/reabrir', controller.reopenDesktopCashier);
 router.post('/catalogo', controller.showDesktopCatalog);
 router.post('/certificado-fiscal', controller.downloadDesktopFiscalCertificate);
 router.post('/sync/push', controller.syncDesktopEvents);

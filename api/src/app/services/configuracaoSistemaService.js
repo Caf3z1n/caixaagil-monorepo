@@ -32,6 +32,10 @@ const defaultShiftSummarySettings = {
   ativo: false,
 };
 
+const defaultCashierReopenSettings = {
+  ativo: false,
+};
+
 const fiscalEnvironmentKeys = ['homologacao', 'producao'];
 const fiscalCrtPermitidos = new Set(['1', '2', '3', '4']);
 const fiscalCrtCsosn = new Set(['1', '4']);
@@ -324,6 +328,12 @@ function normalizeShiftSummarySettings(value = {}) {
       ),
       defaultShiftSummarySettings.ativo
     ),
+  };
+}
+
+function normalizeCashierReopenSettings(value = {}) {
+  return {
+    ativo: normalizeBoolean(value?.ativo, defaultCashierReopenSettings.ativo),
   };
 }
 
@@ -805,6 +815,7 @@ function sanitizeConfiguracao(configuracao, options = {}) {
     controle_funcionarios: normalizeEmployeeControlSettings(data.controle_funcionarios),
     comandas: normalizeCommandSettings(data.comandas),
     resumo_turno: normalizeShiftSummarySettings(data.resumo_turno),
+    reabrir_caixa: normalizeCashierReopenSettings(data.reabrir_caixa),
     fiscal: sanitizeFiscalSettings(fiscal, options.fiscal),
     integracoes: sanitizeIntegrationSettings(data.integracoes),
     updated_at: data.updated_at ?? data.updatedAt ?? null,
@@ -910,6 +921,7 @@ async function getOrCreateConfiguracao(usuarioId, options = {}) {
       controle_funcionarios: defaultEmployeeControlSettings,
       comandas: defaultCommandSettings,
       resumo_turno: defaultShiftSummarySettings,
+      reabrir_caixa: defaultCashierReopenSettings,
       fiscal: {},
       integracoes: defaultIntegrationSettings,
     },
@@ -997,6 +1009,16 @@ async function updateShiftSummarySettings(usuarioId, shiftSummarySettings) {
   return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
 }
 
+async function updateCashierReopenSettings(usuarioId, cashierReopenSettings) {
+  const configuracao = await getOrCreateConfiguracao(usuarioId);
+  const nextCashierReopenSettings = normalizeCashierReopenSettings(cashierReopenSettings);
+
+  configuracao.reabrir_caixa = nextCashierReopenSettings;
+  await configuracao.save();
+
+  return sanitizeConfiguracaoWithFiscalHistory(usuarioId, configuracao);
+}
+
 async function updateExpenseSettings(usuarioId, expenseSettings) {
   const configuracao = await getOrCreateConfiguracao(usuarioId);
   const nextExpenseSettings = normalizeExpenseSettings(expenseSettings);
@@ -1062,6 +1084,7 @@ async function getCnpjaToken(usuarioId) {
 }
 
 module.exports = {
+  defaultCashierReopenSettings,
   defaultCommandSettings,
   defaultEmployeeControlSettings,
   defaultExpenseSettings,
@@ -1079,6 +1102,7 @@ module.exports = {
   getFiscalRegimeFromCrt,
   getFiscalTaxRegime,
   normalizeCommandSettings,
+  normalizeCashierReopenSettings,
   normalizeEmployeeControlSettings,
   normalizeExpenseSettings,
   normalizeIntegrationSettings,
@@ -1090,6 +1114,7 @@ module.exports = {
   sanitizeFiscalSettings,
   sanitizeIntegrationSettings,
   updateCommandSettings,
+  updateCashierReopenSettings,
   updateEmployeeControlSettings,
   updateExpenseSettings,
   updateFiscalSettings,

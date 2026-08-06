@@ -15,8 +15,37 @@ function normalizeOptionalText(value) {
   return normalizedValue || null;
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function createPrintCanceledError() {
+  const error = new Error("Impressão cancelada pelo operador.");
+  error.code = "PRINT_CANCELED";
+  return error;
+}
+
+function throwIfPrintCanceled(signal) {
+  if (signal?.aborted) {
+    throw createPrintCanceledError();
+  }
+}
+
+function delay(ms, signal) {
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  throwIfPrintCanceled(signal);
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }, ms);
+    const handleAbort = () => {
+      clearTimeout(timeout);
+      reject(createPrintCanceledError());
+    };
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
 }
 
 function repairMojibakeText(value) {
@@ -244,7 +273,8 @@ function normalizeReceiptPayload(payload) {
   };
 }
 
-async function printNonFiscalReceipt(app, input) {
+async function printNonFiscalReceipt(app, input, signal) {
+  throwIfPrintCanceled(signal);
   const receiptPayload = normalizeReceiptPayload(input?.payload);
   const payload = {
     ...normalizePrinterPayload(receiptPayload),
@@ -271,11 +301,14 @@ async function printNonFiscalReceipt(app, input) {
   }
 
   try {
+    throwIfPrintCanceled(signal);
     const { stdout } = await execFileAsync(getPowerShellExecutable(), args, {
       windowsHide: true,
       maxBuffer: 1024 * 1024,
-      timeout: 120_000
+      timeout: 120_000,
+      signal
     });
+    throwIfPrintCanceled(signal);
     const parsedOutput = parsePowerShellOutput(stdout);
 
     return {
@@ -284,17 +317,28 @@ async function printNonFiscalReceipt(app, input) {
       payloadPath: savedPayload.payloadPath
     };
   } catch (error) {
+    if (signal?.aborted) {
+      throw createPrintCanceledError();
+    }
+
     throw new Error(extractExecErrorMessage(error));
   }
 }
 
 function createNonFiscalReceiptService(app, printJobQueue = null) {
-  async function printReceipt(input) {
-    const run = async () => {
-      const printedAt = new Date().toISOString();
-      const result = await printNonFiscalReceipt(app, input);
+  const activePrintJobs = new Map();
 
-      await delay(500);
+  async function printReceipt(input) {
+    const printJobId = normalizeOptionalText(input?.printJobId) || crypto.randomUUID();
+    const controller = new AbortController();
+    activePrintJobs.set(printJobId, controller);
+
+    const run = async () => {
+      throwIfPrintCanceled(controller.signal);
+      const printedAt = new Date().toISOString();
+      const result = await printNonFiscalReceipt(app, input, controller.signal);
+
+      await delay(500, controller.signal);
 
       return {
         ...result,
@@ -303,29 +347,50 @@ function createNonFiscalReceiptService(app, printJobQueue = null) {
     };
     const printerName = normalizeOptionalText(input?.payload?.printerName) || normalizeOptionalText(process.env.NON_FISCAL_PRINTER_NAME);
 
-    if (printJobQueue?.enqueuePrintJob) {
-      return printJobQueue.enqueuePrintJob({
-        printerName,
-        beforeTimeoutMs: 30_000,
-        afterTimeoutMs: 0,
-        afterSettleMs: 700
-      }, run);
+    try {
+      if (printJobQueue?.enqueuePrintJob) {
+        return await printJobQueue.enqueuePrintJob({
+          printerName,
+          beforeTimeoutMs: 30_000,
+          afterTimeoutMs: 0,
+          afterSettleMs: 700,
+          signal: controller.signal
+        }, run);
+      }
+
+      const queuedPrint = fallbackPrintQueue.then(run, run);
+      fallbackPrintQueue = queuedPrint.catch(() => {});
+
+      return await queuedPrint;
+    } finally {
+      if (activePrintJobs.get(printJobId) === controller) {
+        activePrintJobs.delete(printJobId);
+      }
+    }
+  }
+
+  function cancelPrintReceipt(input) {
+    const printJobId = normalizeOptionalText(input?.printJobId);
+    const controller = printJobId ? activePrintJobs.get(printJobId) : null;
+
+    if (!controller) {
+      return { ok: true, canceled: false };
     }
 
-    const queuedPrint = fallbackPrintQueue.then(run, run);
-    fallbackPrintQueue = queuedPrint.catch(() => {});
-
-    return queuedPrint;
+    controller.abort();
+    return { ok: true, canceled: true };
   }
 
   function registerIpc(ipcMain) {
     ipcMain.handle("pdv-print:shift-summary", (_event, payload) => printReceipt(payload));
     ipcMain.handle("pdv-printshift-summary", (_event, payload) => printReceipt(payload));
+    ipcMain.handle("pdv-print:cancel-shift-summary", (_event, payload) => cancelPrintReceipt(payload));
     ipcMain.handle("pdv-print:promissory-note", (_event, payload) => printReceipt(payload));
   }
 
   return {
     registerIpc,
+    cancelShiftSummaryPrint: cancelPrintReceipt,
     printShiftSummary: printReceipt,
     printPromissoryNote: printReceipt
   };

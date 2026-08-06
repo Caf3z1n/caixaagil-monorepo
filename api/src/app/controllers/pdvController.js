@@ -7,6 +7,7 @@ const {
   Arquivo,
   Caixa,
   ClienteConvenio,
+  ConferenciaCaixa,
   DespesaCaixa,
   Estoque,
   EventoPdv,
@@ -172,7 +173,7 @@ function getDesktopCredentials(req) {
   };
 }
 
-async function findPdvByDesktopCredentials({ credencial, dispositivoId }) {
+async function findPdvByDesktopCredentials({ credencial, dispositivoId }, options = {}) {
   if (!credencial || !dispositivoId) {
     return null;
   }
@@ -183,6 +184,7 @@ async function findPdvByDesktopCredentials({ credencial, dispositivoId }) {
       dispositivo_id: dispositivoId,
       credencial_hash: hashValue(credencial),
     },
+    ...options,
   });
 }
 
@@ -933,13 +935,60 @@ async function upsertCashierSession({ pdv, session, status, transaction }) {
   );
 }
 
+async function reconcileSupersededOpenCashiers(pdv, transaction) {
+  const openCashiers = await Caixa.findAll({
+    where: {
+      usuario_id: pdv.usuario_id,
+      pdv_id: pdv.id,
+      situacao: { [Op.in]: ['aberto', 'open'] },
+    },
+    order: [['aberto_em', 'ASC']],
+    transaction,
+    lock: transaction?.LOCK.UPDATE,
+  });
+  const activeOpenCashiers = [];
+
+  for (const openCashier of openCashiers) {
+    const supersedingCashier = await Caixa.findOne({
+      where: {
+        usuario_id: pdv.usuario_id,
+        pdv_id: pdv.id,
+        id: { [Op.ne]: openCashier.id },
+        aberto_em: { [Op.gt]: openCashier.aberto_em },
+      },
+      order: [['aberto_em', 'ASC']],
+      transaction,
+    });
+
+    if (!supersedingCashier) {
+      activeOpenCashiers.push(openCashier);
+      continue;
+    }
+
+    await openCashier.update(
+      {
+        situacao: 'fechado',
+        fechado_em: supersedingCashier.aberto_em,
+        funcionario_fechamento_id: null,
+        funcionario_fechamento_nome: null,
+      },
+      { transaction }
+    );
+  }
+
+  return activeOpenCashiers;
+}
+
 async function processCashierOpened(pdv, payload, transaction) {
-  return upsertCashierSession({
+  const cashier = await upsertCashierSession({
     pdv,
     session: payload.session,
     status: 'aberto',
     transaction,
   });
+
+  await reconcileSupersededOpenCashiers(pdv, transaction);
+  return cashier;
 }
 
 async function processCashierClosed(pdv, payload, transaction) {
@@ -2160,6 +2209,193 @@ async function getDesktopConfiguracaoSnapshot(usuarioId) {
   });
 }
 
+function toDesktopIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function sanitizeReopenableCashier(caixa) {
+  const data = caixa.get ? caixa.get({ plain: true }) : caixa;
+
+  return {
+    id: data.id,
+    data_operacao_chave: data.data_operacao_chave,
+    data_operacao_rotulo: data.data_operacao_rotulo,
+    numero_turno: normalizeShiftNumber(data.numero_turno),
+    aberto_em: toDesktopIso(data.aberto_em),
+    fechado_em: toDesktopIso(data.fechado_em),
+    funcionario_abertura_id: data.funcionario_abertura_id || null,
+    funcionario_abertura_nome: data.funcionario_abertura_nome || null,
+    funcionario_fechamento_id: data.funcionario_fechamento_id || null,
+    funcionario_fechamento_nome: data.funcionario_fechamento_nome || null,
+  };
+}
+
+function sanitizeReopenedSale(venda) {
+  const data = venda.get ? venda.get({ plain: true }) : venda;
+  const items = normalizeSaleItems(data.itens).map((item, index) => ({
+    id: String(item.produto_id || item.id || `item-${index + 1}`),
+    name: item.nome || 'Produto',
+    category: item.categoria || item.categoria_visual?.nome || 'Produtos',
+    barcode: item.codigo_barras || '',
+    ncm: '',
+    priceCents: sanitizeCents(item.preco_unitario_centavos),
+    stockQuantity: null,
+    categoryIcon: item.categoria_visual?.icone || 'package',
+    categoryColor: item.categoria_visual?.cor || '#fff0e6',
+    categoryAccent: item.categoria_visual?.accent || '#ff5a00',
+    imageUrl: item.imagem_url || null,
+    quantity: Math.max(1, Math.floor(Number(item.quantidade || 1))),
+  }));
+  const paymentMethod = normalizeKey(data.metodo_pagamento);
+
+  return {
+    id: data.id,
+    createdAt: toDesktopIso(data.registrado_em) || new Date().toISOString(),
+    sessionId: data.caixa_id || null,
+    items,
+    paymentMethod: ['dinheiro', 'pix', 'cartao', 'parcelamento', 'convenio'].includes(paymentMethod)
+      ? paymentMethod
+      : 'dinheiro',
+    totalCents: sanitizeCents(data.total_centavos),
+    originCommandTitle: data.tipo_origem === 'comanda' ? data.referencia_origem || null : null,
+    clienteConvenioId: data.cliente_convenio_id || null,
+    clientName: data.nome_cliente || null,
+    consumerDocument: data.documento_consumidor || null,
+    consumerName: data.nome_consumidor || null,
+    consumerObservation: data.observacao || null,
+    installmentPlan: data.parcelamento || null,
+    status: ['cancelada', 'cancelled', 'canceled'].includes(normalizeKey(data.situacao)) ? 'canceled' : 'completed',
+  };
+}
+
+function sanitizeReopenedExpense(despesa) {
+  const data = despesa.get ? despesa.get({ plain: true }) : despesa;
+
+  return {
+    id: data.id,
+    title: data.descricao || 'Despesa do caixa',
+    createdAt: toDesktopIso(data.registrado_em) || new Date().toISOString(),
+    updatedAt: toDesktopIso(data.updated_at || data.updatedAt),
+    amountCents: sanitizeCents(data.valor_centavos),
+    sessionId: data.caixa_id || null,
+  };
+}
+
+async function getReopenableCashiers(pdv, options = {}) {
+  const activeConferences = await ConferenciaCaixa.findAll({
+    where: {
+      usuario_id: pdv.usuario_id,
+      ativo: true,
+    },
+    attributes: ['caixa_id'],
+    transaction: options.transaction,
+  });
+  const conferredIds = activeConferences.map(conferencia => conferencia.caixa_id);
+  const closedCashiers = await Caixa.findAll({
+    where: {
+      usuario_id: pdv.usuario_id,
+      pdv_id: pdv.id,
+      ...(conferredIds.length > 0 ? { id: { [Op.notIn]: conferredIds } } : {}),
+      situacao: {
+        [Op.in]: ['fechado', 'closed'],
+      },
+    },
+    order: [
+      ['fechado_em', 'DESC'],
+      ['updated_at', 'DESC'],
+    ],
+    transaction: options.transaction,
+  });
+
+  if (closedCashiers.length === 0) {
+    return [];
+  }
+
+  return closedCashiers;
+}
+
+async function loadReopenedCashierSnapshot(pdv, caixa, transaction) {
+  const [closeEvent, storedSales, storedExpenses] = await Promise.all([
+    EventoPdv.findOne({
+      where: {
+        usuario_id: pdv.usuario_id,
+        pdv_id: pdv.id,
+        agregado_id: caixa.id,
+        tipo: 'turno_fechado',
+        status: 'processado',
+      },
+      order: [
+        ['processado_em', 'DESC'],
+        ['created_at', 'DESC'],
+      ],
+      transaction,
+    }),
+    Venda.findAll({
+      where: {
+        usuario_id: pdv.usuario_id,
+        pdv_id: pdv.id,
+        caixa_id: caixa.id,
+      },
+      order: [['registrado_em', 'ASC']],
+      transaction,
+    }),
+    DespesaCaixa.findAll({
+      where: {
+        usuario_id: pdv.usuario_id,
+        pdv_id: pdv.id,
+        caixa_id: caixa.id,
+      },
+      order: [['registrado_em', 'ASC']],
+      transaction,
+    }),
+  ]);
+  const closePayload = closeEvent?.payload && typeof closeEvent.payload === 'object' ? closeEvent.payload : {};
+  const saleById = new Map(storedSales.map(record => {
+    const sale = sanitizeReopenedSale(record);
+    return [sale.id, sale];
+  }));
+  const expenseById = new Map(storedExpenses.map(record => {
+    const expense = sanitizeReopenedExpense(record);
+    return [expense.id, expense];
+  }));
+
+  if (Array.isArray(closePayload.sales)) {
+    closePayload.sales.forEach(sale => {
+      if (sale?.id) {
+        saleById.set(sale.id, sale);
+      }
+    });
+  }
+
+  if (Array.isArray(closePayload.expenses)) {
+    closePayload.expenses.forEach(expense => {
+      if (expense?.id) {
+        expenseById.set(expense.id, expense);
+      }
+    });
+  }
+
+  return {
+    vendas: [...saleById.values()],
+    despesas: [...expenseById.values()],
+    recebimentos_convenio: Array.isArray(closePayload.agreementReceipts) ? closePayload.agreementReceipts : [],
+  };
+}
+
+function sendDesktopCashierError(res, error, fallbackMessage) {
+  if (error.status) {
+    return res.status(error.status).json({ code: error.code, message: error.message });
+  }
+
+  return res.status(500).json({ message: fallbackMessage, detail: error.message });
+}
+
 function buildFiscalFeatureBlockedSyncResponse(documentos, access) {
   const message = access.message || 'Seu plano atual nao permite emissao fiscal.';
 
@@ -2634,6 +2870,178 @@ module.exports = {
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao buscar próximo turno do PDV.', detail: error.message });
+    }
+  },
+
+  async listDesktopReopenableCashiers(req, res) {
+    try {
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req));
+
+      if (!pdv) {
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const configuracoes = await getDesktopConfiguracaoSnapshot(pdv.usuario_id);
+
+      if (!configuracoes.reabrir_caixa?.ativo) {
+        return res.status(403).json({
+          code: 'CASHIER_REOPEN_DISABLED',
+          message: 'A reabertura de caixas está desativada nas preferências do PDV.',
+        });
+      }
+
+      const caixas = await getReopenableCashiers(pdv);
+      const now = new Date();
+
+      pdv.status = 'online';
+      pdv.ultimo_acesso_em = now;
+      await pdv.save();
+
+      return res.json({
+        gerado_em: now.toISOString(),
+        caixas: caixas.map(sanitizeReopenableCashier),
+      });
+    } catch (error) {
+      return sendDesktopCashierError(res, error, 'Erro ao carregar caixas disponíveis para reabertura.');
+    }
+  },
+
+  async reopenDesktopCashier(req, res) {
+    let transaction = null;
+
+    try {
+      transaction = await sequelize.transaction();
+      const pdv = await findPdvByDesktopCredentials(getDesktopCredentials(req), {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!pdv) {
+        await transaction.rollback();
+        return res.status(401).json({ message: 'PDV não autenticado ou desvinculado.' });
+      }
+
+      const [configuracoes, billingStatus] = await Promise.all([
+        getDesktopConfiguracaoSnapshot(pdv.usuario_id),
+        getBillingStatus(pdv.usuario_id),
+      ]);
+
+      if (!configuracoes.reabrir_caixa?.ativo) {
+        await transaction.rollback();
+        return res.status(403).json({
+          code: 'CASHIER_REOPEN_DISABLED',
+          message: 'A reabertura de caixas está desativada nas preferências do PDV.',
+        });
+      }
+
+      if (isOperationalBillingBlocked(billingStatus)) {
+        await transaction.rollback();
+        return res.status(403).json({
+          code: 'SUBSCRIPTION_BLOCKED',
+          message: getBillingBlockedMessage(billingStatus),
+        });
+      }
+
+      let funcionario = null;
+
+      if (configuracoes.controle_funcionarios?.ativo) {
+        const employeeCode = String(req.body?.senha_funcionario ?? req.body?.codigo_funcionario ?? '').replace(/\D/g, '');
+
+        if (!employeeCode) {
+          await transaction.rollback();
+          return res.status(400).json({ message: 'Informe a senha do funcionário responsável pela reabertura.' });
+        }
+
+        funcionario = await Funcionario.findOne({
+          where: {
+            usuario_id: pdv.usuario_id,
+            codigo_hash: hashValue(employeeCode),
+            ativo: true,
+          },
+          transaction,
+        });
+
+        if (!funcionario) {
+          await transaction.rollback();
+          return res.status(401).json({ message: 'Senha de funcionário inválida.' });
+        }
+      }
+
+      const caixaId = normalizeText(req.params.caixaId, 64);
+      const caixa = await Caixa.findOne({
+        where: {
+          id: caixaId,
+          usuario_id: pdv.usuario_id,
+          pdv_id: pdv.id,
+          situacao: {
+            [Op.in]: ['fechado', 'closed'],
+          },
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!caixa) {
+        await transaction.rollback();
+        return res.status(404).json({ message: 'Caixa fechado não encontrado neste PDV.' });
+      }
+
+      const activeConference = await ConferenciaCaixa.findOne({
+        where: {
+          usuario_id: pdv.usuario_id,
+          caixa_id: caixa.id,
+          ativo: true,
+        },
+        transaction,
+      });
+
+      if (activeConference) {
+        await transaction.rollback();
+        return res.status(409).json({ message: 'Este caixa já foi conferido e não pode ser reaberto no PDV.' });
+      }
+
+      const activeOpenCashiers = await reconcileSupersededOpenCashiers(pdv, transaction);
+      const openCashier = activeOpenCashiers.find(item => item.id !== caixa.id);
+
+      if (openCashier) {
+        await transaction.rollback();
+        return res.status(409).json({ message: 'Já existe um caixa aberto neste PDV.' });
+      }
+
+      const snapshot = await loadReopenedCashierSnapshot(pdv, caixa, transaction);
+      const reopenedAt = new Date();
+
+      await caixa.update(
+        {
+          situacao: 'aberto',
+          fechado_em: null,
+          funcionario_fechamento_id: null,
+          funcionario_fechamento_nome: null,
+        },
+        { transaction }
+      );
+
+      pdv.status = 'online';
+      pdv.ultimo_acesso_em = reopenedAt;
+      await pdv.save({ transaction });
+      await transaction.commit();
+
+      return res.json({
+        caixa: {
+          ...sanitizeReopenableCashier(caixa),
+          reaberto_em: reopenedAt.toISOString(),
+          funcionario_reabertura_id: funcionario?.id || null,
+          funcionario_reabertura_nome: funcionario?.nome || null,
+        },
+        ...snapshot,
+        billing_status: billingStatus,
+      });
+    } catch (error) {
+      if (transaction && !transaction.finished) {
+        await transaction.rollback();
+      }
+
+      return sendDesktopCashierError(res, error, 'Erro ao reabrir caixa no PDV.');
     }
   },
 

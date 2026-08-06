@@ -171,7 +171,7 @@ internal static class Program
             "emitir-nfe" => EmitirDocumento(request, "55"),
             "emitir-nfe-contingencia" => EmitirDocumentoContingencia(request, "55"),
             "transmitir-nfe-contingencia" => TransmitirDocumentoContingencia(request, "55"),
-            "consultar-protocolo" => IntegrationPending(request, "consulta_protocolo_pendente", "Consulta de protocolo preparada para Unimake.DFe."),
+            "consultar-protocolo" => ConsultarProtocolo(request),
             "cancelar" => CancelarDocumento(request),
             "inutilizar" => InutilizarNumero(request),
             "imprimir-danfe" => PrintDanfe(request),
@@ -960,6 +960,134 @@ internal static class Program
                     tipoErro = error.GetType().Name,
                     adapter = "Unimake.DFe"
                 });
+        }
+    }
+
+    private static FiscalResponse ConsultarProtocolo(FiscalRequest request)
+    {
+        var validation = ValidateConfiguration(request);
+
+        if (!validation.Success)
+        {
+            return validation with
+            {
+                Command = request.Command,
+                FriendlyMessage = "Revise a configuração fiscal antes de consultar o protocolo."
+            };
+        }
+
+        try
+        {
+            var config = FiscalConfig.FromJson(request.Config);
+            var modelo = ResolveRequestModel(request);
+            var chave = OnlyDigits(FirstNonBlank(
+                GetString(request.Payload, "chave"),
+                GetString(request.Payload, "chaveAcesso"),
+                GetString(request.Payload, "chave_acesso")));
+
+            if (chave.Length != 44)
+            {
+                return FiscalResponse.Fail(
+                    request.Command,
+                    "consulta_protocolo_dados_invalidos",
+                    "Informe uma chave de acesso válida com 44 dígitos.",
+                    null,
+                    new
+                    {
+                        modelo,
+                        chave,
+                        mensagemOperador = "Informe uma chave de acesso válida com 44 dígitos."
+                    });
+            }
+
+            var codigoUf = GetUfCode(config.Uf);
+            var serviceConfig = BuildUnimakeFiscalServiceConfig(config, modelo, codigoUf, "1");
+            serviceConfig.Servico = Servico.NFeConsultaProtocolo;
+            object consulta = modelo == "55"
+                ? new NfeConsultaProtocolo(chave, ToUnimakeEnvironment(config.Ambiente), serviceConfig)
+                : new NfceConsultaProtocolo(chave, ToUnimakeEnvironment(config.Ambiente), serviceConfig);
+
+            ExecuteService(consulta);
+
+            var retornoXml = Convert.ToString(GetPropertyValue(consulta, "RetornoWSString"), CultureInfo.InvariantCulture);
+
+            if (string.IsNullOrWhiteSpace(retornoXml))
+            {
+                return FiscalResponse.Fail(
+                    request.Command,
+                    "consulta_protocolo_sem_retorno",
+                    "A SEFAZ não retornou a situação do documento fiscal.",
+                    null,
+                    new { modelo, chave });
+            }
+
+            var retornoDocument = new XmlDocument
+            {
+                PreserveWhitespace = true
+            };
+            retornoDocument.LoadXml(retornoXml);
+
+            var retorno = retornoDocument.SelectSingleNode("//*[local-name()='retConsSitNFe']") as XmlElement ??
+                retornoDocument.DocumentElement;
+            var infProt = retornoDocument.SelectSingleNode("//*[local-name()='protNFe']/*[local-name()='infProt']") as XmlElement;
+            var cStat = retorno is null ? 0 : ParseInt(ReadXmlChildValue(retorno, "cStat"), 0);
+            var xMotivo = retorno is null ? string.Empty : ReadXmlChildValue(retorno, "xMotivo");
+            var protocoloCStat = infProt is null ? 0 : ParseInt(ReadXmlChildValue(infProt, "cStat"), 0);
+            var protocoloMotivo = infProt is null ? string.Empty : ReadXmlChildValue(infProt, "xMotivo");
+            var protocolo = infProt is null ? string.Empty : ReadXmlChildValue(infProt, "nProt");
+            var protocoloChave = infProt is null ? string.Empty : OnlyDigits(ReadXmlChildValue(infProt, "chNFe"));
+            var localizada = infProt is not null || cStat is 100 or 101 or 110 or 124;
+            var naoLocalizada = cStat == 217;
+            var responseData = new Dictionary<string, object?>
+            {
+                ["documentId"] = GetString(request.Payload, "documentId"),
+                ["modelo"] = modelo,
+                ["chave"] = chave,
+                ["localizada"] = localizada,
+                ["cStat"] = cStat,
+                ["xMotivo"] = xMotivo,
+                ["protocoloCStat"] = protocoloCStat > 0 ? protocoloCStat : null,
+                ["protocoloMotivo"] = protocoloMotivo,
+                ["protocolo"] = protocolo,
+                ["protocoloChave"] = string.IsNullOrWhiteSpace(protocoloChave) ? null : protocoloChave,
+                ["protocoloXml"] = infProt?.ParentNode?.OuterXml,
+                ["adapter"] = "Unimake.DFe"
+            };
+
+            if (localizada)
+            {
+                return FiscalResponse.Ok(
+                    request.Command,
+                    "localizada",
+                    $"Documento fiscal localizado na SEFAZ: {cStat} - {xMotivo}",
+                    null,
+                    responseData);
+            }
+
+            if (naoLocalizada)
+            {
+                return FiscalResponse.Ok(
+                    request.Command,
+                    "nao_localizada",
+                    $"Documento fiscal não localizado na SEFAZ: {cStat} - {xMotivo}",
+                    null,
+                    responseData);
+            }
+
+            return FiscalResponse.Fail(
+                request.Command,
+                "consulta_protocolo_rejeitada",
+                BuildSefazOperatorMessage(cStat, xMotivo),
+                retornoXml,
+                responseData);
+        }
+        catch (Exception error)
+        {
+            return FiscalResponse.Fail(
+                request.Command,
+                "erro_consulta_protocolo",
+                ExtractFiscalOperatorMessage(error),
+                error.ToString());
         }
     }
 
