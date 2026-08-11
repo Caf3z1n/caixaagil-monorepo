@@ -14,6 +14,10 @@ import {
 import { ApiError, apiPost } from "@/lib/api-client";
 import { getLocalPdvStore, type PdvRemoteSupportStatus, type PdvUpdateStatus } from "@/lib/local-pdv-store";
 import { applyStoredPdvAppScale } from "@/lib/pdv-app-scale";
+import {
+  mergeSynchronizedPdvSession,
+  type SynchronizedPdvSession
+} from "@/lib/pdv-session";
 import { DesktopCashierFlow } from "./cashier-flow";
 import { CashierModal } from "./cashier-modal";
 import {
@@ -26,15 +30,7 @@ type PdvStep = "intro" | "activation" | "success";
 type AppState = "checking" | "activation" | "system";
 type ConnectivityState = "online" | "offline";
 
-type PdvSession = {
-  id: number;
-  usuario_id?: number | null;
-  identificacao: string | null;
-  nome: string;
-  status_operacional?: string;
-  ultimo_acesso_em?: string | null;
-  ultima_sincronizacao_em?: string | null;
-};
+type PdvSession = SynchronizedPdvSession;
 
 type BillingStatus = {
   fase: "regular" | "aviso" | "atrasada" | "bloqueada" | string;
@@ -288,6 +284,19 @@ export default function PdvActivationPage() {
   const handleBillingStatusChange = useCallback((status: BillingStatus | null) => {
     setInitialBillingStatus(status);
     saveBillingStatus(status);
+  }, []);
+
+  const handlePdvSessionChange = useCallback((synchronizedPdv: PdvSession) => {
+    setActivatedPdv((currentPdv) => {
+      const nextPdv = mergeSynchronizedPdvSession(currentPdv, synchronizedPdv);
+      const storedCredential = getStoredCredential();
+
+      if (nextPdv && storedCredential) {
+        saveDesktopSession(storedCredential, nextPdv);
+      }
+
+      return nextPdv;
+    });
   }, []);
 
   useLayoutEffect(() => {
@@ -963,6 +972,7 @@ export default function PdvActivationPage() {
             isRemoteSupportConfiguring={isSupportConfiguring}
             onBillingStatusChange={handleBillingStatusChange}
             onConnectivityChange={setConnectivity}
+            onPdvSessionChange={handlePdvSessionChange}
             onOpenRemoteSupport={openRemoteSupportModal}
             onSystemMessage={setSystemMessage}
             pdvIdentity={pdvIdentity}

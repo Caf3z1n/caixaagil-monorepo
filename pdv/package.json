@@ -1,7 +1,8 @@
 {
   "name": "caixaagil-pdv",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "private": true,
+  "type": "module",
   "description": "App desktop do Caixa Agil para operacao de caixa e ativacao de PDV.",
   "main": "electron/main.cjs",
   "scripts": {
@@ -15,6 +16,7 @@
     "dist:dir": "npm run build && npm run publish:fiscal-worker && node scripts/build-electron.mjs --dir",
     "release": "npm run dist",
     "start": "electron electron/main.cjs",
+    "test": "node --test --experimental-strip-types src/lib/*.test.ts tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

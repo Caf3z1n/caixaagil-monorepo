@@ -20,6 +20,7 @@ const SaldoEstoqueProduto = require('./SaldoEstoqueProduto');
 const MovimentacaoEstoque = require('./MovimentacaoEstoque');
 const Caixa = require('./Caixa');
 const Venda = require('./Venda');
+const RecebimentoVenda = require('./RecebimentoVenda');
 const Nf = require('./Nf');
 const NfEvento = require('./NfEvento');
 const ClienteConvenio = require('./ClienteConvenio');
@@ -404,6 +405,46 @@ Venda.belongsTo(Caixa, {
   as: 'caixa_recebimento',
 });
 
+Usuario.hasMany(RecebimentoVenda, {
+  foreignKey: 'usuario_id',
+  as: 'recebimentos_vendas',
+});
+
+RecebimentoVenda.belongsTo(Usuario, {
+  foreignKey: 'usuario_id',
+  as: 'usuario',
+});
+
+Pdv.hasMany(RecebimentoVenda, {
+  foreignKey: 'pdv_id',
+  as: 'recebimentos_vendas',
+});
+
+RecebimentoVenda.belongsTo(Pdv, {
+  foreignKey: 'pdv_id',
+  as: 'pdv',
+});
+
+Caixa.hasMany(RecebimentoVenda, {
+  foreignKey: 'caixa_id',
+  as: 'recebimentos_vendas',
+});
+
+RecebimentoVenda.belongsTo(Caixa, {
+  foreignKey: 'caixa_id',
+  as: 'caixa',
+});
+
+Venda.hasMany(RecebimentoVenda, {
+  foreignKey: 'venda_id',
+  as: 'recebimentos',
+});
+
+RecebimentoVenda.belongsTo(Venda, {
+  foreignKey: 'venda_id',
+  as: 'venda',
+});
+
 Usuario.hasMany(Nf, {
   foreignKey: 'usuario_id',
   as: 'notas_fiscais',
@@ -641,6 +682,7 @@ module.exports = {
   PlanoVersao,
   Pdv,
   Produto,
+  RecebimentoVenda,
   SaldoEstoqueProduto,
   Subconta,
   Usuario,

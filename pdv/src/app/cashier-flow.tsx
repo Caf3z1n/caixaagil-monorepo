@@ -91,6 +91,44 @@ import {
   saveStoredPdvAppScale,
   type PdvAppScaleValue
 } from "@/lib/pdv-app-scale";
+import type { SynchronizedPdvSession } from "@/lib/pdv-session";
+import {
+  InstallmentPlanValidationError,
+  buildInstallmentPaymentPlanV2,
+  getLocalDateKey,
+  normalizeInstallmentPaymentPlan,
+  type InstallmentAdjustmentKind
+} from "@/lib/installment-plan";
+import {
+  getActiveAgreementClients,
+  getFrontCashAgreementClients,
+  normalizeAgreementClients
+} from "@/lib/agreement-clients";
+import { buildFiscalDocumentTotals } from "@/lib/fiscal-document-totals";
+import { buildFiscalPaymentDetails } from "@/lib/fiscal-payment-details";
+import {
+  buildAgreementReceipt as buildShiftAgreementReceipt,
+  buildDownPaymentReceipt,
+  buildInstallmentReceipt,
+  getEffectiveShiftReceipts,
+  mergeShiftReceipts,
+  replaceShiftReceiptsForSession,
+  totalShiftReceipts,
+  type ShiftReceiptRecord
+} from "@/lib/shift-receipts";
+import {
+  buildReceiptAttemptEventId,
+  groupInstallmentReceiptAttempts
+} from "@/lib/receipt-event";
+import {
+  normalizeReceiptConflictReconciliation,
+  reconcileRejectedShiftReceipts
+} from "@/lib/receipt-conflict";
+import {
+  mergeInstallmentSalesSnapshot,
+  mergeReopenedSalesSnapshot
+} from "@/lib/installment-sync";
+import { getUnsyncedFinancialAggregateProtection } from "@/lib/financial-outbox";
 import { CashierModal } from "./cashier-modal";
 import { PdvScaleSurface } from "./pdv-scale-surface";
 import {
@@ -166,14 +204,44 @@ type ApiCatalogProduct = {
 };
 
 type ApiCatalogResponse = {
+  pdv?: ApiPdvIdentity | null;
   categorias: ApiCatalogCategory[];
   produtos: ApiCatalogProduct[];
   configuracoes?: ApiPdvSettings | null;
   clientes_convenio?: ApiAgreementClient[];
   recebimentos_convenio?: ApiAgreementReceipt[];
+  recebimentos?: ApiSaleReceipt[];
+  vendas_parceladas?: SaleRecord[];
+  vendas_parceladas_removidas?: ApiInstallmentSaleTombstone[];
+  vendas_parceladas_reconciliacao_truncada?: boolean;
   funcionarios?: ApiEmployee[];
   billing_status?: BillingStatus | null;
 };
+
+type ApiInstallmentSaleTombstone = {
+  id?: string | null;
+  motivo?: "cancelada" | "quitada" | "ausente" | "indisponivel" | string | null;
+  atualizado_em?: string | null;
+  venda?: SaleRecord | null;
+};
+
+type ApiSaleReceipt = {
+  id?: string | null;
+  chave_idempotencia?: string | null;
+  venda_id?: string | null;
+  caixa_id?: string | null;
+  tipo?: string | null;
+  parcela_numero?: number | null;
+  cliente_nome?: string | null;
+  valor_centavos?: number | null;
+  metodo_pagamento?: string | null;
+  recebido_em?: string | null;
+  status?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type ApiPdvIdentity = SynchronizedPdvSession;
 
 type BillingStatus = {
   fase: "regular" | "aviso" | "atrasada" | "bloqueada" | string;
@@ -250,7 +318,17 @@ type SyncPushResponse = {
   eventos: Array<{
     id: string;
     status: "processado" | "duplicado" | "erro" | string;
+    code?: string | null;
     message?: string;
+    conciliacao_recebimento?: {
+      tipo?: "parcela" | "convenio" | string | null;
+      venda_id?: string | null;
+      parcelas_rejeitadas?: number[];
+      parcelas_confirmadas?: number[];
+      recebimentos?: ApiSaleReceipt[];
+      venda_parcelada?: SaleRecord | null;
+      recebimento_convenio?: ApiAgreementReceipt | null;
+    } | null;
   }>;
 };
 
@@ -311,6 +389,7 @@ type ReopenedCashierResponse = {
   vendas: SaleRecord[];
   despesas: CashExpenseRecord[];
   recebimentos_convenio: AgreementReceiptRecord[];
+  recebimentos?: ApiSaleReceipt[];
   billing_status?: BillingStatus | null;
 };
 
@@ -512,6 +591,7 @@ type ShiftSummaryPrintSnapshot = {
   sales: SaleRecord[];
   expenses: CashExpenseRecord[];
   agreementReceipts: AgreementReceiptRecord[];
+  receipts: ShiftReceiptRecord[];
   salesByPayment: PaymentBreakdownItem[];
   totals: {
     salesCents: number;
@@ -565,6 +645,7 @@ type LocalCashierState = {
   employees?: EmployeeRecord[];
   agreementClients?: AgreementClient[];
   agreementReceipts?: AgreementReceiptRecord[];
+  receipts?: ShiftReceiptRecord[];
   catalogProducts: Product[];
   catalogCategories: ProductCategory[];
   commandSettings?: CommandSettings;
@@ -590,6 +671,7 @@ type DesktopCashierFlowProps = {
   systemMessage?: string;
   onBillingStatusChange?: (status: BillingStatus | null) => void;
   onConnectivityChange: (state: ConnectivityState) => void;
+  onPdvSessionChange?: (pdv: ApiPdvIdentity) => void;
   onOpenRemoteSupport?: () => void;
   onSystemMessage: (message: string) => void;
 };
@@ -637,12 +719,16 @@ const categoryIconMap: Record<string, LucideIcon> = {
   wrench: Wrench
 };
 
-const paymentOptions: Array<{
+type PaymentOption = {
   id: PaymentMethod;
   label: string;
   description: string;
   icon: LucideIcon;
-}> = [
+};
+
+type ReceiptPaymentOption = Omit<PaymentOption, "id"> & { id: ReceiptPaymentMethod };
+
+const paymentOptions: PaymentOption[] = [
   { id: "dinheiro", label: "Dinheiro", description: "Calcula troco antes de concluir.", icon: Banknote },
   { id: "pix", label: "Pix", description: "Recebimento por QR Code.", icon: QrCode },
   { id: "cartao", label: "Cartão", description: "Recebimento na maquininha.", icon: CreditCard },
@@ -756,14 +842,6 @@ type StoredIgnoredSyncFailures = {
 
 function createId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-}
-
-function getLocalDateKey(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-
-  return `${year}-${month}-${day}`;
 }
 
 function getDailyShiftSequenceKey(scope: string) {
@@ -981,7 +1059,7 @@ function formatDateTime(value: string) {
   return dateTimeFormatter.format(new Date(value));
 }
 
-const receiptLineWidth = 34;
+const receiptLineWidth = 32;
 const receiptPreferredPrinterPatterns = ["TANCA", "POS-", "EPSON TM", "BEMATECH", "ELGIN", "DARUMA", "TERMICA", "THERMAL"];
 
 function compactReceiptText(value: unknown) {
@@ -999,65 +1077,6 @@ function formatDateOnly(value: string) {
   }
 
   return shortDateFormatter.format(date);
-}
-
-function addMonthsKeepingDay(date: Date, months: number) {
-  const nextDate = new Date(date);
-  const originalDay = nextDate.getDate();
-
-  nextDate.setMonth(nextDate.getMonth() + months);
-
-  if (nextDate.getDate() !== originalDay) {
-    nextDate.setDate(0);
-  }
-
-  return nextDate;
-}
-
-function splitCentsInInstallments(totalCents: number, installmentCount: number) {
-  const safeCount = Math.max(1, Math.floor(installmentCount));
-  const baseValue = Math.floor(totalCents / safeCount);
-  const remainder = totalCents - baseValue * safeCount;
-
-  return Array.from({ length: safeCount }, (_, index) => baseValue + (index < remainder ? 1 : 0));
-}
-
-function buildInstallmentPaymentPlan({
-  installmentCount,
-  adjustmentPercent,
-  originalTotalCents,
-  customerName,
-  observation,
-  saleDate = new Date()
-}: {
-  installmentCount: number;
-  adjustmentPercent: number;
-  originalTotalCents: number;
-  customerName?: string;
-  observation?: string;
-  saleDate?: Date;
-}): InstallmentPaymentPlan {
-  const safeInstallmentCount = Math.max(2, Math.min(12, Math.floor(installmentCount)));
-  const safeAdjustmentPercent = Math.max(-100, Math.min(100, Math.round(adjustmentPercent)));
-  const adjustmentCents = Math.round(originalTotalCents * (safeAdjustmentPercent / 100));
-  const adjustedTotalCents = Math.max(0, originalTotalCents + adjustmentCents);
-  const installmentValues = splitCentsInInstallments(adjustedTotalCents, safeInstallmentCount);
-
-  return {
-    installmentCount: safeInstallmentCount,
-    adjustmentPercent: safeAdjustmentPercent,
-    originalTotalCents,
-    adjustmentCents,
-    adjustedTotalCents,
-    customerName: compactReceiptText(customerName).slice(0, 120) || null,
-    observation: compactReceiptText(observation).slice(0, 1000) || null,
-    entries: installmentValues.map((amountCents, index) => ({
-      number: index + 1,
-      dueDate: getLocalDateKey(addMonthsKeepingDay(saleDate, index)),
-      amountCents,
-      paid: false
-    }))
-  };
 }
 
 function buildReceiptLine(label: string, value: string) {
@@ -1207,19 +1226,43 @@ function getShiftSummaryCompanyLines(fiscalSettings: Record<string, unknown> | n
 function buildShiftSummaryTotalsSection(snapshot: ShiftSummaryPrintSnapshot) {
   const salesTotalCents = snapshot.sales.reduce((total, sale) => total + sale.totalCents, 0);
   const paidSalesCents = snapshot.sales
-    .filter((sale) => sale.paymentMethod !== "convenio")
+    .filter((sale) =>
+      sale.paymentMethod !== "convenio" &&
+      !(sale.paymentMethod === "parcelamento" && Number(sale.installmentPlan?.schemaVersion) >= 2)
+    )
     .reduce((total, sale) => total + sale.totalCents, 0);
   const agreementLaunchCents = snapshot.sales
     .filter((sale) => sale.paymentMethod === "convenio")
     .reduce((total, sale) => total + sale.totalCents, 0);
-  const agreementReceiptCents = snapshot.agreementReceipts.reduce((total, receipt) => total + receipt.totalCents, 0);
+  const receiptCents = totalShiftReceipts(snapshot.receipts);
+  const agreementReceiptCents = snapshot.receipts
+    .filter((receipt) => receipt.kind === "convenio")
+    .reduce((total, receipt) => total + receipt.amountCents, 0);
+  const installmentReceiptCents = snapshot.receipts
+    .filter((receipt) => receipt.kind === "parcela")
+    .reduce((total, receipt) => total + receipt.amountCents, 0);
+  const downPaymentReceiptCents = snapshot.receipts
+    .filter((receipt) => receipt.kind === "entrada")
+    .reduce((total, receipt) => total + receipt.amountCents, 0);
   const itemsCount = snapshot.sales.reduce((total, sale) => total + getCartQuantity(sale.items), 0);
   const lines = [
     buildReceiptLine("Entradas no caixa", formatCurrency(snapshot.totals.salesCents)),
     buildReceiptLine("Vendas do turno", formatCurrency(salesTotalCents)),
     buildReceiptLine("Vendas recebidas", formatCurrency(paidSalesCents)),
-    buildReceiptLine("Recebimentos convênio", formatCurrency(agreementReceiptCents))
+    buildReceiptLine("Recebimentos", formatCurrency(receiptCents))
   ];
+
+  if (downPaymentReceiptCents > 0) {
+    lines.push(buildReceiptLine("Entradas parceladas", formatCurrency(downPaymentReceiptCents)));
+  }
+
+  if (installmentReceiptCents > 0) {
+    lines.push(buildReceiptLine("Parcelas recebidas", formatCurrency(installmentReceiptCents)));
+  }
+
+  if (agreementReceiptCents > 0) {
+    lines.push(buildReceiptLine("Recebimentos convênio", formatCurrency(agreementReceiptCents)));
+  }
 
   if (snapshot.totals.expensesCents > 0) {
     lines.push(buildReceiptLine("Despesas do caixa", formatCurrency(snapshot.totals.expensesCents)));
@@ -1235,6 +1278,35 @@ function buildShiftSummaryTotalsSection(snapshot: ShiftSummaryPrintSnapshot) {
   );
 
   return lines.join("\n");
+}
+
+function buildShiftSummaryReceiptsSection(snapshot: ShiftSummaryPrintSnapshot) {
+  if (snapshot.receipts.length === 0) {
+    return "Nenhum recebimento registrado neste turno.";
+  }
+
+  const lines = snapshot.receipts.map((receipt) => {
+    const kindLabel = getShiftReceiptKindLabel(receipt);
+    const clientLabel = compactReceiptText(receipt.clientName).slice(0, 18) || "Não informado";
+
+    return buildReceiptLine(`${kindLabel} · ${clientLabel}`, formatCurrency(receipt.amountCents));
+  });
+
+  lines.push(buildReceiptLine("Total recebimentos", formatCurrency(totalShiftReceipts(snapshot.receipts))));
+
+  return lines.join("\n");
+}
+
+function getShiftReceiptKindLabel(receipt: Pick<ShiftReceiptRecord, "kind" | "installmentNumber">) {
+  if (receipt.kind === "entrada") {
+    return "Entrada";
+  }
+
+  if (receipt.kind === "convenio") {
+    return "Convênio";
+  }
+
+  return `Parcela${receipt.installmentNumber ? ` ${receipt.installmentNumber}` : ""}`;
 }
 
 function buildShiftSummaryPaymentSection(snapshot: ShiftSummaryPrintSnapshot) {
@@ -1349,6 +1421,11 @@ function buildShiftSummaryReceiptPayload({
         title: "Entradas por forma",
         kind: "preformatted",
         content: buildShiftSummaryPaymentSection(snapshot)
+      },
+      {
+        title: "Recebimentos",
+        kind: "preformatted",
+        content: buildShiftSummaryReceiptsSection(snapshot)
       },
       {
         title: "Despesas do caixa",
@@ -1654,12 +1731,6 @@ function getProductFiscalBlockMessage(product: Pick<Product, "fiscal" | "name" |
   return `${product.name} ${formatProductFiscalIssues(issues).toLocaleLowerCase("pt-BR")}.`;
 }
 
-function normalizeAgreementClients(clients: AgreementClient[]) {
-  return clients
-    .filter((client) => Number.isFinite(client.id) && client.id > 0 && client.active === true)
-    .sort((first, second) => first.name.localeCompare(second.name, "pt-BR"));
-}
-
 function mapEmployee(employee: ApiEmployee): EmployeeRecord {
   return {
     id: Number(employee.id),
@@ -1775,6 +1846,47 @@ function mapAgreementReceipt(receipt: ApiAgreementReceipt): AgreementReceiptReco
   };
 }
 
+function mapSaleReceipt(receipt: ApiSaleReceipt): ShiftReceiptRecord | null {
+  const kind = receipt.tipo === "entrada" || receipt.tipo === "parcela" || receipt.tipo === "convenio"
+    ? receipt.tipo
+    : null;
+  const paymentMethod = receipt.metodo_pagamento === "dinheiro" ||
+    receipt.metodo_pagamento === "pix" ||
+    receipt.metodo_pagamento === "cartao"
+    ? receipt.metodo_pagamento
+    : null;
+  const status = receipt.status === "cancelado" || receipt.status === "estornado"
+    ? receipt.status
+    : "efetivado";
+  const saleId = compactReceiptText(receipt.venda_id);
+  const sessionId = compactReceiptText(receipt.caixa_id);
+  const receivedAt = compactReceiptText(receipt.recebido_em);
+  const sourceId = compactReceiptText(receipt.id ?? receipt.chave_idempotencia);
+  const id = kind === "parcela" && Number(receipt.parcela_numero) > 0
+    ? `${saleId}:parcela:${Math.floor(Number(receipt.parcela_numero))}`
+    : kind
+      ? `${saleId}:${kind}`
+      : sourceId;
+
+  if (!sourceId || !id || !saleId || !sessionId || !kind || !paymentMethod || !receivedAt) {
+    return null;
+  }
+
+  return {
+    id,
+    saleId,
+    sessionId,
+    kind,
+    clientName: compactReceiptText(receipt.cliente_nome) || "Cliente não informado",
+    amountCents: normalizeNumber(receipt.valor_centavos),
+    paymentMethod,
+    receivedAt,
+    revisionAt: compactReceiptText(receipt.updated_at ?? receipt.created_at ?? receipt.recebido_em),
+    installmentNumber: receipt.parcela_numero ?? null,
+    status
+  };
+}
+
 function mergeCartItemsWithCatalog(items: CartItem[], products: Product[]) {
   if (items.length === 0 || products.length === 0) {
     return items;
@@ -1796,7 +1908,11 @@ function mergeCartItemsWithCatalog(items: CartItem[], products: Product[]) {
   });
 }
 
-function mergeAgreementReceipts(currentReceipts: AgreementReceiptRecord[], remoteReceipts: AgreementReceiptRecord[]) {
+function mergeAgreementReceipts(
+  currentReceipts: AgreementReceiptRecord[],
+  remoteReceipts: AgreementReceiptRecord[],
+  protectedReceiptIds: ReadonlySet<string> = new Set<string>()
+) {
   const receiptById = new Map<string, AgreementReceiptRecord>();
 
   for (const receipt of remoteReceipts) {
@@ -1804,7 +1920,7 @@ function mergeAgreementReceipts(currentReceipts: AgreementReceiptRecord[], remot
   }
 
   for (const receipt of currentReceipts) {
-    if (receipt.status === "pago") {
+    if (protectedReceiptIds.has(receipt.id)) {
       const remoteReceipt = receiptById.get(receipt.id);
 
       receiptById.set(receipt.id, {
@@ -1823,6 +1939,38 @@ function mergeAgreementReceipts(currentReceipts: AgreementReceiptRecord[], remot
   }
 
   return Array.from(receiptById.values()).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function mergeRemoteInstallmentSales(
+  currentSales: SaleRecord[],
+  remoteSales: SaleRecord[],
+  options: {
+    protectedSaleIds?: ReadonlySet<string>;
+    tombstones?: readonly ApiInstallmentSaleTombstone[];
+  } = {}
+) {
+  return mergeInstallmentSalesSnapshot({
+    currentSales,
+    remoteSales,
+    protectedSaleIds: options.protectedSaleIds,
+    tombstones: (options.tombstones ?? []).map((tombstone) => ({
+      id: tombstone.id,
+      reason: tombstone.motivo,
+      updatedAt: tombstone.atualizado_em,
+      sale: tombstone.venda
+    })),
+    normalizeSale: normalizeSaleInstallmentPlan
+  });
+}
+
+function normalizeSaleInstallmentPlan(sale: SaleRecord): SaleRecord {
+  if (sale.paymentMethod !== "parcelamento" || !sale.installmentPlan) {
+    return sale;
+  }
+
+  const installmentPlan = normalizeInstallmentPaymentPlan(sale.installmentPlan);
+
+  return installmentPlan ? { ...sale, installmentPlan } : sale;
 }
 
 function ProductThumbnail({
@@ -2710,6 +2858,12 @@ function isSaleCanceled(sale: Pick<SaleRecord, "status">) {
   return sale.status === "canceled";
 }
 
+function isOutstandingInstallmentSale(sale: SaleRecord) {
+  return sale.paymentMethod === "parcelamento" &&
+    !isSaleCanceled(sale) &&
+    Boolean(sale.installmentPlan?.entries.some((entry) => !isInstallmentEntryPaid(entry)));
+}
+
 function isAtOrAfter(value: string | null | undefined, threshold: string) {
   if (!value || !threshold) {
     return false;
@@ -2949,6 +3103,7 @@ export function DesktopCashierFlow({
   isRemoteSupportConfiguring = false,
   onBillingStatusChange,
   onConnectivityChange,
+  onPdvSessionChange,
   onOpenRemoteSupport,
   systemMessage,
   onSystemMessage
@@ -2957,6 +3112,7 @@ export function DesktopCashierFlow({
   const [session, setSession] = useState<CashierSession | null>(null);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [sales, setSales] = useState<SaleRecord[]>([]);
+  const salesRef = useRef<SaleRecord[]>([]);
   const [commands, setCommands] = useState<CommandRecord[]>([]);
   const [commandEditor, setCommandEditor] = useState<CommandEditorState | null>(null);
   const [commandNameRequest, setCommandNameRequest] = useState<CommandNameRequest | null>(null);
@@ -2965,6 +3121,8 @@ export function DesktopCashierFlow({
   const [expenses, setExpenses] = useState<CashExpenseRecord[]>([]);
   const [agreementClients, setAgreementClients] = useState<AgreementClient[]>([]);
   const [agreementReceipts, setAgreementReceipts] = useState<AgreementReceiptRecord[]>([]);
+  const agreementReceiptsRef = useRef<AgreementReceiptRecord[]>([]);
+  const [receipts, setReceipts] = useState<ShiftReceiptRecord[]>([]);
   const [agreementSearchQuery, setAgreementSearchQuery] = useState("");
   const [agreementReceiptDetailsClient, setAgreementReceiptDetailsClient] = useState<AgreementClient | null>(null);
   const [agreementReceiptPaymentRequest, setAgreementReceiptPaymentRequest] =
@@ -3069,6 +3227,7 @@ export function DesktopCashierFlow({
   const isFiscalSyncingRef = useRef(false);
   const isContingencyTransmittingRef = useRef(false);
   const hasLoadedRemoteDataRef = useRef(false);
+  const installmentReconciliationCursorRef = useRef(0);
 
   const updateBillingStatus = useCallback((nextStatus?: BillingStatus | null) => {
     const normalizedStatus = nextStatus ?? null;
@@ -3077,6 +3236,14 @@ export function DesktopCashierFlow({
     setBillingStatus(normalizedStatus);
     onBillingStatusChange?.(normalizedStatus);
   }, [onBillingStatusChange]);
+
+  useEffect(() => {
+    salesRef.current = sales;
+  }, [sales]);
+
+  useEffect(() => {
+    agreementReceiptsRef.current = agreementReceipts;
+  }, [agreementReceipts]);
 
   const localStoreScope = useMemo(
     () => `${shiftSequenceScope || "local"}:${deviceId || "device"}`,
@@ -3089,16 +3256,22 @@ export function DesktopCashierFlow({
   const commandEditorQuantity = getCartQuantity(commandEditor?.items ?? []);
   const paymentItems = commandPaymentRequest?.items ?? cartItems;
   const paymentTotalCents = getCartTotal(paymentItems);
-  const activeAgreementClients = useMemo(
+  const normalizedAgreementClients = useMemo(
     () => normalizeAgreementClients(agreementClients),
     [agreementClients]
+  );
+  const activeAgreementClients = useMemo(
+    () => getActiveAgreementClients(normalizedAgreementClients),
+    [normalizedAgreementClients]
   );
   const enabledPaymentOptions = useMemo(
     () => getEnabledPaymentOptions(paymentSettings).filter((option) => option.id !== "convenio" || activeAgreementClients.length > 0),
     [activeAgreementClients.length, paymentSettings]
   );
   const receiptPaymentOptions = useMemo(
-    () => enabledPaymentOptions.filter((option) => option.id !== "convenio" && option.id !== "parcelamento"),
+    () => enabledPaymentOptions.filter((option): option is ReceiptPaymentOption =>
+      option.id !== "convenio" && option.id !== "parcelamento"
+    ),
     [enabledPaymentOptions]
   );
   const isCommandsEnabled = commandSettings.ativo;
@@ -3112,8 +3285,8 @@ export function DesktopCashierFlow({
   );
   const isAgreementPaymentEnabled = paymentSettings.convenio;
   const frontCashAgreementClients = useMemo(
-    () => activeAgreementClients.filter((client) => client.allowFrontPayment),
-    [activeAgreementClients]
+    () => getFrontCashAgreementClients(normalizedAgreementClients),
+    [normalizedAgreementClients]
   );
   const pendingAgreementReceipts = useMemo(() => {
     const allowedClientIds = new Set(frontCashAgreementClients.map((client) => client.id));
@@ -3205,7 +3378,7 @@ export function DesktopCashierFlow({
     agreementReceiptPaymentRequest?.receipts.reduce((total, receipt) => total + receipt.totalCents, 0) ?? 0;
   const isInstallmentPaymentEnabled = paymentSettings.parcelamento;
   const installmentReceivableEntries = useMemo<InstallmentReceivableEntry[]>(() => {
-    const clientById = new Map(activeAgreementClients.map((client) => [client.id, client]));
+    const clientById = new Map(normalizedAgreementClients.map((client) => [client.id, client]));
     const todayKey = getLocalDateKey();
 
     return sales.flatMap((sale) => {
@@ -3232,7 +3405,7 @@ export function DesktopCashierFlow({
         overdue: isInstallmentEntryOverdue(entry, todayKey)
       }));
     });
-  }, [activeAgreementClients, sales]);
+  }, [normalizedAgreementClients, sales]);
   const pendingInstallmentEntries = useMemo(
     () => installmentReceivableEntries.filter((entry) => !isInstallmentEntryPaid(entry.entry)),
     [installmentReceivableEntries]
@@ -3333,21 +3506,95 @@ export function DesktopCashierFlow({
     () => sessionRecordedSales.filter((sale) => !isSaleCanceled(sale)),
     [sessionRecordedSales]
   );
-  const sessionPaidSales = sessionActiveSales.filter((sale) => sale.paymentMethod !== "convenio");
+  const canceledSaleIds = useMemo(
+    () => new Set(sales.filter(isSaleCanceled).map((sale) => sale.id)),
+    [sales]
+  );
+  const derivedReceipts = useMemo(() => {
+    const nextReceipts: ShiftReceiptRecord[] = [];
+
+    for (const sale of sales) {
+      const plan = sale.installmentPlan;
+
+      if (sale.paymentMethod !== "parcelamento" || !plan || isSaleCanceled(sale)) {
+        continue;
+      }
+
+      if (Number(plan.schemaVersion) >= 2 && (plan.downPaymentCents ?? 0) > 0) {
+        const downPaymentReceipt = buildDownPaymentReceipt({
+          saleId: sale.id,
+          sessionId: plan.downPaymentSessionId ?? sale.sessionId ?? "",
+          clientName: sale.clientName ?? plan.customerName,
+          amountCents: plan.downPaymentCents ?? 0,
+          paymentMethod: plan.downPaymentMethod,
+          receivedAt: plan.downPaymentPaidAt ?? sale.createdAt
+        });
+
+        if (downPaymentReceipt) {
+          nextReceipts.push(downPaymentReceipt);
+        }
+      }
+
+      for (const entry of plan.entries) {
+        if (!isInstallmentEntryPaid(entry) || entry.paymentMethod === "parcelamento") {
+          continue;
+        }
+
+        const installmentReceipt = buildInstallmentReceipt({
+          saleId: sale.id,
+          sessionId: entry.receivedSessionId ?? "",
+          clientName: sale.clientName ?? plan.customerName,
+          amountCents: entry.amountCents,
+          paymentMethod: entry.paymentMethod,
+          receivedAt: entry.paidAt ?? sale.createdAt,
+          installmentNumber: entry.number
+        });
+
+        if (installmentReceipt) {
+          nextReceipts.push(installmentReceipt);
+        }
+      }
+    }
+
+    for (const receipt of paidAgreementReceipts) {
+      const agreementReceipt = buildShiftAgreementReceipt({
+        saleId: receipt.id,
+        sessionId: receipt.receivedSessionId ?? "",
+        clientName: receipt.clientName,
+        amountCents: receipt.totalCents,
+        paymentMethod: receipt.paymentMethod,
+        receivedAt: receipt.receivedAt ?? receipt.createdAt
+      });
+
+      if (agreementReceipt) {
+        nextReceipts.push(agreementReceipt);
+      }
+    }
+
+    return nextReceipts;
+  }, [paidAgreementReceipts, sales]);
+  const sessionReceipts = useMemo(
+    () => getEffectiveShiftReceipts(mergeShiftReceipts(derivedReceipts, receipts), session?.id, canceledSaleIds),
+    [canceledSaleIds, derivedReceipts, receipts, session?.id]
+  );
+  const sessionPaidSales = sessionActiveSales.filter((sale) =>
+    sale.paymentMethod !== "convenio" &&
+    !(sale.paymentMethod === "parcelamento" && Number(sale.installmentPlan?.schemaVersion) >= 2)
+  );
   const sessionSales = sessionPaidSales.reduce((total, sale) => total + sale.totalCents, 0) +
-    sessionAgreementReceipts.reduce((total, receipt) => total + receipt.totalCents, 0);
+    totalShiftReceipts(sessionReceipts);
   const sessionSalesByPayment = paymentOptions
     .filter((option) => option.id !== "convenio")
     .map<PaymentBreakdownItem>((option) => {
       const optionSales = sessionPaidSales.filter((sale) => sale.paymentMethod === option.id);
-      const optionReceipts = sessionAgreementReceipts.filter((receipt) => receipt.paymentMethod === option.id);
+      const optionReceipts = sessionReceipts.filter((receipt) => receipt.paymentMethod === option.id);
 
       return {
         method: option.id,
         label: option.label,
         totalCents:
           optionSales.reduce((total, sale) => total + sale.totalCents, 0) +
-          optionReceipts.reduce((total, receipt) => total + receipt.totalCents, 0),
+          optionReceipts.reduce((total, receipt) => total + receipt.amountCents, 0),
         count: optionSales.length + optionReceipts.length
       };
     })
@@ -3475,6 +3722,7 @@ export function DesktopCashierFlow({
       employees,
       agreementClients,
       agreementReceipts,
+      receipts,
       catalogProducts,
       catalogCategories,
       commandSettings,
@@ -3576,10 +3824,59 @@ export function DesktopCashierFlow({
           ? eventId
           : pendingEventsByLegacyApiId.get(eventId) ?? eventId
       );
+      const receiptConflictResults = response.eventos.flatMap((event) => {
+        const conflict = normalizeReceiptConflictReconciliation<
+          ApiSaleReceipt,
+          SaleRecord,
+          ApiAgreementReceipt
+        >(event);
+
+        return conflict ? [{ event, conflict }] : [];
+      });
+      const terminalConflictEventIds = new Set(
+        receiptConflictResults.map(({ event }) => event.id)
+      );
       const syncedIds = response.eventos
-        .filter((event) => event.status === "processado" || event.status === "duplicado")
+        .filter((event) => (
+          event.status === "processado" ||
+          event.status === "duplicado" ||
+          terminalConflictEventIds.has(event.id)
+        ))
         .map((event) => resolveLocalEventId(event.id));
-      const failedEvents = response.eventos.filter((event) => event.status === "erro");
+      const failedEvents = response.eventos.filter((event) => (
+        event.status === "erro" && !terminalConflictEventIds.has(event.id)
+      ));
+      const receiptConflicts = receiptConflictResults.map(({ conflict }) => conflict);
+
+      for (const conflict of receiptConflicts) {
+        const canonicalReceipts = conflict.canonicalReceipts
+          .map(mapSaleReceipt)
+          .filter((receipt): receipt is ShiftReceiptRecord => Boolean(receipt));
+
+        setReceipts((currentReceipts) => reconcileRejectedShiftReceipts({
+          currentReceipts,
+          conflict,
+          canonicalReceipts
+        }));
+
+        if (conflict.kind === "parcela" && conflict.canonicalInstallmentSale) {
+          const canonicalSale = normalizeSaleInstallmentPlan(conflict.canonicalInstallmentSale);
+
+          setSales((currentSales) => mergeRemoteInstallmentSales(currentSales, [canonicalSale]));
+          setSelectedSale((currentSale) => currentSale?.id === canonicalSale.id ? canonicalSale : currentSale);
+          setCompletedInstallmentPayment(null);
+        }
+
+        if (conflict.kind === "convenio" && conflict.canonicalAgreementReceipt) {
+          const canonicalAgreementReceipt = mapAgreementReceipt(conflict.canonicalAgreementReceipt);
+
+          setAgreementReceipts((currentReceipts) => mergeAgreementReceipts(
+            currentReceipts,
+            [canonicalAgreementReceipt]
+          ));
+          setCompletedAgreementReceipt(null);
+        }
+      }
 
       if (syncedIds.length > 0) {
         await store.markEventsSynced({ scope: localStoreScope, eventIds: syncedIds });
@@ -3603,7 +3900,13 @@ export function DesktopCashierFlow({
       if (failedEvents.length === 0) {
         setEventSyncError("");
 
-        if (options.showMessage && syncedIds.length > 0) {
+        if (receiptConflicts.length > 0) {
+          onSystemMessage(
+            receiptConflicts.length === 1
+              ? "Recebimento conciliado: o débito já havia sido recebido em outro PDV e não foi somado a este turno."
+              : `${receiptConflicts.length} recebimentos foram conciliados porque já haviam sido realizados em outro PDV.`
+          );
+        } else if (options.showMessage && syncedIds.length > 0) {
           onSystemMessage("Sincronização enviada para a API.");
         }
       }
@@ -3632,9 +3935,9 @@ export function DesktopCashierFlow({
 
     try {
       const [pendingEvents, failedEvents] = await Promise.all([
-        store.getPendingEvents({ scope: localStoreScope, limit: 250 }),
+        store.getPendingEvents({ scope: localStoreScope, limit: 1_000 }),
         typeof store.getFailedEvents === "function"
-          ? store.getFailedEvents({ scope: localStoreScope, limit: 250 })
+          ? store.getFailedEvents({ scope: localStoreScope, limit: 1_000 })
           : Promise.resolve([] as LocalPdvStorePendingEvent[])
       ]);
 
@@ -3645,6 +3948,51 @@ export function DesktopCashierFlow({
       );
     } catch {
       return new Set<string>();
+    }
+  }, [localStoreScope]);
+
+  const getUnsyncedFinancialAggregateIds = useCallback(async () => {
+    const store = getLocalPdvStore();
+
+    if (!store?.getPendingEvents) {
+      return {
+        installmentSaleIds: new Set<string>(),
+        agreementReceiptIds: new Set<string>()
+      };
+    }
+
+    try {
+      const getFailedEvents = store.getFailedEvents;
+      const supportsFailedEvents = typeof getFailedEvents === "function";
+      const [pendingEvents, failedEvents] = await Promise.all([
+        store.getPendingEvents({ scope: localStoreScope, limit: 1_000 }),
+        supportsFailedEvents
+          ? getFailedEvents({ scope: localStoreScope, limit: 1_000 })
+          : Promise.resolve([] as LocalPdvStorePendingEvent[])
+      ]);
+
+      return getUnsyncedFinancialAggregateProtection({
+        pendingEvents,
+        failedEvents,
+        allOutstandingInstallmentSaleIds: salesRef.current
+          .filter(isOutstandingInstallmentSale)
+          .map((sale) => sale.id),
+        allPaidAgreementReceiptIds: agreementReceiptsRef.current
+          .filter((receipt) => receipt.status === "pago")
+          .map((receipt) => receipt.id),
+        forceFullProtection: !supportsFailedEvents
+      });
+    } catch {
+      // Em caso de falha de leitura da outbox, preservar todo estado financeiro
+      // local é mais seguro do que deixá-lo ser rebaixado por um snapshot remoto.
+      return {
+        installmentSaleIds: new Set(
+          salesRef.current.filter(isOutstandingInstallmentSale).map((sale) => sale.id)
+        ),
+        agreementReceiptIds: new Set(
+          agreementReceiptsRef.current.filter((receipt) => receipt.status === "pago").map((receipt) => receipt.id)
+        )
+      };
     }
   }, [localStoreScope]);
 
@@ -4049,6 +4397,43 @@ export function DesktopCashierFlow({
           }
         }
 
+        for (const sale of sales) {
+          const receivedInstallments = sale.installmentPlan?.entries.filter((entry) =>
+            isInstallmentEntryPaid(entry) &&
+            entry.paymentMethod !== "parcelamento" &&
+            entry.receivedSessionId === activeSession.id
+          ) ?? [];
+          const receiptAttempts = groupInstallmentReceiptAttempts(receivedInstallments, sale.createdAt);
+
+          for (const attempt of receiptAttempts) {
+            const installmentNumbers = attempt.entries.map((entry) => entry.number);
+
+            operations.push(
+              activeStore.enqueueEvent({
+                scope: localStoreScope,
+                eventType: "parcelamento_recebido",
+                aggregateType: "venda",
+                aggregateId: sale.id,
+                payload: {
+                  ...eventPayloadBase,
+                  eventId: buildReceiptAttemptEventId({
+                    eventType: "parcelamento_recebido",
+                    aggregateId: sale.id,
+                    operationParts: installmentNumbers,
+                    receivedAt: attempt.receivedAt
+                  }),
+                  session: activeSession,
+                  sale,
+                  parcelamento: sale.installmentPlan,
+                  paymentMethod: attempt.paymentMethod,
+                  receivedAt: attempt.receivedAt,
+                  entries: attempt.entries
+                }
+              })
+            );
+          }
+        }
+
         for (const expense of sessionExpenseRecords) {
           operations.push(
             activeStore.enqueueEvent({
@@ -4075,7 +4460,11 @@ export function DesktopCashierFlow({
               aggregateId: receipt.id,
               payload: {
                 ...eventPayloadBase,
-                eventId: `convenio_recebido-${receipt.id}`,
+                eventId: buildReceiptAttemptEventId({
+                  eventType: "convenio_recebido",
+                  aggregateId: receipt.id,
+                  receivedAt: receipt.receivedAt ?? receipt.createdAt
+                }),
                 session: activeSession,
                 receipt
               }
@@ -4109,6 +4498,7 @@ export function DesktopCashierFlow({
     session,
     sessionAgreementReceipts,
     sessionExpenseRecords,
+    sales,
     sessionRecordedSales,
     shiftSequenceScope,
     syncPendingOutboundQueues
@@ -4270,14 +4660,38 @@ export function DesktopCashierFlow({
     setIsCatalogSyncing(true);
 
     try {
+      const allLocalOutstandingInstallmentIds = salesRef.current
+        .filter(isOutstandingInstallmentSale)
+        .map((sale) => sale.id);
+      const reconciliationStart = allLocalOutstandingInstallmentIds.length > 0
+        ? installmentReconciliationCursorRef.current % allLocalOutstandingInstallmentIds.length
+        : 0;
+      const localOutstandingInstallmentIds = allLocalOutstandingInstallmentIds.length <= 500
+        ? allLocalOutstandingInstallmentIds
+        : Array.from(
+            { length: 500 },
+            (_, index) => allLocalOutstandingInstallmentIds[
+              (reconciliationStart + index) % allLocalOutstandingInstallmentIds.length
+            ]
+          );
+      installmentReconciliationCursorRef.current = allLocalOutstandingInstallmentIds.length > 500
+        ? (reconciliationStart + 500) % allLocalOutstandingInstallmentIds.length
+        : 0;
       const response = await apiPost<ApiCatalogResponse>("/pdvs/catalogo", {
         credencial_dispositivo: deviceCredential,
-        dispositivo_id: deviceId
+        dispositivo_id: deviceId,
+        vendas_parceladas_locais: localOutstandingInstallmentIds
       });
       const nextCategories = (response.categorias ?? []).map(mapCatalogCategory);
       const nextProducts = (response.produtos ?? []).map(mapCatalogProduct);
       const nextAgreementClients = (response.clientes_convenio ?? []).map(mapAgreementClient);
       const nextAgreementReceipts = (response.recebimentos_convenio ?? []).map(mapAgreementReceipt);
+      const nextReceipts = (response.recebimentos ?? []).map(mapSaleReceipt).filter((receipt): receipt is ShiftReceiptRecord => Boolean(receipt));
+      const nextInstallmentSales = Array.isArray(response.vendas_parceladas) ? response.vendas_parceladas : [];
+      const removedInstallmentSales = Array.isArray(response.vendas_parceladas_removidas)
+        ? response.vendas_parceladas_removidas
+        : [];
+      const protectedAggregates = await getUnsyncedFinancialAggregateIds();
       const nextEmployees = mergeEmployees((response.funcionarios ?? []).map(mapEmployee));
       const nextCommandSettings = normalizeCommandSettings(response.configuracoes?.comandas);
       const nextShiftSummarySettings = normalizeShiftSummarySettings(response.configuracoes?.resumo_turno);
@@ -4287,6 +4701,11 @@ export function DesktopCashierFlow({
       const nextPaymentSettings = normalizePaymentSettings(response.configuracoes?.formas_pagamento);
       const syncedAt = new Date().toISOString();
       let fiscalSyncMessage = "";
+      const reconciliationMessage = response.vendas_parceladas_reconciliacao_truncada
+        ? "A reconciliação de parcelamentos atingiu o limite; sincronize novamente para concluir."
+        : allLocalOutstandingInstallmentIds.length > localOutstandingInstallmentIds.length
+          ? "A reconciliação dos parcelamentos restantes continuará automaticamente."
+        : "";
 
       try {
         await synchronizeRemoteFiscalConfig(response.configuracoes?.fiscal);
@@ -4297,7 +4716,16 @@ export function DesktopCashierFlow({
       setCatalogCategories(nextCategories);
       setCatalogProducts(nextProducts);
       setAgreementClients(normalizeAgreementClients(nextAgreementClients));
-      setAgreementReceipts((currentReceipts) => mergeAgreementReceipts(currentReceipts, nextAgreementReceipts));
+      setAgreementReceipts((currentReceipts) => mergeAgreementReceipts(
+        currentReceipts,
+        nextAgreementReceipts,
+        protectedAggregates.agreementReceiptIds
+      ));
+      setReceipts((currentReceipts) => mergeShiftReceipts(currentReceipts, nextReceipts));
+      setSales((currentSales) => mergeRemoteInstallmentSales(currentSales, nextInstallmentSales, {
+        protectedSaleIds: protectedAggregates.installmentSaleIds,
+        tombstones: removedInstallmentSales
+      }));
       setEmployees(nextEmployees);
       setCommandSettings(nextCommandSettings);
       setShiftSummarySettings(nextShiftSummarySettings);
@@ -4307,6 +4735,9 @@ export function DesktopCashierFlow({
       setPaymentSettings(nextPaymentSettings);
       setAccountFiscalSettings(asRecord(response.configuracoes?.fiscal) ?? null);
       updateBillingStatus(response.billing_status ?? null);
+      if (response.pdv?.id && response.pdv.nome) {
+        onPdvSessionChange?.(response.pdv);
+      }
       setCartItems((currentItems) => mergeCartItemsWithCatalog(currentItems, nextProducts));
       setCommandEditor((currentEditor) =>
         currentEditor
@@ -4324,12 +4755,12 @@ export function DesktopCashierFlow({
       );
       setCatalogSyncedAt(syncedAt);
       setCatalogError("");
-      setCatalogSyncError(fiscalSyncMessage);
+      setCatalogSyncError([fiscalSyncMessage, reconciliationMessage].filter(Boolean).join(" "));
       onConnectivityChange("online");
       hasLoadedRemoteDataRef.current = true;
 
       if (options.showMessage) {
-        onSystemMessage(fiscalSyncMessage || "Dados do PDV atualizados pela API.");
+        onSystemMessage(fiscalSyncMessage || reconciliationMessage || "Dados do PDV atualizados pela API.");
       }
 
       return true;
@@ -4351,7 +4782,7 @@ export function DesktopCashierFlow({
         setIsCatalogLoading(false);
       }
     }
-  }, [connectivity, deviceCredential, deviceId, onConnectivityChange, onSystemMessage, synchronizeRemoteFiscalConfig, updateBillingStatus]);
+  }, [connectivity, deviceCredential, deviceId, getUnsyncedFinancialAggregateIds, onConnectivityChange, onPdvSessionChange, onSystemMessage, synchronizeRemoteFiscalConfig, updateBillingStatus]);
 
   const openProductPicker = useCallback((nextSearchQuery = "") => {
     setSearchQuery(nextSearchQuery);
@@ -4945,7 +5376,7 @@ export function DesktopCashierFlow({
     const modelConfig = getFiscalModelConfig(config, fiscalModel);
     const serieFiscal = Number(modelConfig.serie) || getPdvFiscalSeriesValue(config) || null;
     const fiscalIssuedAt = new Date().toISOString();
-    const itens = sale.items.map((item) => ({
+    const fiscalItems = sale.items.map((item) => ({
       id: item.id,
       name: item.name,
       quantity: item.quantity,
@@ -4955,6 +5386,17 @@ export function DesktopCashierFlow({
       ncm: normalizeProductNcm(item.ncm),
       fiscal: item.fiscal ?? null
     }));
+    const { itemAdjustments, ...fiscalTotals } = buildFiscalDocumentTotals(fiscalItems, sale.totalCents);
+    const fiscalPaymentDetails = buildFiscalPaymentDetails({
+      paymentMethod: sale.paymentMethod,
+      totalCents: sale.totalCents,
+      installmentPlan: sale.installmentPlan
+    });
+    const itens = fiscalItems.map((item, index) => ({
+      ...item,
+      fiscalDiscountCents: itemAdjustments[index].discountCents,
+      fiscalOtherCents: itemAdjustments[index].otherCents
+    }));
 
     return {
       vendaId: sale.id,
@@ -4963,6 +5405,8 @@ export function DesktopCashierFlow({
       numero: Number(modelConfig.proximo_numero ?? modelConfig.proximoNumero ?? modelConfig.ultimoNumero ?? modelConfig.ultimo_numero) || null,
       paymentMethod: sale.paymentMethod,
       totalCents: sale.totalCents,
+      fiscalTotals,
+      paymentDetails: fiscalPaymentDetails,
       createdAt: fiscalIssuedAt,
       issuedAt: fiscalIssuedAt,
       emittedAt: fiscalIssuedAt,
@@ -4977,6 +5421,7 @@ export function DesktopCashierFlow({
         ...sale,
         clienteConvenioTipoPessoa: clientPersonType,
         clienteConvenioDadosFiscais: clientFiscalData,
+        fiscalPaymentDetails,
         items: itens
       }
     };
@@ -5792,8 +6237,14 @@ export function DesktopCashierFlow({
     }
 
     const saleCreatedAt = new Date().toISOString();
-    const normalizedInstallmentPlan = method === "parcelamento"
-      ? markInitialInstallmentPayment(installmentPlan, saleCreatedAt, session.id)
+    const normalizedInstallmentPlan = method === "parcelamento" && installmentPlan
+      ? Number(installmentPlan.schemaVersion) >= 2
+        ? {
+            ...installmentPlan,
+            downPaymentPaidAt: (installmentPlan.downPaymentCents ?? 0) > 0 ? saleCreatedAt : null,
+            downPaymentSessionId: (installmentPlan.downPaymentCents ?? 0) > 0 ? session.id : null
+          }
+        : markInitialInstallmentPayment(installmentPlan, saleCreatedAt, session.id)
       : null;
     const nextSale: SaleRecord = {
       id: createId("venda"),
@@ -5814,6 +6265,20 @@ export function DesktopCashierFlow({
     };
 
     setSales((currentSales) => [nextSale, ...currentSales]);
+    if (normalizedInstallmentPlan && Number(normalizedInstallmentPlan.schemaVersion) >= 2 && (normalizedInstallmentPlan.downPaymentCents ?? 0) > 0) {
+      const downPaymentReceipt = buildDownPaymentReceipt({
+        saleId: nextSale.id,
+        sessionId: session.id,
+        clientName: nextSale.clientName ?? normalizedInstallmentPlan.customerName,
+        amountCents: normalizedInstallmentPlan.downPaymentCents ?? 0,
+        paymentMethod: normalizedInstallmentPlan.downPaymentMethod,
+        receivedAt: saleCreatedAt
+      });
+
+      if (downPaymentReceipt) {
+        setReceipts((currentReceipts) => mergeShiftReceipts(currentReceipts, [downPaymentReceipt]));
+      }
+    }
     if (method === "convenio" && paymentClient?.allowFrontPayment) {
       setAgreementReceipts((currentReceipts) =>
         mergeAgreementReceipts(currentReceipts, [buildAgreementReceiptFromSale(nextSale, paymentClient)])
@@ -5894,6 +6359,11 @@ export function DesktopCashierFlow({
     };
 
     setSales((currentSales) => currentSales.map((sale) => (sale.id === canceledSale.id ? nextCanceledSale : sale)));
+    setReceipts((currentReceipts) => currentReceipts.map((receipt) =>
+      receipt.saleId === canceledSale.id && receipt.status === "efetivado"
+        ? { ...receipt, status: "cancelado", revisionAt: canceledAt }
+        : receipt
+    ));
     setCatalogProducts((currentProducts) =>
       currentProducts.map((product) => {
         const soldItem = canceledSale.items.find((item) => item.id === product.id);
@@ -6002,6 +6472,21 @@ export function DesktopCashierFlow({
     setAgreementReceipts((currentReceipts) =>
       currentReceipts.map((receipt) => (selectedIds.has(receipt.id) ? nextReceiptById.get(receipt.id) ?? receipt : receipt))
     );
+    setReceipts((currentReceipts) => mergeShiftReceipts(
+      currentReceipts,
+      nextReceipts.flatMap((receipt) => {
+        const shiftReceipt = buildShiftAgreementReceipt({
+          saleId: receipt.id,
+          sessionId: session.id,
+          clientName: receipt.clientName,
+          amountCents: receipt.totalCents,
+          paymentMethod: method,
+          receivedAt
+        });
+
+        return shiftReceipt ? [shiftReceipt] : [];
+      })
+    ));
     setAgreementReceiptDetailsClient(null);
     setAgreementReceiptPaymentRequest(null);
     setIsCashPaymentOpen(false);
@@ -6020,6 +6505,11 @@ export function DesktopCashierFlow({
 
     nextReceipts.forEach((receipt) => {
       enqueueLocalEvent("convenio_recebido", "venda", receipt.id, {
+        eventId: buildReceiptAttemptEventId({
+          eventType: "convenio_recebido",
+          aggregateId: receipt.id,
+          receivedAt: receipt.receivedAt ?? receivedAt
+        }),
         session,
         receipt
       });
@@ -6105,6 +6595,22 @@ export function DesktopCashierFlow({
     }
 
     setSales(nextSales);
+    setReceipts((currentReceipts) => mergeShiftReceipts(
+      currentReceipts,
+      paidEntries.flatMap((receivable) => {
+        const installmentReceipt = buildInstallmentReceipt({
+          saleId: receivable.saleId,
+          sessionId: session.id,
+          clientName: receivable.client.name,
+          amountCents: receivable.entry.amountCents,
+          paymentMethod: method,
+          receivedAt,
+          installmentNumber: receivable.entry.number
+        });
+
+        return installmentReceipt ? [installmentReceipt] : [];
+      })
+    ));
     setSelectedSale((currentSale) => currentSale ? updatedSales.get(currentSale.id) ?? currentSale : currentSale);
     setInstallmentReceiptDetailsClient(null);
     setInstallmentPaymentRequest(null);
@@ -6124,7 +6630,17 @@ export function DesktopCashierFlow({
     onSystemMessage("");
 
     completedSales.forEach((updatedSale) => {
+      const saleEntryNumbers = paidEntries
+        .filter((entry) => entry.saleId === updatedSale.id)
+        .map((entry) => entry.entry.number)
+        .sort((leftNumber, rightNumber) => leftNumber - rightNumber);
       enqueueLocalEvent("parcelamento_recebido", "venda", updatedSale.id, {
+        eventId: buildReceiptAttemptEventId({
+          eventType: "parcelamento_recebido",
+          aggregateId: updatedSale.id,
+          operationParts: saleEntryNumbers,
+          receivedAt
+        }),
         session,
         sale: updatedSale,
         parcelamento: updatedSale.installmentPlan,
@@ -6274,7 +6790,7 @@ export function DesktopCashierFlow({
 
       setSession(nextSession);
       setCartItems([]);
-      setSales([]);
+      setSales((currentSales) => currentSales.filter(isOutstandingInstallmentSale));
       setExpenses([]);
       setCommands([]);
       setCommandEditor(null);
@@ -6421,11 +6937,21 @@ export function DesktopCashierFlow({
 
       setSession(reopenedSession);
       setCartItems([]);
-      setSales(Array.isArray(response.vendas) ? response.vendas : []);
+      setSales((currentSales) => mergeReopenedSalesSnapshot({
+        retainedSales: currentSales.filter(isOutstandingInstallmentSale),
+        reopenedSales: Array.isArray(response.vendas) ? response.vendas : [],
+        reopenedSessionId: reopenedSession.id,
+        normalizeSale: normalizeSaleInstallmentPlan
+      }));
       setExpenses(Array.isArray(response.despesas) ? response.despesas : []);
       setAgreementReceipts((currentReceipts) =>
         mergeAgreementReceipts(currentReceipts, Array.isArray(response.recebimentos_convenio) ? response.recebimentos_convenio : [])
       );
+      setReceipts((currentReceipts) => replaceShiftReceiptsForSession(
+        currentReceipts,
+        (response.recebimentos ?? []).map(mapSaleReceipt).filter((receipt): receipt is ShiftReceiptRecord => Boolean(receipt)),
+        reopenedSession.id
+      ));
       setCommands([]);
       setCommandEditor(null);
       setCommandNameRequest(null);
@@ -6918,7 +7444,7 @@ export function DesktopCashierFlow({
 
         setSession(savedState.session ?? null);
         setCartItems(savedState.cartItems ?? []);
-        setSales(savedState.sales ?? []);
+        setSales((savedState.sales ?? []).map(normalizeSaleInstallmentPlan));
         const nextCommandSettings = initialSettings
           ? normalizeCommandSettings(initialSettings.comandas)
           : normalizeCommandSettings(savedState.commandSettings);
@@ -6945,6 +7471,7 @@ export function DesktopCashierFlow({
         setExpenses(savedState.expenses ?? []);
         setAgreementClients(normalizeAgreementClients(savedState.agreementClients ?? []));
         setAgreementReceipts(savedState.agreementReceipts ?? []);
+        setReceipts(mergeShiftReceipts([], savedState.receipts ?? []));
         setCatalogProducts(savedState.catalogProducts ?? []);
         setCatalogCategories(savedState.catalogCategories ?? []);
         setPaymentSettings(normalizePaymentSettings(savedState.paymentSettings));
@@ -7067,6 +7594,7 @@ export function DesktopCashierFlow({
     employees,
     agreementClients,
     agreementReceipts,
+    receipts,
     catalogProducts,
     catalogCategories,
     commandSettings,
@@ -7451,6 +7979,7 @@ export function DesktopCashierFlow({
       sales: sessionActiveSales,
       expenses: sessionExpenseRecords,
       agreementReceipts: sessionAgreementReceipts,
+      receipts: sessionReceipts,
       salesByPayment: sessionSalesByPayment,
       totals: {
         salesCents: sessionSales,
@@ -7467,7 +7996,7 @@ export function DesktopCashierFlow({
     setCommandDeleteRequest(null);
     setCommandPaymentRequest(null);
     setExpenseEditRequest(null);
-    setSales([]);
+    setSales((currentSales) => currentSales.filter(isOutstandingInstallmentSale));
     setExpenses([]);
     setIsClosingSession(false);
     setView("menu");
@@ -7480,6 +8009,7 @@ export function DesktopCashierFlow({
       sales: sessionRecordedSales,
       expenses: sessionExpenseRecords,
       agreementReceipts: sessionAgreementReceipts,
+      receipts: sessionReceipts,
       totals: {
         salesCents: sessionSales,
         expensesCents: sessionExpenses,
@@ -8731,6 +9261,7 @@ export function DesktopCashierFlow({
           <InstallmentPaymentModal
             clients={activeAgreementClients}
             originalTotalCents={paymentTotalCents}
+            paymentOptions={receiptPaymentOptions}
             onBack={() => {
               setIsInstallmentPaymentOpen(false);
               setIsPaymentOpen(true);
@@ -8779,6 +9310,7 @@ export function DesktopCashierFlow({
             session={session}
             salesTotalCents={sessionSales}
             salesByPayment={sessionSalesByPayment}
+            receipts={sessionReceipts}
             expensesTotalCents={sessionExpenses}
             salesCount={sessionActiveSales.length}
             commandsCount={openCommandsCount}
@@ -10723,12 +11255,14 @@ function CashPaymentModal({
 function InstallmentPaymentModal({
   clients,
   originalTotalCents,
+  paymentOptions: downPaymentOptions,
   onBack,
   onClose,
   onConfirm
 }: {
   clients: AgreementClient[];
   originalTotalCents: number;
+  paymentOptions: Array<{ id: ReceiptPaymentMethod; label: string; icon: LucideIcon }>;
   onBack: () => void;
   onClose: () => void;
   onConfirm: (client: AgreementClient, installmentPlan: InstallmentPaymentPlan) => void;
@@ -10737,7 +11271,15 @@ function InstallmentPaymentModal({
   const [query, setQuery] = useState("");
   const [selectedClient, setSelectedClient] = useState<AgreementClient | null>(null);
   const [installmentCount, setInstallmentCount] = useState(2);
-  const [adjustmentPercent, setAdjustmentPercent] = useState(0);
+  const [firstDueDate, setFirstDueDate] = useState(() => getLocalDateKey());
+  const [adjustmentKind, setAdjustmentKind] = useState<InstallmentAdjustmentKind>("none");
+  const [adjustmentAmount, setAdjustmentAmount] = useState(() => formatCurrencyInput("0"));
+  const [isDownPaymentOpen, setIsDownPaymentOpen] = useState(false);
+  const [downPaymentAmount, setDownPaymentAmount] = useState(() => formatCurrencyInput("0"));
+  const [downPaymentMethod, setDownPaymentMethod] = useState<ReceiptPaymentMethod>(
+    downPaymentOptions[0]?.id ?? "dinheiro"
+  );
+  const [termsError, setTermsError] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const filteredClients = useMemo(() => {
     const normalizedQuery = normalizeSearch(query);
@@ -10751,8 +11293,8 @@ function InstallmentPaymentModal({
   const [activeClientId, setActiveClientId] = useState<number | null>(filteredClients[0]?.id ?? null);
   const activeClient = filteredClients.find((client) => client.id === activeClientId) ?? filteredClients[0] ?? null;
   const installmentSelectOptions = useMemo<PdvPlatformSelectOption[]>(
-    () => Array.from({ length: 11 }, (_, index) => {
-      const option = index + 2;
+    () => Array.from({ length: 12 }, (_, index) => {
+      const option = index + 1;
 
       return {
         value: String(option),
@@ -10761,20 +11303,66 @@ function InstallmentPaymentModal({
     }),
     []
   );
-  const installmentPlan = useMemo(
-    () => buildInstallmentPaymentPlan({
-      installmentCount,
-      adjustmentPercent,
-      originalTotalCents
-    }),
-    [adjustmentPercent, installmentCount, originalTotalCents]
-  );
-  const adjustmentTone = installmentPlan.adjustmentCents > 0
+  const installmentPlanResult = useMemo(() => {
+    try {
+      return {
+        plan: buildInstallmentPaymentPlanV2({
+          installmentCount,
+          adjustmentKind,
+          adjustmentAmountCents: adjustmentKind === "none" ? 0 : parseCurrencyCents(adjustmentAmount),
+          originalTotalCents,
+          downPaymentCents: isDownPaymentOpen ? parseCurrencyCents(downPaymentAmount) : 0,
+          downPaymentMethod: isDownPaymentOpen ? downPaymentMethod : null,
+          firstDueDate,
+          customerName: selectedClient?.name
+        }),
+        error: ""
+      };
+    } catch (error) {
+      return {
+        plan: null,
+        error: error instanceof InstallmentPlanValidationError
+          ? error.message
+          : "Não foi possível calcular o parcelamento."
+      };
+    }
+  }, [
+    adjustmentAmount,
+    adjustmentKind,
+    downPaymentAmount,
+    downPaymentMethod,
+    firstDueDate,
+    installmentCount,
+    isDownPaymentOpen,
+    originalTotalCents,
+    selectedClient?.name
+  ]);
+  const installmentPlan = installmentPlanResult.plan;
+  const draftFinancialSummary = useMemo(() => {
+    const rawAdjustmentCents = adjustmentKind === "none" ? 0 : parseCurrencyCents(adjustmentAmount);
+    const signedAdjustmentCents = adjustmentKind === "discount"
+      ? -rawAdjustmentCents
+      : adjustmentKind === "interest"
+        ? rawAdjustmentCents
+        : 0;
+    const rawAdjustedTotalCents = originalTotalCents + signedAdjustmentCents;
+    const adjustedTotalCents = Number.isSafeInteger(rawAdjustedTotalCents)
+      ? Math.max(0, rawAdjustedTotalCents)
+      : 0;
+    const downPaymentCents = isDownPaymentOpen ? parseCurrencyCents(downPaymentAmount) : 0;
+
+    return {
+      adjustmentCents: signedAdjustmentCents,
+      adjustedTotalCents,
+      downPaymentCents,
+      financedBalanceCents: Math.max(0, adjustedTotalCents - downPaymentCents)
+    };
+  }, [adjustmentAmount, adjustmentKind, downPaymentAmount, isDownPaymentOpen, originalTotalCents]);
+  const adjustmentTone = adjustmentKind === "interest"
     ? "Juros"
-    : installmentPlan.adjustmentCents < 0
+    : adjustmentKind === "discount"
       ? "Desconto"
-      : "Ajuste";
-  const adjustmentPosition = `${(adjustmentPercent + 100) / 2}%`;
+      : "Sem ajuste";
 
   useEffect(() => {
     if (step === "client") {
@@ -10804,13 +11392,19 @@ function InstallmentPaymentModal({
       return;
     }
 
+    if (!installmentPlan) {
+      setTermsError(installmentPlanResult.error);
+      return;
+    }
+
+    setTermsError("");
     onConfirm(selectedClient, installmentPlan);
   }
 
   return (
     <CashierModal
       title={step === "client" ? "Cliente" : "Parcelamento"}
-      description={step === "client" ? "Selecione quem assumiu a venda parcelada." : "Defina parcelas e ajuste da venda."}
+      description={step === "client" ? "Selecione quem assumiu a venda parcelada." : "Defina vencimento, ajuste em reais, entrada e parcelas."}
       className="pdv-installment-modal"
       size="md"
       onClose={onClose}
@@ -10839,6 +11433,7 @@ function InstallmentPaymentModal({
               className="pdv-confirm-action"
               type="submit"
               form="pdv-installment-terms-form"
+              disabled={!installmentPlan}
             >
               <Check aria-hidden="true" size={17} />
               Finalizar venda
@@ -10951,67 +11546,160 @@ function InstallmentPaymentModal({
             <strong>{formatCurrency(originalTotalCents)}</strong>
           </div>
 
-          <div className="pdv-installment-select">
-            <span>Parcelas</span>
-            <PdvPlatformSelect
-              ariaLabel="Selecionar quantidade de parcelas"
-              options={installmentSelectOptions}
-              placeholder="Selecione"
-              value={String(installmentCount)}
-              onChange={(value) => setInstallmentCount(Number(value))}
-            />
+          <div className="pdv-installment-fields">
+            <div className="pdv-installment-select">
+              <span>Parcelas</span>
+              <PdvPlatformSelect
+                ariaLabel="Selecionar quantidade de parcelas"
+                options={installmentSelectOptions}
+                placeholder="Selecione"
+                value={String(installmentCount)}
+                onChange={(value) => setInstallmentCount(Number(value))}
+              />
+            </div>
+
+            <label className="pdv-installment-date">
+              <span>Data da primeira parcela</span>
+              <input
+                type="date"
+                value={firstDueDate}
+                onChange={(event) => setFirstDueDate(event.target.value)}
+              />
+            </label>
           </div>
 
-          <div className="pdv-installment-preview" aria-label="Resumo das parcelas">
-            {installmentPlan.entries.map((entry) => (
-              <span key={entry.number}>
-                <strong>{entry.number}x</strong>
-                <em>{formatDateOnly(entry.dueDate)}</em>
-                <b>{formatCurrency(entry.amountCents)}</b>
+          <section className="pdv-installment-adjustment" aria-labelledby="pdv-installment-adjustment-title">
+            <span className="pdv-installment-field-title" id="pdv-installment-adjustment-title">
+              Desconto ou juros em reais
+            </span>
+            <div className="pdv-installment-choice" role="group" aria-label="Tipo de ajuste">
+              {([
+                ["none", "Sem ajuste"],
+                ["discount", "Desconto"],
+                ["interest", "Juros/acréscimo"]
+              ] as const).map(([kind, label]) => (
+                <button
+                  aria-pressed={adjustmentKind === kind}
+                  className={adjustmentKind === kind ? "pdv-installment-choice-active" : ""}
+                  key={kind}
+                  type="button"
+                  onClick={() => setAdjustmentKind(kind)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {adjustmentKind !== "none" ? (
+              <label className="pdv-installment-money-field">
+                <span>{adjustmentKind === "discount" ? "R$ de desconto" : "R$ de juros/acréscimo"}</span>
+                <input
+                  inputMode="numeric"
+                  value={adjustmentAmount}
+                  onChange={(event) => setAdjustmentAmount(formatCurrencyInput(event.target.value))}
+                  placeholder="R$ 0,00"
+                />
+              </label>
+            ) : null}
+          </section>
+
+          <section className="pdv-installment-down-payment" aria-labelledby="pdv-installment-down-payment-title">
+            <div className="pdv-installment-down-payment-head">
+              <span>
+                <strong id="pdv-installment-down-payment-title">Entrada</strong>
+                <small>{isDownPaymentOpen ? downPaymentAmount : "R$ 0,00"}</small>
               </span>
-            ))}
-          </div>
+              <button
+                className="pdv-secondary-action"
+                type="button"
+                onClick={() => {
+                  setIsDownPaymentOpen((isOpen) => !isOpen);
+                  if (isDownPaymentOpen) {
+                    setDownPaymentAmount(formatCurrencyInput("0"));
+                  }
+                }}
+              >
+                {isDownPaymentOpen ? "Remover entrada" : "Definir entrada"}
+              </button>
+            </div>
 
-          <div
-            className="pdv-installment-range"
-            style={{ "--pdv-installment-adjustment-position": adjustmentPosition } as CSSProperties}
-          >
-            <span className="pdv-installment-range-head">
-              <strong>Desconto ou juros</strong>
-              <em>{adjustmentPercent > 0 ? `+${adjustmentPercent}%` : `${adjustmentPercent}%`}</em>
-            </span>
-            <input
-              type="range"
-              min={-100}
-              max={100}
-              step={1}
-              value={adjustmentPercent}
-              onChange={(event) => setAdjustmentPercent(Number(event.target.value))}
-            />
-            <span className="pdv-installment-range-labels" aria-hidden="true">
-              <small>Desconto</small>
-              <small>Sem ajuste</small>
-              <small>Juros</small>
-            </span>
-          </div>
+            {isDownPaymentOpen ? (
+              <div className="pdv-installment-down-payment-fields">
+                <label className="pdv-installment-money-field">
+                  <span>Valor da entrada</span>
+                  <input
+                    inputMode="numeric"
+                    value={downPaymentAmount}
+                    onChange={(event) => setDownPaymentAmount(formatCurrencyInput(event.target.value))}
+                    placeholder="R$ 0,00"
+                  />
+                </label>
+                <div className="pdv-installment-entry-methods" role="group" aria-label="Forma de pagamento da entrada">
+                  {downPaymentOptions.map((option) => {
+                    const OptionIcon = option.icon;
+
+                    return (
+                      <button
+                        aria-pressed={downPaymentMethod === option.id}
+                        className={downPaymentMethod === option.id ? "pdv-installment-entry-method-active" : ""}
+                        key={option.id}
+                        type="button"
+                        onClick={() => setDownPaymentMethod(option.id)}
+                      >
+                        <OptionIcon aria-hidden="true" size={17} />
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </section>
+
+          {(termsError || installmentPlanResult.error) ? (
+            <p className="pdv-installment-error" role="alert">{termsError || installmentPlanResult.error}</p>
+          ) : null}
 
           <div className="pdv-installment-summary" aria-label="Resumo do parcelamento">
             <span>
-              <small>Original</small>
-              <strong>{formatCurrency(installmentPlan.originalTotalCents)}</strong>
+              <small>Subtotal/original</small>
+              <strong>{formatCurrency(originalTotalCents)}</strong>
             </span>
             <span>
               <small>{adjustmentTone}</small>
               <strong>
-                {installmentPlan.adjustmentCents > 0 ? "+" : installmentPlan.adjustmentCents < 0 ? "-" : ""}
-                {formatCurrency(Math.abs(installmentPlan.adjustmentCents))}
+                {(installmentPlan?.adjustmentCents ?? draftFinancialSummary.adjustmentCents) > 0
+                  ? "+"
+                  : (installmentPlan?.adjustmentCents ?? draftFinancialSummary.adjustmentCents) < 0
+                    ? "-"
+                    : ""}
+                {formatCurrency(Math.abs(installmentPlan?.adjustmentCents ?? draftFinancialSummary.adjustmentCents))}
               </strong>
             </span>
             <span>
-              <small>Final</small>
-              <strong>{formatCurrency(installmentPlan.adjustedTotalCents)}</strong>
+              <small>Entrada</small>
+              <strong>{formatCurrency(installmentPlan?.downPaymentCents ?? draftFinancialSummary.downPaymentCents)}</strong>
+            </span>
+            <span>
+              <small>Saldo parcelado</small>
+              <strong>{formatCurrency(installmentPlan?.financedBalanceCents ?? draftFinancialSummary.financedBalanceCents)}</strong>
+            </span>
+            <span>
+              <small>Total final</small>
+              <strong>{formatCurrency(installmentPlan?.adjustedTotalCents ?? draftFinancialSummary.adjustedTotalCents)}</strong>
             </span>
           </div>
+
+          {installmentPlan ? (
+            <div className="pdv-installment-preview" aria-label="Resumo das parcelas">
+              {installmentPlan.entries.map((entry) => (
+                <span key={entry.number}>
+                  <strong>{entry.number}x</strong>
+                  <em>{formatDateOnly(entry.dueDate)}</em>
+                  <b>{formatCurrency(entry.amountCents)}</b>
+                </span>
+              ))}
+            </div>
+          ) : null}
         </form>
       )}
     </CashierModal>
@@ -11805,6 +12493,7 @@ function CloseSessionModal({
   session,
   salesTotalCents,
   salesByPayment,
+  receipts,
   expensesTotalCents,
   salesCount,
   commandsCount,
@@ -11815,6 +12504,7 @@ function CloseSessionModal({
   session: CashierSession;
   salesTotalCents: number;
   salesByPayment: PaymentBreakdownItem[];
+  receipts: ShiftReceiptRecord[];
   expensesTotalCents: number;
   salesCount: number;
   commandsCount: number;
@@ -11826,6 +12516,7 @@ function CloseSessionModal({
   const expectedCashCents = Math.max(cashSalesCents - expensesTotalCents, 0);
   const hasBlockingWork = commandsCount > 0 || pendingSaleItemsCount > 0;
   const salesLabel = `${salesCount} ${salesCount === 1 ? "venda" : "vendas"}`;
+  const receiptsTotalCents = totalShiftReceipts(receipts);
 
   return (
     <CashierModal
@@ -11859,10 +12550,32 @@ function CloseSessionModal({
             </span>
             <strong>{formatDateTime(session.openedAt)}</strong>
           </div>
+          <div className="pdv-close-ledger-row pdv-close-receipts-row">
+            <span>
+              <HandCoins aria-hidden="true" size={17} />
+              Recebimentos
+            </span>
+            <strong>{formatCurrency(receiptsTotalCents)}</strong>
+            <div className="pdv-close-receipts-list" aria-label="Recebimentos do turno">
+              {receipts.length > 0 ? receipts.map((receipt) => (
+                <span key={receipt.id}>
+                  <span>
+                    <b>{receipt.clientName || "Cliente não informado"}</b>
+                    <em>
+                      {getShiftReceiptKindLabel(receipt)} · {getPaymentLabel(receipt.paymentMethod)} · {formatDateTime(receipt.receivedAt)}
+                    </em>
+                  </span>
+                  <strong>{formatCurrency(receipt.amountCents)}</strong>
+                </span>
+              )) : (
+                <em className="pdv-close-receipts-empty">Nenhum recebimento registrado neste turno.</em>
+              )}
+            </div>
+          </div>
           <div className="pdv-close-ledger-row">
             <span>
               <ShoppingCart aria-hidden="true" size={17} />
-              Vendas
+              Entradas no caixa
             </span>
             <strong>{formatCurrency(salesTotalCents)}</strong>
             {salesByPayment.length > 0 ? (

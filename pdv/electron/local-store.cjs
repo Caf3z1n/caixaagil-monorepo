@@ -382,7 +382,7 @@ function createLocalPdvStore(app) {
           ORDER BY created_at ASC
           LIMIT ?
         `,
-        [scope, Math.min(Math.max(Number(limit) || 100, 1), 250)]
+        [scope, Math.min(Math.max(Number(limit) || 100, 1), 1000)]
       );
 
       return rows.map((row) => ({
@@ -512,7 +512,7 @@ function createLocalPdvStore(app) {
           ORDER BY updated_at DESC
           LIMIT ?
         `,
-        [scope, Math.min(Math.max(Number(limit) || 10, 1), 50)]
+        [scope, Math.min(Math.max(Number(limit) || 10, 1), 1000)]
       );
 
       return rows.map((row) => ({
