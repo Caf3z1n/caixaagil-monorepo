@@ -935,16 +935,18 @@ function Split-ThermalReceiptPages {
       $continuedSection = ''
     }
 
-    $continuationLines = if ($pageNumber -gt 1) {
-      @(New-ThermalContinuationLines `
+    # Preserve an actual empty array under Set-StrictMode. Assigning the output
+    # of `else { @() }` directly makes PowerShell unwrap it to $null.
+    $continuationLines = @()
+
+    if ($pageNumber -gt 1) {
+      $continuationLines = @(New-ThermalContinuationLines `
           -DocumentTitle $DocumentTitle `
           -PageNumber $pageNumber `
           -SectionTitle $continuedSection `
           -Width $Width)
     }
-    else {
-      @()
-    }
+
     $bodyCapacity = [Math]::Max(1, $safeMaxLinesPerPage - $continuationLines.Count)
     $bodyLines = New-Object 'System.Collections.Generic.List[string]'
 
