@@ -63,6 +63,10 @@ test("renderer térmico usa paginação real e DryRun sem acessar impressora", (
   assert.match(printerScript, /function Get-ThermalKeepTogetherCount\s*\{/);
   assert.match(printerScript, /\$continuationLines\s*=\s*@\(\)\s*\r?\n\s*if \(\$pageNumber -gt 1\)/);
   assert.doesNotMatch(printerScript, /\$continuationLines\s*=\s*if \(\$pageNumber -gt 1\)/);
+  assert.match(printerScript, /return \$lines\.ToArray\(\)/);
+  assert.match(printerScript, /\$bodyLines\.ToArray\(\)/);
+  assert.match(printerScript, /return \$pages\.ToArray\(\)/);
+  assert.doesNotMatch(printerScript, /@\(\$(?:lines|bodyLines|pages)\)/);
   assert.match(printerScript, /\$nextLineIsAmount\s*=\s*\$nextLine\s*-match/);
   assert.match(printerScript, /\$thermalPaginationState\s*=\s*@\{\s*pageOffset\s*=\s*0\s*\}/);
   assert.match(

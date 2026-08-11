@@ -813,7 +813,7 @@ function New-ThermalContinuationLines {
 
   Add-ThermalTextSeparator -Lines $lines -Width $Width
 
-  return @($lines)
+  return $lines.ToArray()
 }
 
 function Get-ThermalSectionTitleAtOffset {
@@ -978,7 +978,7 @@ function Split-ThermalReceiptPages {
       $sourceOffset += 1
     }
 
-    $pageLines = @($continuationLines) + @($bodyLines)
+    $pageLines = @($continuationLines) + $bodyLines.ToArray()
     [void]$pages.Add([pscustomobject]@{
         number = $pageNumber
         sourceOffset = $pageSourceOffset
@@ -989,7 +989,7 @@ function Split-ThermalReceiptPages {
     $pageNumber += 1
   }
 
-  return @($pages)
+  return $pages.ToArray()
 }
 
 function Get-ThermalPaperHeight {
