@@ -36,6 +36,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Test fiscal payment XML
+        run: dotnet run --project pdv/fiscal-worker/CaixaAgil.FiscalWorker.PaymentTests/CaixaAgil.FiscalWorker.PaymentTests.csproj --configuration Release
+
       - name: Install PDV dependencies
         run: npm --prefix pdv ci --workspaces=false
 
@@ -61,6 +64,9 @@ jobs:
           "PDV_RELEASE_VERSION=$releaseVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PDV_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PDV_INSTALLER_BASENAME=$installerBaseName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Test PDV
+        run: npm --prefix pdv test
 
       - name: Typecheck PDV
         run: npm --prefix pdv run typecheck

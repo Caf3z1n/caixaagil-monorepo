@@ -788,6 +788,214 @@ function New-ReceiptThermalText {
   return ($lines -join "`r`n")
 }
 
+function New-ThermalContinuationLines {
+  param(
+    [string]$DocumentTitle,
+    [int]$PageNumber,
+    [string]$SectionTitle = '',
+    [int]$Width = 32
+  )
+
+  $lines = New-Object 'System.Collections.Generic.List[string]'
+  $safeDocumentTitle = Normalize-RawReceiptText $DocumentTitle
+  $safeSectionTitle = Normalize-RawReceiptText $SectionTitle
+
+  if ([string]::IsNullOrWhiteSpace($safeDocumentTitle)) {
+    $safeDocumentTitle = 'COMPROVANTE'
+  }
+
+  Add-ThermalTextLine -Lines $lines -Text "$safeDocumentTitle (CONT.)" -Width $Width -Align 'center'
+  Add-ThermalTextLine -Lines $lines -Text "PAGINA $PageNumber" -Width $Width -Align 'center'
+
+  if (-not [string]::IsNullOrWhiteSpace($safeSectionTitle)) {
+    Add-ThermalTextLine -Lines $lines -Text "$safeSectionTitle (CONT.)" -Width $Width -Align 'center'
+  }
+
+  Add-ThermalTextSeparator -Lines $lines -Width $Width
+
+  return @($lines)
+}
+
+function Get-ThermalSectionTitleAtOffset {
+  param(
+    [object[]]$Lines,
+    [int]$Offset,
+    [hashtable]$SectionTitles,
+    [int]$LookAhead = 4
+  )
+
+  if ($Offset -lt 0 -or $Offset -ge $Lines.Count -or $SectionTitles.Count -eq 0) {
+    return ''
+  }
+
+  $lastIndex = [Math]::Min($Lines.Count - 1, $Offset + [Math]::Max($LookAhead, 0))
+
+  for ($index = $Offset; $index -le $lastIndex; $index++) {
+    $candidate = (Normalize-RawReceiptText $Lines[$index]).ToUpperInvariant()
+
+    if ($SectionTitles.ContainsKey($candidate)) {
+      return $candidate
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($candidate) -and $candidate -notmatch '^-+$') {
+      return ''
+    }
+  }
+
+  return ''
+}
+
+function Get-ThermalKeepTogetherCount {
+  param(
+    [object[]]$Lines,
+    [int]$Offset,
+    [hashtable]$SectionTitles,
+    [int]$Width = 32
+  )
+
+  if ($Offset -lt 0 -or $Offset -ge $Lines.Count) {
+    return 1
+  }
+
+  $remainingSourceLines = $Lines.Count - $Offset
+  $separator = '-' * $Width
+  $currentLine = Normalize-RawReceiptText $Lines[$Offset]
+
+  if (
+    [string]::IsNullOrWhiteSpace($currentLine) -and
+    $remainingSourceLines -ge 4 -and
+    (Normalize-RawReceiptText $Lines[$Offset + 1]) -eq $separator -and
+    $SectionTitles.ContainsKey((Normalize-RawReceiptText $Lines[$Offset + 2]).ToUpperInvariant()) -and
+    (Normalize-RawReceiptText $Lines[$Offset + 3]) -eq $separator
+  ) {
+    return [Math]::Min(5, $remainingSourceLines)
+  }
+
+  if (
+    $currentLine -eq $separator -and
+    $remainingSourceLines -ge 3 -and
+    $SectionTitles.ContainsKey((Normalize-RawReceiptText $Lines[$Offset + 1]).ToUpperInvariant()) -and
+    (Normalize-RawReceiptText $Lines[$Offset + 2]) -eq $separator
+  ) {
+    return [Math]::Min(4, $remainingSourceLines)
+  }
+
+  if ($remainingSourceLines -ge 2) {
+    $nextLine = Normalize-RawReceiptText $Lines[$Offset + 1]
+    $nextLineIsAmount = $nextLine -match '^[+-]?R\$\s*[\d\.,]+$'
+    $currentLineIsAmount = $currentLine -match '^[+-]?R\$\s*[\d\.,]+$'
+
+    if (-not $currentLineIsAmount -and $nextLineIsAmount) {
+      return 2
+    }
+  }
+
+  return 1
+}
+
+function Split-ThermalReceiptPages {
+  param(
+    [object[]]$Lines,
+    [string]$DocumentTitle,
+    [object[]]$SectionTitles,
+    [int]$MaxLinesPerPage = 150,
+    [int]$Width = 32
+  )
+
+  $sourceLines = @($Lines | ForEach-Object { [string]$_ })
+  if ($sourceLines.Count -eq 0) {
+    $sourceLines = @('')
+  }
+
+  $safeMaxLinesPerPage = [Math]::Max(12, $MaxLinesPerPage)
+  $normalizedSectionTitles = @{}
+
+  foreach ($sectionTitle in @($SectionTitles)) {
+    $normalizedTitle = (Normalize-RawReceiptText $sectionTitle).ToUpperInvariant()
+
+    if (-not [string]::IsNullOrWhiteSpace($normalizedTitle)) {
+      $normalizedSectionTitles[$normalizedTitle] = $true
+    }
+  }
+
+  $pages = New-Object 'System.Collections.Generic.List[object]'
+  $sourceOffset = 0
+  $pageNumber = 1
+  $activeSection = ''
+
+  while ($sourceOffset -lt $sourceLines.Count) {
+    $pageSourceOffset = $sourceOffset
+    $continuedSection = $activeSection
+    $nextSection = Get-ThermalSectionTitleAtOffset `
+      -Lines $sourceLines `
+      -Offset $sourceOffset `
+      -SectionTitles $normalizedSectionTitles
+
+    if (-not [string]::IsNullOrWhiteSpace($nextSection)) {
+      $continuedSection = ''
+    }
+
+    $continuationLines = if ($pageNumber -gt 1) {
+      @(New-ThermalContinuationLines `
+          -DocumentTitle $DocumentTitle `
+          -PageNumber $pageNumber `
+          -SectionTitle $continuedSection `
+          -Width $Width)
+    }
+    else {
+      @()
+    }
+    $bodyCapacity = [Math]::Max(1, $safeMaxLinesPerPage - $continuationLines.Count)
+    $bodyLines = New-Object 'System.Collections.Generic.List[string]'
+
+    while ($sourceOffset -lt $sourceLines.Count -and $bodyLines.Count -lt $bodyCapacity) {
+      $remainingPageLines = $bodyCapacity - $bodyLines.Count
+      $keepTogetherCount = Get-ThermalKeepTogetherCount `
+        -Lines $sourceLines `
+        -Offset $sourceOffset `
+        -SectionTitles $normalizedSectionTitles `
+        -Width $Width
+
+      if ($keepTogetherCount -gt $remainingPageLines -and $bodyLines.Count -gt 0) {
+        break
+      }
+
+      $line = [string]$sourceLines[$sourceOffset]
+      $normalizedLine = (Normalize-RawReceiptText $line).ToUpperInvariant()
+
+      if ($normalizedSectionTitles.ContainsKey($normalizedLine)) {
+        $activeSection = $normalizedLine
+      }
+
+      [void]$bodyLines.Add($line)
+      $sourceOffset += 1
+    }
+
+    if ($bodyLines.Count -eq 0) {
+      [void]$bodyLines.Add([string]$sourceLines[$sourceOffset])
+      $sourceOffset += 1
+    }
+
+    $pageLines = @($continuationLines) + @($bodyLines)
+    [void]$pages.Add([pscustomobject]@{
+        number = $pageNumber
+        sourceOffset = $pageSourceOffset
+        sourceLength = $bodyLines.Count
+        continuedSection = $continuedSection
+        lines = @($pageLines)
+      })
+    $pageNumber += 1
+  }
+
+  return @($pages)
+}
+
+function Get-ThermalPaperHeight {
+  param([int]$LineCount)
+
+  return [Math]::Min([Math]::Max(($LineCount * 20) + 90, 500), 3276)
+}
+
 $payloadRaw = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8
 if ([string]::IsNullOrWhiteSpace($payloadRaw)) {
   throw 'Payload do comprovante nao fiscal esta vazio.'
@@ -796,6 +1004,49 @@ if ([string]::IsNullOrWhiteSpace($payloadRaw)) {
 $payload = $payloadRaw | ConvertFrom-Json
 $payloadPrinterName = Get-ObjectPropertyValue -Object $payload -Name 'printerName'
 $preferredPatterns = @($payload.preferredPrinterPatterns)
+$documentTitle = Get-ObjectPropertyValue -Object $payload -Name 'title'
+$payloadType = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $payload -Name 'type')
+$isThermalPayload = ($payloadType -ieq 'promissoria') -or
+  ($payloadType -ieq 'resumo-turno') -or
+  ($payloadType -ieq 'comprovante-venda')
+$thermalWidth = 32
+$thermalMaxLinesPerPage = 150
+$thermalText = ''
+$thermalLines = @()
+$thermalPages = @()
+$thermalSectionTitles = @()
+$thermalDocumentName = if (-not [string]::IsNullOrWhiteSpace($documentTitle)) {
+  $documentTitle
+}
+elseif ($payloadType -ieq 'resumo-turno') {
+  'RESUMO DO TURNO'
+}
+elseif ($payloadType -ieq 'comprovante-venda') {
+  'COMPROVANTE DE VENDA'
+}
+else {
+  'NOTA PROMISSORIA'
+}
+
+if ($isThermalPayload) {
+  $thermalText = New-ReceiptThermalText -Payload $payload -Width $thermalWidth
+  $thermalLines = @($thermalText -split "`r?`n")
+  $thermalSectionTitles = @(
+    foreach ($section in @($payload.sections)) {
+      $sectionTitle = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $section -Name 'title')
+
+      if (-not [string]::IsNullOrWhiteSpace($sectionTitle)) {
+        $sectionTitle
+      }
+    }
+  )
+  $thermalPages = @(Split-ThermalReceiptPages `
+      -Lines $thermalLines `
+      -DocumentTitle $thermalDocumentName `
+      -SectionTitles $thermalSectionTitles `
+      -MaxLinesPerPage $thermalMaxLinesPerPage `
+      -Width $thermalWidth)
+}
 
 $document = $null
 $borderPen = $null
@@ -816,10 +1067,61 @@ $formatCenter = New-TextFormat -Alignment ([System.Drawing.StringAlignment]::Cen
 $formatLeft = New-TextFormat -Alignment ([System.Drawing.StringAlignment]::Near)
 
 try {
+  if ($DryRun) {
+    $dryRunPrinter = Normalize-RawReceiptText $PrinterName
+
+    if ([string]::IsNullOrWhiteSpace($dryRunPrinter)) {
+      $dryRunPrinter = Normalize-RawReceiptText $payloadPrinterName
+    }
+
+    if ([string]::IsNullOrWhiteSpace($dryRunPrinter)) {
+      $dryRunPrinter = 'Nao selecionada'
+    }
+
+    if ($isThermalPayload) {
+      $thermalMaxLineLength = 0
+      $thermalOverflowLines = 0
+
+      foreach ($line in $thermalLines) {
+        $lineLength = ([string]$line).Length
+        $thermalMaxLineLength = [Math]::Max($thermalMaxLineLength, $lineLength)
+
+        if ($lineLength -gt $thermalWidth) {
+          $thermalOverflowLines += 1
+        }
+      }
+
+      @{
+        status = 'dry-run'
+        printer = $dryRunPrinter
+        mode = 'thermal-layout'
+        physicalPrint = $false
+        width = $thermalWidth
+        lines = $thermalLines.Count
+        pages = $thermalPages.Count
+        pageLineCounts = @($thermalPages | ForEach-Object { @($_.lines).Count })
+        pageSourceOffsets = @($thermalPages | ForEach-Object { $_.sourceOffset })
+        maxLineLength = $thermalMaxLineLength
+        overflowLines = $thermalOverflowLines
+        hasContinuation = $thermalPages.Count -gt 1
+        message = 'Layout termico paginado validado sem acessar ou acionar a impressora.'
+      } | ConvertTo-Json -Depth 5 -Compress
+      return
+    }
+
+    @{
+      status = 'dry-run'
+      printer = $dryRunPrinter
+      mode = 'payload-validation'
+      physicalPrint = $false
+      message = 'Payload validado sem acessar ou acionar a impressora.'
+    } | ConvertTo-Json -Compress
+    return
+  }
+
   $resolvedPrinter = Resolve-PrinterName -RequestedPrinterName $PrinterName -PayloadPrinterName $payloadPrinterName -PreferredPatterns $preferredPatterns
 
   $document = New-Object System.Drawing.Printing.PrintDocument
-  $documentTitle = Get-ObjectPropertyValue -Object $payload -Name 'title'
   $document.DocumentName = if ([string]::IsNullOrWhiteSpace($documentTitle)) {
     'Comprovante nao fiscal'
   }
@@ -835,41 +1137,14 @@ try {
     throw 'Impressora nao fiscal invalida ou indisponivel.'
   }
 
-  if ($DryRun) {
-    @{
-      status = 'dry-run'
-      printer = $resolvedPrinter
-      mode = 'validated'
-      message = 'Layout validado sem enviar para a impressora.'
-    } | ConvertTo-Json -Compress
-    return
-  }
-
   $queueWait = Wait-PrinterQueueIdle -PrinterName $resolvedPrinter
 
   if ($queueWait.status -ne 'idle') {
     throw "A impressora '$resolvedPrinter' ainda possui trabalho pendente na fila. Limpe a fila ou reinicie a impressora antes de tentar novamente."
   }
 
-  $payloadType = Normalize-RawReceiptText (Get-ObjectPropertyValue -Object $payload -Name 'type')
-
-  if (($payloadType -ieq 'promissoria') -or ($payloadType -ieq 'resumo-turno') -or ($payloadType -ieq 'comprovante-venda')) {
-    $thermalWidth = 32
-    $thermalText = New-ReceiptThermalText -Payload $payload -Width $thermalWidth
-    $thermalLines = @($thermalText -split "`r?`n")
+  if ($isThermalPayload) {
     $fontThermal = $null
-    $thermalDocumentName = if (-not [string]::IsNullOrWhiteSpace($documentTitle)) {
-      $documentTitle
-    }
-    elseif ($payloadType -ieq 'resumo-turno') {
-      'RESUMO DO TURNO'
-    }
-    elseif ($payloadType -ieq 'comprovante-venda') {
-      'COMPROVANTE DE VENDA'
-    }
-    else {
-      'NOTA PROMISSORIA'
-    }
     $thermalPaperName = if ($payloadType -ieq 'resumo-turno') {
       'CaixaAgil Resumo Turno 72mm'
     }
@@ -890,17 +1165,53 @@ try {
     }
 
     try {
+      if ($thermalPages.Count -eq 0) {
+        throw 'O layout termico nao gerou paginas para impressao.'
+      }
+
+      $thermalPaginationState = @{ pageOffset = 0 }
+      $firstThermalPage = $thermalPages[0]
+      $firstThermalPageLineCount = @($firstThermalPage.lines).Count
       $document.DocumentName = $thermalDocumentName
       $document.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize(
         $thermalPaperName,
         284,
-        [Math]::Min([Math]::Max(($thermalLines.Count * 20) + 90, 500), 3276)
+        (Get-ThermalPaperHeight -LineCount $firstThermalPageLineCount)
       )
       $document.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(2, 2, 8, 16)
       $fontThermal = New-Object System.Drawing.Font('Courier New', 9.5, [System.Drawing.FontStyle]::Bold)
 
+      $document.add_QueryPageSettings([System.Drawing.Printing.QueryPageSettingsEventHandler]{
+          param($sender, $e)
+
+          $pageOffset = [int]$thermalPaginationState.pageOffset
+
+          if ($pageOffset -lt 0 -or $pageOffset -ge $thermalPages.Count) {
+            return
+          }
+
+          $page = $thermalPages[$pageOffset]
+          $pageLineCount = @($page.lines).Count
+          $e.PageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize(
+            $thermalPaperName,
+            284,
+            (Get-ThermalPaperHeight -LineCount $pageLineCount)
+          )
+          $e.PageSettings.Margins = New-Object System.Drawing.Printing.Margins(2, 2, 8, 16)
+        })
+
       $document.add_PrintPage([System.Drawing.Printing.PrintPageEventHandler]{
           param($sender, $e)
+
+          $pageOffset = [int]$thermalPaginationState.pageOffset
+
+          if ($pageOffset -lt 0 -or $pageOffset -ge $thermalPages.Count) {
+            $e.HasMorePages = $false
+            return
+          }
+
+          $page = $thermalPages[$pageOffset]
+          $pageLines = @($page.lines)
 
           $graphics = $e.Graphics
           $graphics.Clear([System.Drawing.Color]::White)
@@ -916,20 +1227,35 @@ try {
           $sampleSize = $graphics.MeasureString($sampleText, $fontThermal)
           $textWidth = [Math]::Min([Math]::Ceiling($sampleSize.Width) + 6, $availableWidth)
           $x = $availableLeft + [Math]::Max([Math]::Floor(($availableWidth - $textWidth) / 2), 0)
-          $layout = New-Object System.Drawing.RectangleF([single]$x, [single]$y, [single]$textWidth, [single]($e.MarginBounds.Height + 240))
+          $lineStep = 20
+          $pageBottom = [int]$e.MarginBounds.Bottom
           $format = New-Object System.Drawing.StringFormat
           $format.Alignment = [System.Drawing.StringAlignment]::Near
           $format.LineAlignment = [System.Drawing.StringAlignment]::Near
-          $format.FormatFlags = [System.Drawing.StringFormatFlags]::NoClip
+          $format.FormatFlags = [System.Drawing.StringFormatFlags]::NoClip -bor [System.Drawing.StringFormatFlags]::NoWrap
           $format.Trimming = [System.Drawing.StringTrimming]::None
 
           try {
-            $graphics.DrawString($thermalText, $fontThermal, $brush, $layout, $format)
+            foreach ($line in $pageLines) {
+              if (($y + $lineStep) -gt $pageBottom) {
+                throw "A pagina termica $($page.number) excedeu a area imprimivel; a impressao foi interrompida antes de cortar o conteudo."
+              }
+
+              $lineLayout = New-Object System.Drawing.RectangleF(
+                [single]$x,
+                [single]$y,
+                [single]$textWidth,
+                [single]($lineStep + 2)
+              )
+              $graphics.DrawString([string]$line, $fontThermal, $brush, $lineLayout, $format)
+              $y += $lineStep
+            }
           } finally {
             $format.Dispose()
           }
 
-          $e.HasMorePages = $false
+          $thermalPaginationState.pageOffset = $pageOffset + 1
+          $e.HasMorePages = $thermalPaginationState.pageOffset -lt $thermalPages.Count
         })
 
       $document.Print()
@@ -945,6 +1271,7 @@ try {
         printer = $resolvedPrinter
         mode = 'thermal-text'
         lines = $thermalLines.Count
+        pages = $thermalPages.Count
         queueWait = $queueWait
         finalQueueWait = $finalQueueWait
         message = $thermalMessage

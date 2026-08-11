@@ -17,6 +17,7 @@ const {
   NfEvento,
   Pdv,
   Produto,
+  RecebimentoVenda,
   SaldoEstoqueProduto,
   Usuario,
   Venda,
@@ -31,6 +32,23 @@ const {
 const { getBillingStatus } = require('../services/assinaturaInadimplenciaService');
 const { decryptSecret, encryptSecret } = require('../services/secretService');
 const {
+  assertValidInstallmentPlan,
+  normalizeInstallmentPlan,
+  POSTGRES_INTEGER_MAX,
+} = require('../services/installmentPlanService');
+const {
+  RECEIPT_ALREADY_CONFIRMED_CODE,
+  buildReceiptIdempotencyKey,
+  buildReceiptConflictSyncOutcome,
+  cancelReceipts,
+  getInstallmentReceiptConflict,
+  getSyncOutcomeFromEventPayload,
+  listReceiptLedger,
+  registerReceipt,
+  sanitizeReceiptLedgerEntry,
+  storeSyncOutcomeInEventPayload,
+} = require('../services/receiptLedgerService');
+const {
   buildStorageDirectory,
   buildStoredFileName,
   ensureDirectory,
@@ -40,6 +58,7 @@ const {
 } = require('../services/fileStorageService');
 
 const pairingTtlMinutes = 30;
+const maxLocalInstallmentReconciliationIds = 500;
 const remoteSupportProvider = 'rustdesk';
 const remoteSupportStatuses = new Set(['nao_configurado', 'configurando', 'configurado', 'erro']);
 
@@ -249,15 +268,16 @@ function isPdvOperationalEventType(eventType) {
 }
 
 async function getPdvRegistrosVinculados(usuarioId, pdvId) {
-  const [caixas, vendas, despesas, eventos, notas] = await Promise.all([
+  const [caixas, vendas, despesas, eventos, notas, recebimentos] = await Promise.all([
     Caixa.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
     Venda.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
     DespesaCaixa.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
     EventoPdv.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
     Nf.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
+    RecebimentoVenda.count({ where: { usuario_id: usuarioId, pdv_id: pdvId } }),
   ]);
 
-  return caixas + vendas + despesas + eventos + notas;
+  return caixas + vendas + despesas + eventos + notas + recebimentos;
 }
 
 async function listUserPdvs(usuarioId) {
@@ -308,21 +328,11 @@ async function getUserPdvsSnapshot(usuarioId) {
 function sanitizeCents(value) {
   const parsed = Number(value || 0);
 
-  if (!Number.isFinite(parsed)) {
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > POSTGRES_INTEGER_MAX) {
     return 0;
   }
 
-  return Math.max(0, Math.round(parsed));
-}
-
-function sanitizeSignedCents(value) {
-  const parsed = Number(value || 0);
-
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.round(parsed);
+  return parsed;
 }
 
 function parsePositiveNumber(value) {
@@ -472,60 +482,6 @@ function normalizeSaleItems(items) {
   });
 }
 
-function normalizePercent(value) {
-  const parsed = Number(value || 0);
-
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.max(-100, Math.min(100, Math.round(parsed)));
-}
-
-function normalizeInstallmentPlan(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-
-  const installmentCount = Math.max(
-    2,
-    Math.min(12, Math.floor(Number(value.installmentCount || value.parcelas || value.quantidade_parcelas || 2)))
-  );
-  const entriesSource = Array.isArray(value.entries)
-    ? value.entries
-    : Array.isArray(value.parcelasDetalhes)
-      ? value.parcelasDetalhes
-      : Array.isArray(value.parcelas_detalhes)
-        ? value.parcelas_detalhes
-        : [];
-  const entries = entriesSource.slice(0, 12).map((entry, index) => {
-    const paidAt = normalizeText(entry.paidAt || entry.pago_em || entry.recebido_em, 40) || null;
-    const paymentMethod = normalizeKey(entry.paymentMethod || entry.metodo_pagamento || entry.forma_pagamento) || null;
-    const receivedSessionId = normalizeText(entry.receivedSessionId || entry.caixa_recebimento_id || entry.sessionId, 64) || null;
-
-    return {
-      number: Math.max(1, Math.floor(Number(entry.number || entry.numero || index + 1))),
-      dueDate: normalizeText(entry.dueDate || entry.vencimento || entry.data_vencimento, 20) || null,
-      amountCents: sanitizeCents(entry.amountCents || entry.valorCentavos || entry.valor_centavos),
-      paid: Boolean(entry.paid || entry.pago || paidAt),
-      paidAt,
-      paymentMethod,
-      receivedSessionId,
-    };
-  });
-
-  return {
-    installmentCount,
-    adjustmentPercent: normalizePercent(value.adjustmentPercent || value.percentual_ajuste),
-    originalTotalCents: sanitizeCents(value.originalTotalCents || value.valorOriginalCentavos || value.valor_original_centavos),
-    adjustmentCents: sanitizeSignedCents(value.adjustmentCents || value.ajusteCentavos || value.ajuste_centavos),
-    adjustedTotalCents: sanitizeCents(value.adjustedTotalCents || value.valorFinalCentavos || value.valor_final_centavos),
-    customerName: normalizeText(value.customerName || value.nomeCliente || value.nome_cliente, 120) || null,
-    observation: normalizeText(value.observation || value.observacao, 1000) || null,
-    entries,
-  };
-}
-
 function sanitizeDesktopClienteConvenio(cliente) {
   const data = cliente.get ? cliente.get({ plain: true }) : cliente;
 
@@ -602,11 +558,75 @@ function sanitizeDesktopConvenioRecebimento(venda) {
   };
 }
 
+function isPendingCustomerDebt(record) {
+  const data = record?.get ? record.get({ plain: true }) : record || {};
+
+  if (
+    !data.cliente_convenio_id ||
+    ['cancelada', 'cancelled', 'canceled'].includes(normalizeKey(data.situacao))
+  ) {
+    return false;
+  }
+
+  const isPendingAgreement = (
+    normalizeKey(data.metodo_pagamento) === 'convenio' ||
+    normalizeKey(data.situacao) === 'convenio'
+  ) && normalizeKey(data.status_convenio) !== 'pago';
+  const installmentPlan = normalizeInstallmentPlan(data.parcelamento);
+  const hasPendingInstallment = Boolean(
+    installmentPlan?.entries.some(entry => !(entry.paid || entry.paidAt))
+  );
+
+  return isPendingAgreement || hasPendingInstallment;
+}
+
 async function loadDesktopConvenioSnapshot(usuarioId) {
+  const debtCandidates = await Venda.findAll({
+    where: {
+      usuario_id: usuarioId,
+      cliente_convenio_id: { [Op.ne]: null },
+      situacao: { [Op.notIn]: ['cancelada', 'cancelled', 'canceled'] },
+      [Op.or]: [
+        {
+          [Op.and]: [
+            {
+              [Op.or]: [
+                { metodo_pagamento: 'convenio' },
+                { situacao: 'convenio' },
+              ],
+            },
+            sequelize.literal(`COALESCE(LOWER("Venda"."status_convenio"), 'pendente') <> 'pago'`),
+          ],
+        },
+        {
+          [Op.and]: [
+            { parcelamento: { [Op.ne]: null } },
+            sequelize.literal(hasOutstandingInstallmentSql),
+          ],
+        },
+      ],
+    },
+    attributes: [
+      'cliente_convenio_id',
+      'metodo_pagamento',
+      'situacao',
+      'status_convenio',
+      'parcelamento',
+    ],
+  });
+  const pendingDebtClientIds = [...new Set(
+    debtCandidates
+      .filter(isPendingCustomerDebt)
+      .map(venda => Number(venda.cliente_convenio_id))
+      .filter(id => Number.isInteger(id) && id > 0)
+  )];
   const clientes = await ClienteConvenio.findAll({
     where: {
       usuario_id: usuarioId,
-      ativo: true,
+      [Op.or]: [
+        { ativo: true },
+        ...(pendingDebtClientIds.length > 0 ? [{ id: { [Op.in]: pendingDebtClientIds } }] : []),
+      ],
     },
     order: [
       ['nome', 'ASC'],
@@ -614,7 +634,10 @@ async function loadDesktopConvenioSnapshot(usuarioId) {
     ],
   });
   const allowedClientIds = clientes
-    .filter(cliente => Boolean(cliente.permite_pagamento_frente_caixa))
+    .filter(cliente => (
+      Boolean(cliente.permite_pagamento_frente_caixa) ||
+      (pendingDebtClientIds.includes(Number(cliente.id)) && cliente.ativo === false)
+    ))
     .map(cliente => cliente.id);
   const recebimentos = allowedClientIds.length > 0
     ? await Venda.findAll({
@@ -649,6 +672,170 @@ async function loadDesktopConvenioSnapshot(usuarioId) {
   return {
     clientes_convenio: clientes.map(sanitizeDesktopClienteConvenio),
     recebimentos_convenio: recebimentos.map(sanitizeDesktopConvenioRecebimento),
+  };
+}
+
+const installmentEntriesSql = `COALESCE(
+  "Venda"."parcelamento"->'entries',
+  "Venda"."parcelamento"->'parcelasDetalhes',
+  "Venda"."parcelamento"->'parcelas_detalhes',
+  '[]'::jsonb
+)`;
+const hasOutstandingInstallmentSql = `EXISTS (
+  SELECT 1
+  FROM jsonb_array_elements(
+    CASE
+      WHEN jsonb_typeof(${installmentEntriesSql}) = 'array' THEN ${installmentEntriesSql}
+      ELSE '[]'::jsonb
+    END
+  ) AS parcela(item)
+  WHERE
+    COALESCE(LOWER(parcela.item->>'paid'), LOWER(parcela.item->>'pago'), 'false')
+      NOT IN ('true', '1', 'sim', 'yes')
+    AND NULLIF(COALESCE(
+      parcela.item->>'paidAt',
+      parcela.item->>'pago_em',
+      parcela.item->>'recebido_em',
+      ''
+    ), '') IS NULL
+)`;
+
+function normalizeLocalInstallmentSaleIds(value) {
+  const source = Array.isArray(value) ? value : [];
+  const ids = [];
+  const seen = new Set();
+  let truncated = false;
+
+  for (const candidate of source) {
+    const id = normalizeText(candidate, 64);
+
+    if (!id || seen.has(id)) {
+      continue;
+    }
+
+    if (ids.length >= maxLocalInstallmentReconciliationIds) {
+      truncated = true;
+      break;
+    }
+
+    seen.add(id);
+    ids.push(id);
+  }
+
+  return { ids, truncated };
+}
+
+function isCanceledInstallmentSale(record) {
+  const data = record?.get ? record.get({ plain: true }) : record || {};
+  return ['cancelada', 'cancelled', 'canceled'].includes(normalizeKey(data.situacao));
+}
+
+function hasOutstandingInstallment(record) {
+  const data = record?.get ? record.get({ plain: true }) : record || {};
+  const plan = normalizeInstallmentPlan(data.parcelamento);
+
+  return !isCanceledInstallmentSale(data) && Boolean(
+    plan?.entries.some(entry => !(entry.paid || entry.paidAt))
+  );
+}
+
+function buildInstallmentTombstones(localSaleIds, records, activeSaleIds = new Set()) {
+  const recordById = new Map(records.map(record => {
+    const data = record?.get ? record.get({ plain: true }) : record;
+    return [String(data.id), record];
+  }));
+
+  return localSaleIds.flatMap(id => {
+    if (activeSaleIds.has(id)) {
+      return [];
+    }
+
+    const record = recordById.get(id);
+
+    if (!record) {
+      return [{
+        id,
+        motivo: 'ausente',
+        atualizado_em: null,
+      }];
+    }
+
+    const data = record.get ? record.get({ plain: true }) : record;
+    const plan = normalizeInstallmentPlan(data.parcelamento);
+    const reason = isCanceledInstallmentSale(data)
+      ? 'cancelada'
+      : plan?.entries.length > 0 && plan.entries.every(entry => entry.paid || entry.paidAt)
+        ? 'quitada'
+        : 'indisponivel';
+
+    return [{
+      id,
+      motivo: reason,
+      atualizado_em: toDesktopIso(data.updated_at ?? data.updatedAt),
+      venda: sanitizeReopenedSale(record),
+    }];
+  });
+}
+
+async function loadDesktopInstallmentSnapshot(usuarioId, pdvId, options = {}) {
+  const localSaleIds = Array.isArray(options.localSaleIds) ? options.localSaleIds : [];
+  const [installmentSales, reconciliationSales, openCashiers] = await Promise.all([
+    Venda.findAll({
+      where: {
+        usuario_id: usuarioId,
+        parcelamento: { [Op.ne]: null },
+        situacao: {
+          [Op.notIn]: ['cancelada', 'cancelled', 'canceled'],
+        },
+        [Op.and]: [sequelize.literal(hasOutstandingInstallmentSql)],
+      },
+      order: [
+        ['registrado_em', 'ASC'],
+        ['created_at', 'ASC'],
+      ],
+    }),
+    localSaleIds.length > 0
+      ? Venda.findAll({
+          where: {
+            usuario_id: usuarioId,
+            id: { [Op.in]: localSaleIds },
+          },
+        })
+      : [],
+    Caixa.findAll({
+      where: {
+        usuario_id: usuarioId,
+        pdv_id: pdvId,
+        situacao: { [Op.in]: ['aberto', 'open'] },
+      },
+      attributes: ['id'],
+    }),
+  ]);
+  const installmentSaleById = new Map(
+    installmentSales.map(record => [String(record.id), record])
+  );
+
+  reconciliationSales.forEach(record => {
+    if (hasOutstandingInstallment(record)) {
+      installmentSaleById.set(String(record.id), record);
+    }
+  });
+
+  const activeSaleIds = new Set(installmentSaleById.keys());
+  const cashierIds = openCashiers.map(cashier => cashier.id);
+  const receipts = cashierIds.length > 0
+    ? await listReceiptLedger({ usuarioId, cashierIds })
+    : [];
+
+  return {
+    vendas_parceladas: [...installmentSaleById.values()].map(sanitizeReopenedSale),
+    vendas_parceladas_removidas: buildInstallmentTombstones(
+      localSaleIds,
+      reconciliationSales,
+      activeSaleIds
+    ),
+    vendas_parceladas_reconciliacao_truncada: Boolean(options.reconciliationTruncated),
+    recebimentos: receipts.map(sanitizeReceiptLedgerEntry),
   };
 }
 
@@ -1000,7 +1187,7 @@ async function processCashierClosed(pdv, payload, transaction) {
   });
 }
 
-async function processSaleCompleted(pdv, payload, transaction) {
+async function processSaleCompleted(pdv, payload, transaction, eventContext = {}) {
   const sale = payload.sale;
 
   if (!sale?.id) {
@@ -1032,10 +1219,34 @@ async function processSaleCompleted(pdv, payload, transaction) {
 
   const items = normalizeSaleItems(sale.items);
   const quantity = items.reduce((total, item) => total + item.quantidade, 0);
-  const installmentPlan = normalizeInstallmentPlan(
+  let installmentPlan = normalizeInstallmentPlan(
     sale.installmentPlan || sale.parcelamento || payload.installmentPlan || payload.parcelamento
   );
-  const rawTotalCents = sanitizeCents(sale.totalCents || sale.total_centavos);
+  const rawTotalInput = sale.totalCents ?? sale.total_centavos ?? 0;
+  const rawTotalCents = sanitizeCents(rawTotalInput);
+  const isInstallmentV2 = Boolean(installmentPlan && installmentPlan.schemaVersion >= 2);
+
+  if (isInstallmentV2) {
+    assertValidInstallmentPlan(installmentPlan, {
+      saleTotalCents: rawTotalInput,
+      allowPaidEntries: false,
+    });
+
+    if (installmentPlan.downPaymentCents > 0 && !(cashierSession?.id || payload.session?.id)) {
+      throw new Error('A entrada da venda parcelada precisa estar vinculada a um turno aberto.');
+    }
+
+    if (installmentPlan.downPaymentCents > 0) {
+      installmentPlan = {
+        ...installmentPlan,
+        downPaymentPaidAt: parseDate(
+          installmentPlan.downPaymentPaidAt || sale.createdAt || sale.registrado_em
+        ).toISOString(),
+        downPaymentSessionId: cashierSession?.id || payload.session?.id,
+      };
+    }
+  }
+
   const totalCents = installmentPlan ? installmentPlan.adjustedTotalCents : rawTotalCents;
   const subtotalCents = installmentPlan ? installmentPlan.originalTotalCents : rawTotalCents;
   const discountCents = installmentPlan?.adjustmentCents < 0 ? Math.abs(installmentPlan.adjustmentCents) : 0;
@@ -1122,13 +1333,39 @@ async function processSaleCompleted(pdv, payload, transaction) {
       caixa_recebimento_id: null,
       situacao: isConvenioPayment ? 'convenio' : 'paga',
       status_convenio: isConvenioPayment ? 'pendente' : null,
-      situacao_recebimento: isConvenioPayment ? 'pendente' : 'nenhum',
-      recebido_em: isConvenioPayment ? null : parseDate(sale.createdAt || sale.registrado_em),
+      situacao_recebimento: isConvenioPayment || isInstallmentV2 ? 'pendente' : 'nenhum',
+      recebido_em: isConvenioPayment || isInstallmentV2 ? null : parseDate(sale.createdAt || sale.registrado_em),
       observacao: consumerObservation,
       registrado_em: parseDate(sale.createdAt || sale.registrado_em),
     },
     { transaction }
   );
+
+  if (isInstallmentV2 && installmentPlan.downPaymentCents > 0) {
+    await registerReceipt(
+      {
+        usuarioId: pdv.usuario_id,
+        pdvId: pdv.id,
+        cashierId: cashierSession?.id || payload.session?.id,
+        saleId: createdSale.id,
+        idempotencyKey: buildReceiptIdempotencyKey(
+          eventContext.idempotencyKey,
+          'entrada',
+          createdSale.id
+        ),
+        type: 'entrada',
+        amountCents: installmentPlan.downPaymentCents,
+        paymentMethod: installmentPlan.downPaymentMethod,
+        customerName: convenioClientName || consumerName || installmentPlan.customerName,
+        receivedAt: installmentPlan.downPaymentPaidAt,
+        origin: 'pdv',
+        metadata: {
+          schema_version: installmentPlan.schemaVersion,
+        },
+      },
+      transaction
+    );
+  }
 
   await applySaleStockMovement(pdv.usuario_id, sale, transaction);
   return createdSale;
@@ -1179,10 +1416,48 @@ async function processSaleCanceled(pdv, payload, transaction) {
     { transaction }
   );
 
+  await cancelReceipts(
+    {
+      usuarioId: pdv.usuario_id,
+      saleId: existingSale.id,
+      canceledAt,
+      reason: 'Venda cancelada no PDV.',
+    },
+    transaction
+  );
+
   return existingSale;
 }
 
-async function processConvenioReceived(pdv, payload, transaction) {
+async function listCanonicalReceiptsForConflict({
+  usuarioId,
+  saleId,
+  type,
+  installmentNumbers = [],
+  transaction,
+}) {
+  const requestedNumbers = new Set(installmentNumbers);
+  const receipts = await listReceiptLedger({
+    usuarioId,
+    saleIds: [saleId],
+    status: 'confirmado',
+    transaction,
+  });
+
+  return receipts
+    .filter(receipt => {
+      const data = receipt?.get ? receipt.get({ plain: true }) : receipt;
+
+      if (data.tipo !== type) {
+        return false;
+      }
+
+      return type !== 'parcela' || requestedNumbers.has(Number(data.parcela_numero));
+    })
+    .map(sanitizeReceiptLedgerEntry);
+}
+
+async function processConvenioReceived(pdv, payload, transaction, eventContext = {}) {
   const receipt = payload.receipt || payload.recebimento || {};
   const vendaId = normalizeText(
     receipt.id || receipt.venda_id || payload.venda_id || payload.saleId || payload.id,
@@ -1203,17 +1478,6 @@ async function processConvenioReceived(pdv, payload, transaction) {
     throw new Error('Informe a forma de pagamento do recebimento de convênio.');
   }
 
-  let cashierSession = null;
-
-  if (payload.session) {
-    cashierSession = await upsertCashierSession({
-      pdv,
-      session: payload.session,
-      status: 'aberto',
-      transaction,
-    });
-  }
-
   const venda = await Venda.findOne({
     where: {
       id: vendaId,
@@ -1228,6 +1492,7 @@ async function processConvenioReceived(pdv, payload, transaction) {
       ],
     },
     transaction,
+    lock: transaction.LOCK.UPDATE,
   });
 
   if (!venda) {
@@ -1235,16 +1500,65 @@ async function processConvenioReceived(pdv, payload, transaction) {
   }
 
   if (normalizeKey(venda.status_convenio) === 'pago') {
-    return venda;
+    const canonicalReceipts = await listCanonicalReceiptsForConflict({
+      usuarioId: pdv.usuario_id,
+      saleId: venda.id,
+      type: 'convenio',
+      transaction,
+    });
+
+    return {
+      syncOutcome: buildReceiptConflictSyncOutcome({
+        type: 'convenio',
+        saleId: venda.id,
+        canonicalReceipts,
+        canonicalAgreementReceipt: sanitizeDesktopConvenioRecebimento(venda),
+      }),
+    };
   }
+
+  let cashierSession = null;
+
+  if (payload.session) {
+    cashierSession = await upsertCashierSession({
+      pdv,
+      session: payload.session,
+      status: 'aberto',
+      transaction,
+    });
+  }
+
+  const receivedAt = parseDate(receipt.receivedAt || receipt.recebido_em || payload.receivedAt || new Date());
+  const cashierId = cashierSession?.id || payload.session?.id || receipt.receivedSessionId || null;
+
+  if (!cashierId) {
+    throw new Error('O recebimento de convênio precisa estar vinculado a um turno aberto.');
+  }
+
+  await registerReceipt(
+    {
+      usuarioId: pdv.usuario_id,
+      pdvId: pdv.id,
+      cashierId,
+      saleId: venda.id,
+      idempotencyKey: buildReceiptIdempotencyKey(eventContext.idempotencyKey, 'convenio', venda.id),
+      type: 'convenio',
+      amountCents: venda.total_centavos,
+      paymentMethod,
+      customerName: venda.nome_cliente || venda.nome_consumidor || receipt.clientName || receipt.cliente_nome,
+      receivedAt,
+      origin: 'pdv',
+    },
+    transaction
+  );
 
   await venda.update(
     {
       status_convenio: 'pago',
       situacao_recebimento: 'recebido_caixa',
       metodo_pagamento_recebimento: paymentMethod,
-      caixa_recebimento_id: cashierSession?.id || payload.session?.id || null,
-      recebido_em: parseDate(receipt.receivedAt || receipt.recebido_em || payload.receivedAt || new Date()),
+      caixa_recebimento_id: cashierId,
+      recebido_em: receivedAt,
     },
     { transaction }
   );
@@ -1252,7 +1566,7 @@ async function processConvenioReceived(pdv, payload, transaction) {
   return venda;
 }
 
-async function processInstallmentReceived(pdv, payload, transaction) {
+async function processInstallmentReceived(pdv, payload, transaction, eventContext = {}) {
   const sale = payload.sale || payload.venda || {};
   const saleId = normalizeText(
     sale.id || payload.saleId || payload.venda_id || payload.id,
@@ -1274,17 +1588,6 @@ async function processInstallmentReceived(pdv, payload, transaction) {
     throw new Error('Informe a forma de pagamento do recebimento do parcelamento.');
   }
 
-  let cashierSession = null;
-
-  if (payload.session) {
-    cashierSession = await upsertCashierSession({
-      pdv,
-      session: payload.session,
-      status: 'aberto',
-      transaction,
-    });
-  }
-
   const venda = await Venda.findOne({
     where: {
       id: saleId,
@@ -1298,13 +1601,15 @@ async function processInstallmentReceived(pdv, payload, transaction) {
       ],
     },
     transaction,
+    lock: transaction.LOCK.UPDATE,
   });
 
   if (!venda) {
     throw new Error('Venda parcelada não encontrada para este PDV.');
   }
 
-  const installmentPlan = normalizeInstallmentPlan(
+  const storedInstallmentPlan = normalizeInstallmentPlan(venda.parcelamento);
+  const incomingInstallmentPlan = normalizeInstallmentPlan(
     sale.installmentPlan ||
       sale.parcelamento ||
       payload.installmentPlan ||
@@ -1312,15 +1617,169 @@ async function processInstallmentReceived(pdv, payload, transaction) {
       venda.parcelamento
   );
 
-  if (!installmentPlan || installmentPlan.entries.length === 0) {
+  if (!storedInstallmentPlan || storedInstallmentPlan.entries.length === 0 || !incomingInstallmentPlan) {
     throw new Error('Parcelamento inválido para recebimento.');
   }
+
+  if (incomingInstallmentPlan.schemaVersion >= 2) {
+    assertValidInstallmentPlan(incomingInstallmentPlan, { saleTotalCents: venda.total_centavos });
+  }
+
+  if (storedInstallmentPlan.schemaVersion >= 2) {
+    assertValidInstallmentPlan(storedInstallmentPlan, { saleTotalCents: venda.total_centavos });
+
+    const immutableFields = [
+      'installmentCount',
+      'firstDueDate',
+      'adjustmentKind',
+      'adjustmentCents',
+      'originalTotalCents',
+      'adjustedTotalCents',
+      'downPaymentCents',
+      'downPaymentMethod',
+      'financedBalanceCents',
+    ];
+    const termsChanged = immutableFields.some(field => (
+      incomingInstallmentPlan[field] !== storedInstallmentPlan[field]
+    ));
+    const entriesChanged = storedInstallmentPlan.entries.some(storedEntry => {
+      const incomingEntry = incomingInstallmentPlan.entries.find(entry => entry.number === storedEntry.number);
+      return !incomingEntry ||
+        incomingEntry.amountCents !== storedEntry.amountCents ||
+        incomingEntry.dueDate !== storedEntry.dueDate;
+    });
+
+    if (termsChanged || entriesChanged) {
+      throw new Error('Os valores e vencimentos do parcelamento não podem ser alterados no recebimento.');
+    }
+  }
+
+  const requestedEntriesSource = Array.isArray(payload.entries)
+    ? payload.entries
+    : Array.isArray(payload.parcelas)
+      ? payload.parcelas
+      : [];
+  const explicitlyRequestedNumbers = requestedEntriesSource
+    .map(entry => Math.floor(Number(entry?.number || entry?.numero || 0)))
+    .filter(number => Number.isInteger(number) && number > 0);
+  const inferredRequestedNumbers = incomingInstallmentPlan.entries
+    .filter(incomingEntry => {
+      const storedEntry = storedInstallmentPlan.entries.find(entry => entry.number === incomingEntry.number);
+      return Boolean(incomingEntry.paid || incomingEntry.paidAt) && !Boolean(storedEntry?.paid || storedEntry?.paidAt);
+    })
+    .map(entry => entry.number);
+  const requestedNumbers = [...new Set(
+    explicitlyRequestedNumbers.length > 0 ? explicitlyRequestedNumbers : inferredRequestedNumbers
+  )];
+
+  if (requestedNumbers.length === 0) {
+    throw new Error('Informe ao menos uma parcela ainda pendente para recebimento.');
+  }
+
+  const receiptConflict = getInstallmentReceiptConflict(
+    storedInstallmentPlan.entries,
+    requestedNumbers
+  );
+
+  if (receiptConflict) {
+    const canonicalReceipts = await listCanonicalReceiptsForConflict({
+      usuarioId: pdv.usuario_id,
+      saleId: venda.id,
+      type: 'parcela',
+      installmentNumbers: receiptConflict.confirmedNumbers,
+      transaction,
+    });
+
+    return {
+      syncOutcome: buildReceiptConflictSyncOutcome({
+        type: 'parcela',
+        saleId: venda.id,
+        rejectedInstallmentNumbers: receiptConflict.requestedNumbers,
+        confirmedInstallmentNumbers: receiptConflict.confirmedNumbers,
+        canonicalReceipts,
+        canonicalInstallmentSale: sanitizeReopenedSale(venda),
+      }),
+    };
+  }
+
+  let cashierSession = null;
+
+  if (payload.session) {
+    cashierSession = await upsertCashierSession({
+      pdv,
+      session: payload.session,
+      status: 'aberto',
+      transaction,
+    });
+  }
+
+  const cashierId = cashierSession?.id || payload.session?.id || null;
+  if (!cashierId) {
+    throw new Error('O recebimento da parcela precisa estar vinculado a um turno aberto.');
+  }
+  const receivedAt = parseDate(
+    payload.receivedAt || payload.recebido_em || requestedEntriesSource[0]?.paidAt || new Date()
+  );
+  const requestedSet = new Set(requestedNumbers);
+  const nextEntries = [];
+
+  for (const entry of storedInstallmentPlan.entries) {
+    if (!requestedSet.has(entry.number)) {
+      nextEntries.push(entry);
+      continue;
+    }
+
+    const nextEntry = {
+      ...entry,
+      paid: true,
+      paidAt: receivedAt.toISOString(),
+      paymentMethod,
+      receivedSessionId: cashierId,
+    };
+
+    await registerReceipt(
+      {
+        usuarioId: pdv.usuario_id,
+        pdvId: pdv.id,
+        cashierId,
+        saleId: venda.id,
+        idempotencyKey: buildReceiptIdempotencyKey(
+          eventContext.idempotencyKey,
+          'parcela',
+          venda.id,
+          entry.number
+        ),
+        type: 'parcela',
+        installmentNumber: entry.number,
+        installmentCount: storedInstallmentPlan.installmentCount,
+        amountCents: entry.amountCents,
+        paymentMethod,
+        customerName:
+          venda.nome_cliente || storedInstallmentPlan.customerName || venda.nome_consumidor,
+        receivedAt,
+        origin: 'pdv',
+        metadata: {
+          vencimento: entry.dueDate,
+        },
+      },
+      transaction
+    );
+    nextEntries.push(nextEntry);
+  }
+
+  const installmentPlan = {
+    ...storedInstallmentPlan,
+    entries: nextEntries,
+  };
+  const allPaid = nextEntries.every(entry => entry.paid || entry.paidAt);
 
   await venda.update(
     {
       parcelamento: installmentPlan,
       metodo_pagamento_recebimento: paymentMethod,
-      caixa_recebimento_id: cashierSession?.id || payload.session?.id || null,
+      caixa_recebimento_id: cashierId,
+      situacao_recebimento: allPaid ? 'recebido_caixa' : 'pendente',
+      recebido_em: allPaid ? receivedAt : venda.recebido_em,
     },
     { transaction }
   );
@@ -1468,9 +1927,12 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
   });
 
   if (existing) {
+    const storedOutcome = getSyncOutcomeFromEventPayload(existing.payload);
+
     return {
       id: event.clientId,
       status: existing.status === 'processado' ? 'duplicado' : existing.status,
+      ...(storedOutcome || {}),
     };
   }
 
@@ -1486,18 +1948,22 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
   const transaction = await sequelize.transaction();
 
   try {
+    let syncOutcome = null;
+
     if (event.eventType === 'turno_aberto') {
       await processCashierOpened(pdv, event.payload, transaction);
     } else if (event.eventType === 'turno_fechado') {
       await processCashierClosed(pdv, event.payload, transaction);
     } else if (event.eventType === 'venda_concluida') {
-      await processSaleCompleted(pdv, event.payload, transaction);
+      await processSaleCompleted(pdv, event.payload, transaction, event);
     } else if (event.eventType === 'venda_cancelada') {
       await processSaleCanceled(pdv, event.payload, transaction);
     } else if (event.eventType === 'convenio_recebido') {
-      await processConvenioReceived(pdv, event.payload, transaction);
+      const result = await processConvenioReceived(pdv, event.payload, transaction, event);
+      syncOutcome = result?.syncOutcome || null;
     } else if (event.eventType === 'parcelamento_recebido') {
-      await processInstallmentReceived(pdv, event.payload, transaction);
+      const result = await processInstallmentReceived(pdv, event.payload, transaction, event);
+      syncOutcome = result?.syncOutcome || null;
     } else if (event.eventType === 'despesa_lancada') {
       await processExpenseCreated(pdv, event.payload, transaction);
     } else if (event.eventType === 'despesa_atualizada') {
@@ -1518,9 +1984,9 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
         tipo: event.eventType,
         agregado_tipo: event.aggregateType,
         agregado_id: event.aggregateId,
-        payload: event.payload,
-        status: 'processado',
-        erro: null,
+        payload: storeSyncOutcomeInEventPayload(event.payload, syncOutcome),
+        status: syncOutcome ? 'erro' : 'processado',
+        erro: syncOutcome?.message || null,
         recebido_em: event.receivedAt,
         processado_em: new Date(),
       },
@@ -1531,7 +1997,8 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
 
     return {
       id: event.clientId,
-      status: 'processado',
+      status: syncOutcome ? 'erro' : 'processado',
+      ...(syncOutcome || {}),
     };
   } catch (error) {
     await transaction.rollback();
@@ -1542,6 +2009,14 @@ async function processDesktopSyncEvent(pdv, rawEvent, billingStatus = null) {
       message: error.message,
     };
   }
+}
+
+function isTerminalReceiptConflictResult(result) {
+  return Boolean(
+    result?.status === 'erro' &&
+    result?.code === RECEIPT_ALREADY_CONFIRMED_CODE &&
+    result?.conciliacao_recebimento?.venda_id
+  );
 }
 
 function asObject(value) {
@@ -2287,6 +2762,26 @@ function sanitizeReopenedExpense(despesa) {
   };
 }
 
+function mergeCanonicalReopenedRecords(canonicalRecords, fallbackRecords) {
+  const recordById = new Map();
+
+  for (const record of Array.isArray(canonicalRecords) ? canonicalRecords : []) {
+    if (record?.id) {
+      recordById.set(String(record.id), record);
+    }
+  }
+
+  for (const record of Array.isArray(fallbackRecords) ? fallbackRecords : []) {
+    const id = normalizeText(record?.id, 64);
+
+    if (id && !recordById.has(id)) {
+      recordById.set(id, record);
+    }
+  }
+
+  return [...recordById.values()];
+}
+
 async function getReopenableCashiers(pdv, options = {}) {
   const activeConferences = await ConferenciaCaixa.findAll({
     where: {
@@ -2321,7 +2816,7 @@ async function getReopenableCashiers(pdv, options = {}) {
 }
 
 async function loadReopenedCashierSnapshot(pdv, caixa, transaction) {
-  const [closeEvent, storedSales, storedExpenses] = await Promise.all([
+  const [closeEvent, storedSales, storedExpenses, storedReceipts] = await Promise.all([
     EventoPdv.findOne({
       where: {
         usuario_id: pdv.usuario_id,
@@ -2344,6 +2839,7 @@ async function loadReopenedCashierSnapshot(pdv, caixa, transaction) {
       },
       order: [['registrado_em', 'ASC']],
       transaction,
+      lock: transaction.LOCK.SHARE,
     }),
     DespesaCaixa.findAll({
       where: {
@@ -2354,37 +2850,76 @@ async function loadReopenedCashierSnapshot(pdv, caixa, transaction) {
       order: [['registrado_em', 'ASC']],
       transaction,
     }),
+    listReceiptLedger({
+      usuarioId: pdv.usuario_id,
+      cashierIds: [caixa.id],
+      transaction,
+    }),
   ]);
   const closePayload = closeEvent?.payload && typeof closeEvent.payload === 'object' ? closeEvent.payload : {};
-  const saleById = new Map(storedSales.map(record => {
-    const sale = sanitizeReopenedSale(record);
-    return [sale.id, sale];
-  }));
-  const expenseById = new Map(storedExpenses.map(record => {
-    const expense = sanitizeReopenedExpense(record);
-    return [expense.id, expense];
-  }));
+  const payloadSales = Array.isArray(closePayload.sales) ? closePayload.sales : [];
+  const payloadAgreementReceipts = Array.isArray(closePayload.agreementReceipts)
+    ? closePayload.agreementReceipts
+    : [];
+  const storedReceiptEntries = storedReceipts.map(receipt => (
+    receipt?.get ? receipt.get({ plain: true }) : receipt
+  ));
+  const storedSaleIdSet = new Set(storedSales.map(record => String(record.id)));
+  const payloadSaleIds = new Set(
+    payloadSales.map(sale => normalizeText(sale?.id, 64)).filter(Boolean)
+  );
+  const agreementSaleIds = new Set([
+    ...payloadAgreementReceipts.map(receipt => normalizeText(receipt?.id, 64)),
+    ...storedReceiptEntries
+      .filter(receipt => receipt?.tipo === 'convenio')
+      .map(receipt => normalizeText(receipt?.venda_id, 64)),
+  ].filter(Boolean));
+  const supplementalSaleIds = [...new Set([
+    ...payloadSaleIds,
+    ...agreementSaleIds,
+  ])].filter(id => !storedSaleIdSet.has(id));
+  const supplementalStoredSales = supplementalSaleIds.length > 0
+    ? await Venda.findAll({
+        where: {
+          usuario_id: pdv.usuario_id,
+          id: { [Op.in]: supplementalSaleIds },
+        },
+        order: [['registrado_em', 'ASC']],
+        transaction,
+        lock: transaction.LOCK.SHARE,
+      })
+    : [];
+  const supplementalSaleRecordById = new Map(
+    supplementalStoredSales.map(record => [String(record.id), record])
+  );
+  const canonicalSaleRecords = [
+    ...storedSales,
+    ...[...payloadSaleIds].flatMap(id => {
+      const record = supplementalSaleRecordById.get(id);
+      return record ? [record] : [];
+    }),
+  ];
+  const canonicalSaleRecordById = new Map([
+    ...storedSales,
+    ...supplementalStoredSales,
+  ].map(record => [String(record.id), record])
+  );
+  const canonicalSales = canonicalSaleRecords.map(sanitizeReopenedSale);
+  const canonicalExpenses = storedExpenses.map(sanitizeReopenedExpense);
+  const canonicalAgreementReceipts = [...agreementSaleIds].flatMap(id => {
+    const record = canonicalSaleRecordById.get(id);
 
-  if (Array.isArray(closePayload.sales)) {
-    closePayload.sales.forEach(sale => {
-      if (sale?.id) {
-        saleById.set(sale.id, sale);
-      }
-    });
-  }
-
-  if (Array.isArray(closePayload.expenses)) {
-    closePayload.expenses.forEach(expense => {
-      if (expense?.id) {
-        expenseById.set(expense.id, expense);
-      }
-    });
-  }
+    return record ? [sanitizeDesktopConvenioRecebimento(record)] : [];
+  });
 
   return {
-    vendas: [...saleById.values()],
-    despesas: [...expenseById.values()],
-    recebimentos_convenio: Array.isArray(closePayload.agreementReceipts) ? closePayload.agreementReceipts : [],
+    vendas: mergeCanonicalReopenedRecords(canonicalSales, payloadSales),
+    despesas: mergeCanonicalReopenedRecords(canonicalExpenses, closePayload.expenses),
+    recebimentos_convenio: mergeCanonicalReopenedRecords(
+      canonicalAgreementReceipts,
+      payloadAgreementReceipts
+    ),
+    recebimentos: storedReceipts.map(sanitizeReceiptLedgerEntry),
   };
 }
 
@@ -3058,21 +3593,39 @@ module.exports = {
       pdv.ultimo_acesso_em = now;
       pdv.ultima_sincronizacao_em = now;
       await pdv.save();
+      const localInstallmentReconciliation = normalizeLocalInstallmentSaleIds(
+        req.body?.vendas_parceladas_locais ?? req.body?.localInstallmentSaleIds
+      );
 
-      const [snapshot, configuracoes, convenioSnapshot, funcionarioSnapshot, billingStatus] = await Promise.all([
+      const [
+        snapshot,
+        configuracoes,
+        convenioSnapshot,
+        funcionarioSnapshot,
+        installmentSnapshot,
+        billingStatus,
+        identificacao,
+      ] = await Promise.all([
         produtoController.loadSnapshot(pdv.usuario_id, { onlyActive: true }),
         getDesktopConfiguracaoSnapshot(pdv.usuario_id),
         loadDesktopConvenioSnapshot(pdv.usuario_id),
         loadDesktopFuncionariosSnapshot(pdv.usuario_id),
+        loadDesktopInstallmentSnapshot(pdv.usuario_id, pdv.id, {
+          localSaleIds: localInstallmentReconciliation.ids,
+          reconciliationTruncated: localInstallmentReconciliation.truncated,
+        }),
         getBillingStatus(pdv.usuario_id),
+        getVirtualIdentificacao(pdv.usuario_id, pdv.id),
       ]);
 
       return res.json({
         ...snapshot,
+        pdv: sanitizePdv(pdv, { identificacao }),
         configuracoes,
         billing_status: billingStatus,
         ...convenioSnapshot,
         ...funcionarioSnapshot,
+        ...installmentSnapshot,
       });
     } catch (error) {
       return res.status(500).json({ message: 'Erro ao carregar catálogo do PDV.', detail: error.message });
@@ -3160,17 +3713,23 @@ module.exports = {
       }
 
       const now = new Date();
+      const retryableErrors = results.filter(result => (
+        result.status === 'erro' && !isTerminalReceiptConflictResult(result)
+      ));
+      const reconciledConflicts = results.filter(isTerminalReceiptConflictResult);
       pdv.status = 'online';
       pdv.ultimo_acesso_em = now;
       pdv.ultima_sincronizacao_em = now;
-      pdv.sincronizacao_pendente = results.some(result => result.status === 'erro');
+      pdv.sincronizacao_pendente = retryableErrors.length > 0;
       pdv.ultima_fila_offline_em = pdv.sincronizacao_pendente ? now : null;
       await pdv.save();
 
       return res.json({
         sincronizado_em: now.toISOString(),
-        processados: results.filter(result => result.status === 'processado' || result.status === 'duplicado').length,
-        erros: results.filter(result => result.status === 'erro').length,
+        processados: results.filter(result => result.status === 'processado' || result.status === 'duplicado').length +
+          reconciledConflicts.length,
+        conciliados: reconciledConflicts.length,
+        erros: retryableErrors.length,
         billing_status: billingStatus,
         eventos: results,
       });
@@ -3245,4 +3804,15 @@ module.exports = {
       message: 'Desvincule este PDV pelo painel web da conta.',
     });
   },
+};
+
+module.exports.__test = {
+  buildInstallmentTombstones,
+  hasOutstandingInstallment,
+  isPendingCustomerDebt,
+  isTerminalReceiptConflictResult,
+  loadDesktopConvenioSnapshot,
+  loadReopenedCashierSnapshot,
+  mergeCanonicalReopenedRecords,
+  normalizeLocalInstallmentSaleIds,
 };

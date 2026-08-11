@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm --prefix api ci
 
+      - name: Test API
+        run: npm --prefix api test
+
       - name: Build API
         run: npm --prefix api run build
 

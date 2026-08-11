@@ -1,5 +1,13 @@
+const { randomUUID } = require('crypto');
 const { col, fn, Op } = require('sequelize');
+const sequelize = require('../../database');
 const { Caixa, ClienteConvenio, Venda } = require('../models');
+const { normalizeInstallmentPlan } = require('../services/installmentPlanService');
+const {
+  buildReceiptIdempotencyKey,
+  cancelReceipts,
+  registerReceipt,
+} = require('../services/receiptLedgerService');
 
 function normalizeText(value, maxLength) {
   if (typeof value !== 'string') {
@@ -25,16 +33,6 @@ function sanitizeCents(value) {
   }
 
   return Math.max(0, Math.round(parsed));
-}
-
-function sanitizeSignedCents(value) {
-  const parsed = Number(value || 0);
-
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.round(parsed);
 }
 
 function parseBoolean(value) {
@@ -255,61 +253,6 @@ function normalizeRecebimentoPaymentMethod(value) {
   return null;
 }
 
-function normalizePercent(value) {
-  const parsed = Number(value || 0);
-
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.max(-100, Math.min(100, Math.round(parsed)));
-}
-
-function normalizeInstallmentPlan(value) {
-  if (!isObject(value)) {
-    return null;
-  }
-
-  const installmentCount = Math.max(
-    2,
-    Math.min(12, Math.floor(Number(value.installmentCount || value.parcelas || value.quantidade_parcelas || 2)))
-  );
-  const entriesSource = Array.isArray(value.entries)
-    ? value.entries
-    : Array.isArray(value.parcelasDetalhes)
-      ? value.parcelasDetalhes
-      : Array.isArray(value.parcelas_detalhes)
-        ? value.parcelas_detalhes
-        : [];
-  const entries = entriesSource.slice(0, 12).map((entry, index) => {
-    const paidAt = normalizeText(entry.paidAt || entry.pago_em || entry.recebido_em, 40) || null;
-    const paymentMethod = normalizeRecebimentoPaymentMethod(
-      entry.paymentMethod || entry.metodo_pagamento || entry.forma_pagamento
-    );
-
-    return {
-      number: Math.max(1, Math.floor(Number(entry.number || entry.numero || index + 1))),
-      dueDate: normalizeText(entry.dueDate || entry.vencimento || entry.data_vencimento, 20) || null,
-      amountCents: sanitizeCents(entry.amountCents || entry.valorCentavos || entry.valor_centavos),
-      paid: Boolean(entry.paid || entry.pago || paidAt),
-      paidAt,
-      paymentMethod,
-      receivedSessionId: normalizeText(entry.receivedSessionId || entry.caixa_recebimento_id || entry.sessionId, 64) || null,
-    };
-  });
-
-  return {
-    installmentCount,
-    adjustmentPercent: normalizePercent(value.adjustmentPercent || value.percentual_ajuste),
-    originalTotalCents: sanitizeCents(value.originalTotalCents || value.valorOriginalCentavos || value.valor_original_centavos),
-    adjustmentCents: sanitizeSignedCents(value.adjustmentCents || value.ajusteCentavos || value.ajuste_centavos),
-    adjustedTotalCents: sanitizeCents(value.adjustedTotalCents || value.valorFinalCentavos || value.valor_final_centavos),
-    customerName: normalizeText(value.customerName || value.nomeCliente || value.nome_cliente, 120) || null,
-    observation: normalizeText(value.observation || value.observacao, 1000) || null,
-    entries,
-  };
-}
-
 function getConvenioClienteNome(venda) {
   return normalizeText(venda.cliente_convenio?.nome, 160) ||
     normalizeText(venda.nome_cliente, 160) ||
@@ -470,7 +413,17 @@ async function findUserClienteCnpjConflict(usuarioId, cnpj, ignoredId = null) {
   }) || null;
 }
 
-async function findUserRecebimento(usuarioId, vendaId) {
+function getRequestIdempotencyBase(req) {
+  return normalizeText(
+    req.get?.('Idempotency-Key') ||
+      req.body?.chave_idempotencia ||
+      req.body?.idempotency_key ||
+      req.body?.idempotencyKey,
+    220
+  ) || `painel-${randomUUID()}`;
+}
+
+async function findUserRecebimento(usuarioId, vendaId, options = {}) {
   return Venda.findOne({
     where: {
       id: String(vendaId || ''),
@@ -501,10 +454,14 @@ async function findUserRecebimento(usuarioId, vendaId) {
         required: false,
       },
     ],
+    transaction: options.transaction,
+    ...(options.lock && options.transaction
+      ? { lock: { level: options.transaction.LOCK.UPDATE, of: Venda } }
+      : {}),
   });
 }
 
-async function findUserParcelamentoVenda(usuarioId, vendaId) {
+async function findUserParcelamentoVenda(usuarioId, vendaId, options = {}) {
   return Venda.findOne({
     where: {
       id: String(vendaId || ''),
@@ -534,6 +491,10 @@ async function findUserParcelamentoVenda(usuarioId, vendaId) {
         required: false,
       },
     ],
+    transaction: options.transaction,
+    ...(options.lock && options.transaction
+      ? { lock: { level: options.transaction.LOCK.UPDATE, of: Venda } }
+      : {}),
   });
 }
 
@@ -908,28 +869,62 @@ module.exports = {
 
   async confirmarRecebimento(req, res) {
     try {
-      const venda = await findUserRecebimento(req.user.id, req.params.vendaId);
-
-      if (!venda) {
-        return res.status(404).json({ message: 'Recebimento não encontrado.' });
-      }
-
-      if (resolveStatusConvenio(venda) === 'pago') {
-        return res.json(sanitizeRecebimento(venda));
-      }
-
       const paymentMethod = normalizeRecebimentoPaymentMethod(
         req.body?.metodo_pagamento_recebimento || req.body?.metodo_pagamento || req.body?.forma_pagamento
       );
 
-      await venda.update({
-        status_convenio: 'pago',
-        situacao_recebimento: 'baixado_painel',
-        metodo_pagamento_recebimento: paymentMethod,
-        recebido_em: new Date(),
+      if (!paymentMethod) {
+        return res.status(400).json({ message: 'Informe a forma de pagamento do recebimento.' });
+      }
+
+      const receivedAt = new Date();
+      const idempotencyBase = getRequestIdempotencyBase(req);
+      const result = await sequelize.transaction(async transaction => {
+        const venda = await findUserRecebimento(req.user.id, req.params.vendaId, {
+          transaction,
+          lock: true,
+        });
+
+        if (!venda) {
+          return null;
+        }
+
+        if (resolveStatusConvenio(venda) === 'pago') {
+          return { vendaId: venda.id };
+        }
+
+        await registerReceipt(
+          {
+            usuarioId: req.user.id,
+            pdvId: venda.pdv_id,
+            cashierId: null,
+            saleId: venda.id,
+            idempotencyKey: buildReceiptIdempotencyKey(idempotencyBase, 'convenio', venda.id),
+            type: 'convenio',
+            amountCents: venda.total_centavos,
+            paymentMethod,
+            customerName: getConvenioClienteNome(venda),
+            receivedAt,
+            origin: 'painel',
+          },
+          transaction
+        );
+
+        await venda.update({
+          status_convenio: 'pago',
+          situacao_recebimento: 'baixado_painel',
+          metodo_pagamento_recebimento: paymentMethod,
+          recebido_em: receivedAt,
+        }, { transaction });
+
+        return { vendaId: venda.id };
       });
 
-      const updated = await findUserRecebimento(req.user.id, venda.id);
+      if (!result) {
+        return res.status(404).json({ message: 'Recebimento não encontrado.' });
+      }
+
+      const updated = await findUserRecebimento(req.user.id, result.vendaId);
 
       return res.json(sanitizeRecebimento(updated));
     } catch (error) {
@@ -939,18 +934,6 @@ module.exports = {
 
   async confirmarParcelamento(req, res) {
     try {
-      const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId);
-
-      if (!venda) {
-        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
-      }
-
-      const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
-
-      if (!installmentPlan || installmentPlan.entries.length === 0) {
-        return res.status(400).json({ message: 'Parcelamento inválido.' });
-      }
-
       const paymentMethod = normalizeRecebimentoPaymentMethod(
         req.body?.metodo_pagamento_recebimento || req.body?.metodo_pagamento || req.body?.forma_pagamento
       );
@@ -966,44 +949,107 @@ module.exports = {
       if (requestedNumbers.length === 0) {
         return res.status(400).json({ message: 'Selecione ao menos uma parcela.' });
       }
-
-      const requestedSet = new Set(requestedNumbers);
       const now = new Date();
-      let updatedCount = 0;
-      const nextEntries = installmentPlan.entries.map(entry => {
-        if (!requestedSet.has(entry.number)) {
-          return entry;
+      const idempotencyBase = getRequestIdempotencyBase(req);
+      const result = await sequelize.transaction(async transaction => {
+        const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId, {
+          transaction,
+          lock: true,
+        });
+
+        if (!venda) {
+          return { error: 'not_found' };
         }
 
-        updatedCount += 1;
+        const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
 
-        return {
-          ...entry,
-          paid: true,
-          paidAt: now.toISOString(),
-          paymentMethod,
-          receivedSessionId: null,
-        };
+        if (!installmentPlan || installmentPlan.entries.length === 0) {
+          return { error: 'invalid_plan' };
+        }
+
+        const requestedSet = new Set(requestedNumbers);
+        const availableNumbers = new Set(installmentPlan.entries.map(entry => entry.number));
+
+        if (requestedNumbers.some(number => !availableNumbers.has(number))) {
+          return { error: 'installment_not_found' };
+        }
+
+        let updatedCount = 0;
+        const nextEntries = [];
+
+        for (const entry of installmentPlan.entries) {
+          if (!requestedSet.has(entry.number) || entry.paid || entry.paidAt) {
+            nextEntries.push(entry);
+            continue;
+          }
+
+          await registerReceipt(
+            {
+              usuarioId: req.user.id,
+              pdvId: venda.pdv_id,
+              cashierId: null,
+              saleId: venda.id,
+              idempotencyKey: buildReceiptIdempotencyKey(
+                idempotencyBase,
+                'parcela',
+                venda.id,
+                entry.number
+              ),
+              type: 'parcela',
+              installmentNumber: entry.number,
+              installmentCount: installmentPlan.installmentCount,
+              amountCents: entry.amountCents,
+              paymentMethod,
+              customerName: getParcelamentoClienteNome(venda, installmentPlan),
+              receivedAt: now,
+              origin: 'painel',
+              metadata: {
+                vencimento: entry.dueDate,
+              },
+            },
+            transaction
+          );
+          nextEntries.push({
+            ...entry,
+            paid: true,
+            paidAt: now.toISOString(),
+            paymentMethod,
+            receivedSessionId: null,
+          });
+          updatedCount += 1;
+        }
+
+        if (updatedCount > 0) {
+          const nextInstallmentPlan = {
+            ...installmentPlan,
+            entries: nextEntries,
+          };
+          const allPaid = nextEntries.every(entry => entry.paid || entry.paidAt);
+
+          await venda.update({
+            parcelamento: nextInstallmentPlan,
+            metodo_pagamento_recebimento: paymentMethod,
+            situacao_recebimento: allPaid ? 'baixado_painel' : 'pendente',
+            recebido_em: allPaid ? now : venda.recebido_em,
+          }, { transaction });
+        }
+
+        return { vendaId: venda.id };
       });
 
-      if (updatedCount === 0) {
+      if (result.error === 'not_found') {
+        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
+      }
+
+      if (result.error === 'invalid_plan') {
+        return res.status(400).json({ message: 'Parcelamento inválido.' });
+      }
+
+      if (result.error === 'installment_not_found') {
         return res.status(404).json({ message: 'Parcela não encontrada.' });
       }
 
-      const nextInstallmentPlan = {
-        ...installmentPlan,
-        entries: nextEntries,
-      };
-      const allPaid = nextEntries.every(entry => entry.paid || entry.paidAt);
-
-      await venda.update({
-        parcelamento: nextInstallmentPlan,
-        metodo_pagamento_recebimento: paymentMethod,
-        situacao_recebimento: allPaid ? 'baixado_painel' : 'pendente',
-        recebido_em: allPaid ? now : venda.recebido_em,
-      });
-
-      const updated = await findUserParcelamentoVenda(req.user.id, venda.id);
+      const updated = await findUserParcelamentoVenda(req.user.id, result.vendaId);
       const updatedPlan = normalizeInstallmentPlan(updated.parcelamento);
 
       return res.json({
@@ -1016,18 +1062,6 @@ module.exports = {
 
   async cancelarParcelamento(req, res) {
     try {
-      const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId);
-
-      if (!venda) {
-        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
-      }
-
-      const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
-
-      if (!installmentPlan || installmentPlan.entries.length === 0) {
-        return res.status(400).json({ message: 'Parcelamento inválido.' });
-      }
-
       const requestedNumbers = normalizeInstallmentNumbers(
         req.body?.parcelas ?? req.body?.parcela ?? req.body?.numeros
       );
@@ -1035,41 +1069,86 @@ module.exports = {
       if (requestedNumbers.length === 0) {
         return res.status(400).json({ message: 'Informe a parcela.' });
       }
+      const canceledAt = new Date();
+      const result = await sequelize.transaction(async transaction => {
+        const venda = await findUserParcelamentoVenda(req.user.id, req.params.vendaId, {
+          transaction,
+          lock: true,
+        });
 
-      const requestedSet = new Set(requestedNumbers);
-      let updatedCount = 0;
-      const nextEntries = installmentPlan.entries.map(entry => {
-        if (!requestedSet.has(entry.number)) {
-          return entry;
+        if (!venda) {
+          return { error: 'not_found' };
         }
 
-        updatedCount += 1;
+        const installmentPlan = normalizeInstallmentPlan(venda.parcelamento);
 
-        return {
-          ...entry,
-          paid: false,
-          paidAt: null,
-          paymentMethod: null,
-          receivedSessionId: null,
-        };
+        if (!installmentPlan || installmentPlan.entries.length === 0) {
+          return { error: 'invalid_plan' };
+        }
+
+        const requestedSet = new Set(requestedNumbers);
+        const availableNumbers = new Set(installmentPlan.entries.map(entry => entry.number));
+
+        if (requestedNumbers.some(number => !availableNumbers.has(number))) {
+          return { error: 'installment_not_found' };
+        }
+
+        const nextEntries = installmentPlan.entries.map(entry => {
+          if (!requestedSet.has(entry.number)) {
+            return entry;
+          }
+
+          return {
+            ...entry,
+            paid: false,
+            paidAt: null,
+            paymentMethod: null,
+            receivedSessionId: null,
+          };
+        });
+
+        for (const installmentNumber of requestedNumbers) {
+          await cancelReceipts(
+            {
+              usuarioId: req.user.id,
+              saleId: venda.id,
+              type: 'parcela',
+              installmentNumber,
+              canceledAt,
+              reason: 'Recebimento de parcela cancelado no painel.',
+            },
+            transaction
+          );
+        }
+
+        const remainingPaidEntries = nextEntries.filter(entry => entry.paid || entry.paidAt);
+        await venda.update({
+          parcelamento: {
+            ...installmentPlan,
+            entries: nextEntries,
+          },
+          metodo_pagamento_recebimento:
+            remainingPaidEntries.at(-1)?.paymentMethod || null,
+          situacao_recebimento: 'pendente',
+          recebido_em: null,
+        }, { transaction });
+
+        return { vendaId: venda.id };
       });
 
-      if (updatedCount === 0) {
+      if (result.error === 'not_found') {
+        return res.status(404).json({ message: 'Venda parcelada não encontrada.' });
+      }
+
+      if (result.error === 'invalid_plan') {
+        return res.status(400).json({ message: 'Parcelamento inválido.' });
+      }
+
+      if (result.error === 'installment_not_found') {
         return res.status(404).json({ message: 'Parcela não encontrada.' });
       }
 
-      const nextInstallmentPlan = {
-        ...installmentPlan,
-        entries: nextEntries,
-      };
-
-      await venda.update({
-        parcelamento: nextInstallmentPlan,
-        situacao_recebimento: 'pendente',
-        recebido_em: null,
-      });
-
-      const updated = await findUserParcelamentoVenda(req.user.id, venda.id);
+      const updated = await findUserParcelamentoVenda(req.user.id, result.vendaId);
       const updatedPlan = normalizeInstallmentPlan(updated.parcelamento);
 
       return res.json({
@@ -1082,25 +1161,48 @@ module.exports = {
 
   async cancelarRecebimento(req, res) {
     try {
-      const venda = await findUserRecebimento(req.user.id, req.params.vendaId);
+      const canceledAt = new Date();
+      const result = await sequelize.transaction(async transaction => {
+        const venda = await findUserRecebimento(req.user.id, req.params.vendaId, {
+          transaction,
+          lock: true,
+        });
 
-      if (!venda) {
+        if (!venda) {
+          return null;
+        }
+
+        if (resolveStatusConvenio(venda) === 'pendente') {
+          return { vendaId: venda.id };
+        }
+
+        await cancelReceipts(
+          {
+            usuarioId: req.user.id,
+            saleId: venda.id,
+            type: 'convenio',
+            canceledAt,
+            reason: 'Recebimento de convênio cancelado no painel.',
+          },
+          transaction
+        );
+
+        await venda.update({
+          status_convenio: 'pendente',
+          situacao_recebimento: 'pendente',
+          metodo_pagamento_recebimento: null,
+          caixa_recebimento_id: null,
+          recebido_em: null,
+        }, { transaction });
+
+        return { vendaId: venda.id };
+      });
+
+      if (!result) {
         return res.status(404).json({ message: 'Recebimento não encontrado.' });
       }
 
-      if (resolveStatusConvenio(venda) === 'pendente') {
-        return res.json(sanitizeRecebimento(venda));
-      }
-
-      await venda.update({
-        status_convenio: 'pendente',
-        situacao_recebimento: 'pendente',
-        metodo_pagamento_recebimento: null,
-        caixa_recebimento_id: null,
-        recebido_em: null,
-      });
-
-      const updated = await findUserRecebimento(req.user.id, venda.id);
+      const updated = await findUserRecebimento(req.user.id, result.vendaId);
 
       return res.json(sanitizeRecebimento(updated));
     } catch (error) {

@@ -443,7 +443,7 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
       return readEvents(scope)
         .filter((event) => event.status === "pending")
         .sort((first, second) => first.created_at.localeCompare(second.created_at))
-        .slice(0, Math.min(Math.max(Number(limit) || 100, 1), 250))
+        .slice(0, Math.min(Math.max(Number(limit) || 100, 1), 1_000))
         .map(omitEventStatus);
     },
 
@@ -527,7 +527,7 @@ function createBrowserFallbackStore(): LocalPdvStoreBridge {
       return readEvents(scope)
         .filter((event) => event.status === "failed")
         .sort((first, second) => second.updated_at.localeCompare(first.updated_at))
-        .slice(0, Math.min(Math.max(Number(limit) || 10, 1), 50))
+        .slice(0, Math.min(Math.max(Number(limit) || 10, 1), 1_000))
         .map(omitEventStatus);
     },
 

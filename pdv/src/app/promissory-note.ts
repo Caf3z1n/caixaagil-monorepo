@@ -49,6 +49,16 @@ export type InstallmentPaymentPlan = {
   originalTotalCents: number;
   adjustmentCents: number;
   adjustedTotalCents: number;
+  schemaVersion?: number;
+  firstDueDate?: string | null;
+  adjustmentKind?: "none" | "discount" | "interest";
+  adjustmentAmountCents?: number;
+  downPaymentCents?: number;
+  downPaymentMethod?: string | null;
+  downPaymentPaidAt?: string | null;
+  downPaymentSessionId?: string | null;
+  financedBalanceCents?: number;
+  financedTotalCents?: number;
   customerName?: string | null;
   observation?: string | null;
   entries: InstallmentPaymentEntry[];
@@ -83,6 +93,28 @@ function compactText(value: unknown, maxLength?: number) {
   const limitedText = typeof maxLength === "number" && maxLength > 0 ? text.slice(0, maxLength) : text;
 
   return limitedText || "";
+}
+
+function asIntegerCents(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const cents = Number(value);
+
+  if (!Number.isFinite(cents)) {
+    return null;
+  }
+
+  const roundedCents = Math.round(cents);
+
+  return Number.isSafeInteger(roundedCents) ? roundedCents : null;
+}
+
+function asNonNegativeCents(value: unknown) {
+  const cents = asIntegerCents(value);
+
+  return cents === null ? null : Math.max(0, cents);
 }
 
 function onlyDigits(value: unknown) {
@@ -282,6 +314,16 @@ function getCompanyDisplayName(fiscalSettings: Record<string, unknown> | null | 
   ) || "Caixa Ágil";
 }
 
+function getPdvDisplayName(pdvIdentity: string) {
+  return compactText(pdvIdentity, 80) || "Não informado";
+}
+
+function getSaleClientDisplayName(sale: PromissorySaleData) {
+  return compactText(sale.clientName, 120) ||
+    compactText(sale.installmentPlan?.customerName, 120) ||
+    "Não informado";
+}
+
 function buildCompanyLines(fiscalSettings: Record<string, unknown> | null | undefined, pdvIdentity: string) {
   const emitente = asRecord(fiscalSettings?.emitente);
   const document = formatDocument(emitente?.cnpj_cpf ?? emitente?.cnpjCpf ?? emitente?.cnpj);
@@ -350,19 +392,85 @@ function formatAdjustmentPercent(value: number) {
   return `${value > 0 ? "+" : "-"}${formatted}%`;
 }
 
-function getInstallmentAdjustmentField(plan: InstallmentPaymentPlan | null) {
-  if (!plan || plan.adjustmentCents === 0) {
+function getInstallmentAdjustmentCents(plan: InstallmentPaymentPlan) {
+  const signedAdjustmentCents = asIntegerCents(plan.adjustmentCents);
+  const absoluteAdjustmentCents = asNonNegativeCents(plan.adjustmentAmountCents);
+
+  if (Number(plan.schemaVersion) >= 2 && plan.adjustmentKind) {
+    const monetaryAdjustmentCents = absoluteAdjustmentCents ?? Math.abs(signedAdjustmentCents ?? 0);
+
+    if (plan.adjustmentKind === "none") {
+      return 0;
+    }
+
+    return plan.adjustmentKind === "discount"
+      ? -monetaryAdjustmentCents
+      : monetaryAdjustmentCents;
+  }
+
+  if (signedAdjustmentCents !== null && (signedAdjustmentCents !== 0 || absoluteAdjustmentCents === null)) {
+    return signedAdjustmentCents;
+  }
+
+  if (absoluteAdjustmentCents === null || plan.adjustmentKind === "none") {
+    return 0;
+  }
+
+  return plan.adjustmentKind === "discount"
+    ? -absoluteAdjustmentCents
+    : absoluteAdjustmentCents;
+}
+
+function getInstallmentAdjustmentField(plan: InstallmentPaymentPlan | null, adjustmentCents?: number) {
+  if (!plan) {
     return null;
   }
 
-  const isFee = plan.adjustmentCents > 0;
+  const resolvedAdjustmentCents = adjustmentCents ?? getInstallmentAdjustmentCents(plan);
+
+  if (resolvedAdjustmentCents === 0) {
+    return null;
+  }
+
+  const isFee = resolvedAdjustmentCents > 0;
   const label = isFee ? "Juros" : "Desconto";
   const prefix = isFee ? "+" : "-";
-  const percent = plan.adjustmentPercent !== 0 ? ` (${formatAdjustmentPercent(plan.adjustmentPercent)})` : "";
+  const adjustmentPercent = Number(plan.adjustmentPercent);
+  const percent = !(Number(plan.schemaVersion) >= 2) && Number.isFinite(adjustmentPercent) && adjustmentPercent !== 0
+    ? ` (${formatAdjustmentPercent(adjustmentPercent)})`
+    : "";
 
   return {
     label,
-    value: `${prefix}${formatMoney(Math.abs(plan.adjustmentCents))}${percent}`
+    value: `${prefix}${formatMoney(Math.abs(resolvedAdjustmentCents))}${percent}`
+  };
+}
+
+function getInstallmentFinancialSummary(plan: InstallmentPaymentPlan, saleTotalCents: number) {
+  const saleTotal = asNonNegativeCents(saleTotalCents) ?? 0;
+  const subtotalCents = asNonNegativeCents(plan.originalTotalCents) ?? saleTotal;
+  const adjustmentCents = getInstallmentAdjustmentCents(plan);
+  const calculatedFinalTotalCents = Math.max(0, subtotalCents + adjustmentCents);
+  const finalTotalCents = asNonNegativeCents(plan.adjustedTotalCents) ?? calculatedFinalTotalCents;
+  const downPaymentCents = asNonNegativeCents(plan.downPaymentCents) ?? 0;
+  const persistedFinancedCents = asNonNegativeCents(plan.financedBalanceCents) ??
+    asNonNegativeCents(plan.financedTotalCents);
+  const entriesTotalCents = plan.entries.reduce(
+    (total, entry) => total + (asNonNegativeCents(entry.amountCents) ?? 0),
+    0
+  );
+  const financedBalanceCents = persistedFinancedCents ?? (
+    plan.entries.length > 0
+      ? entriesTotalCents
+      : Math.max(0, finalTotalCents - downPaymentCents)
+  );
+
+  return {
+    subtotalCents,
+    adjustmentCents,
+    downPaymentCents,
+    financedBalanceCents,
+    finalTotalCents
   };
 }
 
@@ -370,7 +478,7 @@ function buildInstallmentScheduleText(plan: InstallmentPaymentPlan) {
   const header = `${padColumn("PARC", 4)} ${padColumn("VENC", 8)} ${padColumn("VALOR", 8, "right")} ${padColumn("PAGO", 8)}`;
   const divider = "-".repeat(header.length);
   const rows = plan.entries.map((entry, index) => {
-    const numberLabel = `${entry.number || index + 1}/${plan.installmentCount}`;
+    const numberLabel = String(entry.number || index + 1);
     const paidLabel = entry.paid ? formatShortDateOnly(entry.paidAt || "") : "-";
 
     return `${padColumn(numberLabel, 4)} ${padColumn(formatShortDateOnly(entry.dueDate), 8)} ${padColumn(formatMoney(entry.amountCents), 8, "right")} ${padColumn(paidLabel, 8)}`;
@@ -405,11 +513,14 @@ export function buildPromissoryNoteReceiptPayload({
   agreementClient,
   fiscalDocument
 }: PromissoryPayloadInput): NonFiscalReceiptPayload {
-  const clientName = compactText(sale.clientName ?? agreementClient?.name) || "Cliente não informado";
+  const clientName = compactText(sale.clientName, 120) ||
+    compactText(agreementClient?.name, 120) ||
+    "Cliente não informado";
   const consumerName = compactText(sale.consumerName);
   const consumerObservation = compactText(sale.consumerObservation, 500);
   const fields = [
     { label: "Emissão", value: formatDateTime(sale.createdAt) },
+    { label: "PDV", value: getPdvDisplayName(pdvIdentity) },
     { label: "Cliente", value: clientName },
     { label: "Referência fiscal", value: buildFiscalReference(fiscalDocument, sale.id) },
     ...(consumerName ? [{ label: "Nome informado", value: consumerName }] : []),
@@ -464,11 +575,25 @@ export function buildSaleReceiptPayload({
   const receiptPaymentLabel = installmentPlan
     ? `Parcelamento ${installmentPlan.installmentCount}x`
     : paymentLabel;
-  const adjustmentField = getInstallmentAdjustmentField(installmentPlan);
+  const financialSummary = installmentPlan
+    ? getInstallmentFinancialSummary(installmentPlan, sale.totalCents)
+    : null;
+  const adjustmentField = getInstallmentAdjustmentField(
+    installmentPlan,
+    financialSummary?.adjustmentCents
+  );
   const fields = [
     { label: "Emissão", value: formatDateTime(sale.createdAt) },
+    { label: "PDV", value: getPdvDisplayName(pdvIdentity) },
+    ...(installmentPlan ? [{ label: "Cliente", value: getSaleClientDisplayName(sale) }] : []),
     { label: "Pagamento", value: receiptPaymentLabel },
+    ...(financialSummary ? [{ label: "Subtotal", value: formatMoney(financialSummary.subtotalCents) }] : []),
     ...(adjustmentField ? [adjustmentField] : []),
+    ...(financialSummary ? [
+      { label: "Entrada", value: formatMoney(financialSummary.downPaymentCents) },
+      { label: "Saldo parcelado", value: formatMoney(financialSummary.financedBalanceCents) },
+      { label: "Total final", value: formatMoney(financialSummary.finalTotalCents) }
+    ] : []),
     ...(compactText(sellerName) ? [{ label: "Vendedor", value: compactText(sellerName, 80) }] : [])
   ];
   const sections = [
@@ -490,7 +615,7 @@ export function buildSaleReceiptPayload({
     companyName: getCompanyDisplayName(fiscalSettings, pdvIdentity),
     companyLines: buildCompanyLines(fiscalSettings, pdvIdentity),
     highlightLabel: "Total",
-    highlightValue: formatMoney(sale.totalCents),
+    highlightValue: formatMoney(financialSummary?.finalTotalCents ?? sale.totalCents),
     fields,
     sections,
     printerName,

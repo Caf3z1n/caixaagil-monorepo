@@ -1963,7 +1963,7 @@ internal static class Program
             ?.Trim();
         var digestValueHex = ToHex(digestValue ?? string.Empty);
         var cscId = OnlyDigits(config.Nfce.CscId).TrimStart('0');
-        var total = FormatDecimal(emission.Lines.Sum(line => line.TotalPrice), 2);
+        var total = FormatDecimal(MoneyFromCents(emission.Totals.InvoiceTotalCents), 2);
 
         if (string.IsNullOrWhiteSpace(digestValue))
         {
@@ -2064,6 +2064,22 @@ internal static class Program
         DateTimeOffset? dhCont = DateTimeOffset.TryParse(dhContText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedDhCont)
             ? parsedDhCont
             : null;
+        var productsTotalCents = MoneyToCents(ReadXmlDecimal(icmsTotal, "vProd"));
+        var discountCents = MoneyToCents(ReadXmlDecimal(icmsTotal, "vDesc"));
+        var otherCents = MoneyToCents(ReadXmlDecimal(icmsTotal, "vOutro"));
+        var invoiceTotalCents = MoneyToCents(ReadXmlDecimal(icmsTotal, "vNF"));
+
+        if (productsTotalCents <= 0)
+        {
+            productsTotalCents = checked(invoiceTotalCents + discountCents - otherCents);
+        }
+
+        if (invoiceTotalCents <= 0)
+        {
+            invoiceTotalCents = checked(productsTotalCents - discountCents + otherCents);
+        }
+
+        var paymentDetails = FiscalPaymentXml.Parse(infNFe, invoiceTotalCents);
 
         return new NfceEmission(
             Modelo: modelo,
@@ -2079,7 +2095,8 @@ internal static class Program
             TipoEmissao: OnlyDigits(ReadXmlValue(ide, "tpEmis")),
             DhCont: dhCont,
             XJust: ReadXmlValue(ide, "xJust"),
-            PaymentMethod: "dinheiro",
+            PaymentMethod: paymentDetails[0].PaymentMethod,
+            PaymentDetails: paymentDetails,
             Emitter: config.Emitente,
             Recipient: null,
             ConsumerDocument: NormalizeConsumerDocument(
@@ -2090,8 +2107,12 @@ internal static class Program
                     ProductId: null,
                     Name: "Venda PDV",
                     Quantity: 1m,
-                    UnitPrice: ReadXmlDecimal(icmsTotal, "vNF"),
-                    TotalPrice: ReadXmlDecimal(icmsTotal, "vNF"),
+                    UnitPrice: MoneyFromCents(productsTotalCents),
+                    TotalPrice: MoneyFromCents(productsTotalCents),
+                    TotalPriceCents: productsTotalCents,
+                    DiscountCents: discountCents,
+                    OtherCents: otherCents,
+                    HasExplicitFiscalAdjustments: true,
                     Barcode: null,
                     Ncm: "21069090",
                     Cfop: "5102",
@@ -2102,7 +2123,12 @@ internal static class Program
                     PisRate: 0m,
                     CofinsCst: "49",
                     CofinsRate: 0m)
-            });
+            },
+            Totals: new FiscalDocumentTotals(
+                ProductsTotalCents: productsTotalCents,
+                DiscountCents: discountCents,
+                OtherCents: otherCents,
+                InvoiceTotalCents: invoiceTotalCents));
     }
 
     private static NfceEmission BuildNfceEmission(FiscalConfig config, JsonObject? payload, string modelo = "65")
@@ -2112,6 +2138,12 @@ internal static class Program
         var items = GetArray(payload, "itens") ?? GetArray(payload, "items") ?? GetArray(sale, "items") ?? new JsonArray();
         var saleId = GetString(payload, "vendaId") ?? GetString(payload, "venda_id") ?? GetString(sale, "id") ?? Guid.NewGuid().ToString("N");
         var paymentMethod = GetString(payload, "paymentMethod") ?? GetString(sale, "paymentMethod") ?? "dinheiro";
+        var explicitPaymentDetails = GetArray(payload, "paymentDetails") ??
+            GetArray(payload, "pagamentosFiscais") ??
+            GetArray(sale, "fiscalPaymentDetails") ??
+            GetArray(sale, "paymentDetails") ??
+            GetArray(sale, "pagamentosFiscais");
+        var explicitFiscalTotals = GetObject(payload, "fiscalTotals") ?? GetObject(sale, "fiscalTotals");
         var issueDate = ResolveFiscalIssueDate(payload);
         var serie = ParseInt(GetString(payload, "serie"), modelo == "55" ? config.Nfe.Serie ?? 1 : config.Nfce.Serie ?? 1);
         var numero = ParseInt(GetString(payload, "numero"), Math.Max(1, modelo == "55" ? config.Nfe.UltimoNumero ?? 1 : config.Nfce.UltimoNumero ?? 1));
@@ -2120,6 +2152,12 @@ internal static class Program
         var cNf = BuildStableRandomCode(saleId, numero);
         var chave = BuildAccessKey(codigoUf, issueDate, cnpj, modelo, serie, numero, cNf, "1");
         var lines = BuildNfceLines(items, sale, modelo);
+        var requestedInvoiceTotalCents = FirstInt(
+            GetInt(payload, "totalCents"),
+            GetInt(payload, "total_centavos"),
+            GetInt(sale, "totalCents"),
+            GetInt(sale, "total_centavos"),
+            GetInt(explicitFiscalTotals, "invoiceTotalCents"));
         var recipient = modelo == "55" ? BuildRecipientConfig(payload) : null;
         var consumerDocument = modelo == "65"
             ? NormalizeConsumerDocument(FirstNonBlank(
@@ -2133,13 +2171,17 @@ internal static class Program
 
         if (lines.Count == 0)
         {
-            var totalCents = GetInt(payload, "totalCents") ?? GetInt(sale, "totalCents") ?? 0;
+            var totalCents = requestedInvoiceTotalCents ?? 0;
             lines.Add(new NfceLine(
                 ProductId: null,
                 Name: "Venda PDV",
                 Quantity: 1m,
                 UnitPrice: MoneyFromCents(totalCents),
                 TotalPrice: MoneyFromCents(totalCents),
+                TotalPriceCents: totalCents,
+                DiscountCents: 0,
+                OtherCents: 0,
+                HasExplicitFiscalAdjustments: false,
                 Barcode: null,
                 Ncm: "22030000",
                 Cfop: "5102",
@@ -2151,6 +2193,12 @@ internal static class Program
                 CofinsCst: "04",
                 CofinsRate: 0m));
         }
+
+        var fiscalResult = ResolveFiscalDocumentTotals(lines, requestedInvoiceTotalCents, explicitFiscalTotals);
+        var paymentDetails = BuildFiscalPaymentDetails(
+            explicitPaymentDetails,
+            paymentMethod,
+            fiscalResult.Totals.InvoiceTotalCents);
 
         return new NfceEmission(
             Modelo: modelo,
@@ -2167,10 +2215,12 @@ internal static class Program
             DhCont: null,
             XJust: null,
             PaymentMethod: paymentMethod,
+            PaymentDetails: paymentDetails,
             Emitter: config.Emitente,
             Recipient: recipient,
             ConsumerDocument: consumerDocument,
-            Lines: lines);
+            Lines: fiscalResult.Lines,
+            Totals: fiscalResult.Totals);
     }
 
     private static List<NfceLine> BuildNfceLines(JsonArray items, JsonObject? sale, string modelo = "65")
@@ -2190,6 +2240,24 @@ internal static class Program
             var quantity = GetDecimal(item, "quantity") ?? GetDecimal(item, "quantidade") ?? 1m;
             var unitCents = GetInt(item, "priceCents") ?? GetInt(item, "preco_unitario_centavos") ?? GetInt(item, "preco_venda_centavos") ?? 0;
             var totalCents = GetInt(item, "totalPriceCents") ?? GetInt(item, "total_centavos") ?? decimal.ToInt32(Math.Round(unitCents * quantity, 0));
+            var fiscalDiscountCents = FirstInt(
+                GetInt(item, "fiscalDiscountCents"),
+                GetInt(item, "desconto_fiscal_centavos"));
+            var fiscalOtherCents = FirstInt(
+                GetInt(item, "fiscalOtherCents"),
+                GetInt(item, "acrescimo_fiscal_centavos"));
+            var hasExplicitFiscalAdjustments = fiscalDiscountCents.HasValue || fiscalOtherCents.HasValue;
+
+            if (hasExplicitFiscalAdjustments && (!fiscalDiscountCents.HasValue || !fiscalOtherCents.HasValue))
+            {
+                throw new InvalidOperationException("O ajuste fiscal por item está incompleto.");
+            }
+
+            if (totalCents < 0 || fiscalDiscountCents < 0 || fiscalOtherCents < 0)
+            {
+                throw new InvalidOperationException("Os valores fiscais dos itens devem ser informados em centavos não negativos.");
+            }
+
             var total = MoneyFromCents(totalCents);
             var unit = quantity > 0 ? Math.Round(total / quantity, 4) : MoneyFromCents(unitCents);
             var productName = GetString(item, "name") ?? GetString(item, "nome") ?? "Produto";
@@ -2210,6 +2278,10 @@ internal static class Program
                 Quantity: quantity,
                 UnitPrice: unit,
                 TotalPrice: total,
+                TotalPriceCents: totalCents,
+                DiscountCents: fiscalDiscountCents ?? 0,
+                OtherCents: fiscalOtherCents ?? 0,
+                HasExplicitFiscalAdjustments: hasExplicitFiscalAdjustments,
                 Barcode: GetString(item, "barcode") ?? GetString(item, "codigo_barras"),
                 Ncm: ncm,
                 Cfop: cfop.Length == 4 ? cfop : "5102",
@@ -2225,16 +2297,186 @@ internal static class Program
         return lines;
     }
 
+    private static FiscalDocumentResult ResolveFiscalDocumentTotals(
+        List<NfceLine> sourceLines,
+        int? requestedInvoiceTotalCents,
+        JsonObject? explicitFiscalTotals)
+    {
+        var productsTotalLong = sourceLines.Sum(line => (long)line.TotalPriceCents);
+
+        if (productsTotalLong <= 0 || productsTotalLong > int.MaxValue)
+        {
+            throw new InvalidOperationException("O subtotal fiscal dos itens deve ser maior que zero e caber em centavos inteiros.");
+        }
+
+        var productsTotalCents = (int)productsTotalLong;
+        var explicitInvoiceTotalCents = GetInt(explicitFiscalTotals, "invoiceTotalCents");
+        var invoiceTotalCents = requestedInvoiceTotalCents ?? explicitInvoiceTotalCents ?? productsTotalCents;
+
+        if (invoiceTotalCents <= 0)
+        {
+            throw new InvalidOperationException("O total fiscal da venda deve ser maior que zero.");
+        }
+
+        if (requestedInvoiceTotalCents.HasValue && explicitInvoiceTotalCents.HasValue &&
+            requestedInvoiceTotalCents.Value != explicitInvoiceTotalCents.Value)
+        {
+            throw new InvalidOperationException("O total fiscal explícito diverge do total da venda.");
+        }
+
+        var differenceCents = (long)invoiceTotalCents - productsTotalCents;
+        var discountCents = differenceCents < 0 ? checked((int)-differenceCents) : 0;
+        var otherCents = differenceCents > 0 ? checked((int)differenceCents) : 0;
+
+        if (discountCents > productsTotalCents)
+        {
+            throw new InvalidOperationException("O desconto fiscal não pode superar o subtotal dos itens.");
+        }
+
+        ValidateExplicitFiscalTotals(
+            explicitFiscalTotals,
+            productsTotalCents,
+            discountCents,
+            otherCents,
+            invoiceTotalCents);
+
+        var hasAnyExplicitItemAdjustment = sourceLines.Any(line => line.HasExplicitFiscalAdjustments);
+        var hasAllExplicitItemAdjustments = sourceLines.All(line => line.HasExplicitFiscalAdjustments);
+        List<NfceLine> lines;
+
+        if (hasAnyExplicitItemAdjustment && !hasAllExplicitItemAdjustments)
+        {
+            throw new InvalidOperationException("A distribuição do ajuste fiscal deve ser informada para todos os itens.");
+        }
+
+        if (hasAllExplicitItemAdjustments)
+        {
+            lines = sourceLines;
+        }
+        else
+        {
+            var allocatedDiscounts = AllocateFiscalAdjustmentCents(discountCents, sourceLines);
+            var allocatedOther = AllocateFiscalAdjustmentCents(otherCents, sourceLines);
+            lines = sourceLines
+                .Select((line, index) => line with
+                {
+                    DiscountCents = allocatedDiscounts[index],
+                    OtherCents = allocatedOther[index],
+                    HasExplicitFiscalAdjustments = true
+                })
+                .ToList();
+        }
+
+        var itemDiscountCents = lines.Sum(line => (long)line.DiscountCents);
+        var itemOtherCents = lines.Sum(line => (long)line.OtherCents);
+
+        if (lines.Any(line =>
+                line.DiscountCents < 0 ||
+                line.OtherCents < 0 ||
+                line.DiscountCents > line.TotalPriceCents) ||
+            itemDiscountCents != discountCents ||
+            itemOtherCents != otherCents ||
+            productsTotalCents - discountCents + otherCents != invoiceTotalCents)
+        {
+            throw new InvalidOperationException("A distribuição fiscal dos itens não fecha exatamente com o total da venda.");
+        }
+
+        return new FiscalDocumentResult(
+            Lines: lines,
+            Totals: new FiscalDocumentTotals(
+                ProductsTotalCents: productsTotalCents,
+                DiscountCents: discountCents,
+                OtherCents: otherCents,
+                InvoiceTotalCents: invoiceTotalCents));
+    }
+
+    private static void ValidateExplicitFiscalTotals(
+        JsonObject? explicitFiscalTotals,
+        int productsTotalCents,
+        int discountCents,
+        int otherCents,
+        int invoiceTotalCents)
+    {
+        if (explicitFiscalTotals is null)
+        {
+            return;
+        }
+
+        var explicitProductsTotalCents = GetInt(explicitFiscalTotals, "productsTotalCents");
+        var explicitDiscountCents = GetInt(explicitFiscalTotals, "discountCents");
+        var explicitOtherCents = GetInt(explicitFiscalTotals, "otherCents");
+        var explicitInvoiceTotalCents = GetInt(explicitFiscalTotals, "invoiceTotalCents");
+
+        if (!explicitProductsTotalCents.HasValue ||
+            !explicitDiscountCents.HasValue ||
+            !explicitOtherCents.HasValue ||
+            !explicitInvoiceTotalCents.HasValue)
+        {
+            throw new InvalidOperationException("O resumo fiscal explícito está incompleto.");
+        }
+
+        if (explicitProductsTotalCents.Value != productsTotalCents ||
+            explicitDiscountCents.Value != discountCents ||
+            explicitOtherCents.Value != otherCents ||
+            explicitInvoiceTotalCents.Value != invoiceTotalCents)
+        {
+            throw new InvalidOperationException("O resumo fiscal explícito diverge dos itens ou do total da venda.");
+        }
+    }
+
+    private static int[] AllocateFiscalAdjustmentCents(int amountCents, List<NfceLine> lines)
+    {
+        var result = new int[lines.Count];
+
+        if (amountCents == 0)
+        {
+            return result;
+        }
+
+        var productsTotalCents = lines.Sum(line => (long)line.TotalPriceCents);
+        var remainders = new List<(int Index, long Remainder)>(lines.Count);
+        long allocatedCents = 0;
+
+        for (var index = 0; index < lines.Count; index++)
+        {
+            var weightedAmount = checked((long)amountCents * lines[index].TotalPriceCents);
+            var allocated = weightedAmount / productsTotalCents;
+            result[index] = checked((int)allocated);
+            allocatedCents += allocated;
+            remainders.Add((index, weightedAmount % productsTotalCents));
+        }
+
+        var remainingCents = checked(amountCents - (int)allocatedCents);
+
+        foreach (var remainder in remainders
+            .OrderByDescending(value => value.Remainder)
+            .ThenBy(value => value.Index))
+        {
+            if (remainingCents <= 0)
+            {
+                break;
+            }
+
+            result[remainder.Index] = checked(result[remainder.Index] + 1);
+            remainingCents--;
+        }
+
+        if (remainingCents != 0)
+        {
+            throw new InvalidOperationException("Não foi possível distribuir o ajuste fiscal em centavos.");
+        }
+
+        return result;
+    }
+
     private static string BuildNfceXml(NfceEmission emission)
     {
         var details = new StringBuilder();
-        decimal totalProducts = 0m;
         var tipoEmissao = string.IsNullOrWhiteSpace(emission.TipoEmissao) ? "1" : emission.TipoEmissao;
 
         for (var index = 0; index < emission.Lines.Count; index++)
         {
             var line = emission.Lines[index];
-            totalProducts += line.TotalPrice;
             details.Append(BuildNfceDetailXml(line, index, emission.Ambiente, emission.Emitter.Crt));
         }
 
@@ -2265,9 +2507,9 @@ internal static class Program
             BuildEmitterXml(emission.Emitter, emission.Uf) +
             (emission.Modelo == "55" ? BuildRecipientXml(emission) : BuildConsumerRecipientXml(emission)) +
             details +
-            BuildTotalXml(totalProducts, emission.Lines, emission.Emitter.Crt, emission.Ambiente) +
+            BuildTotalXml(emission.Totals, emission.Lines, emission.Emitter.Crt, emission.Ambiente) +
             Wrap("transp", Tag("modFrete", "9")) +
-            BuildPaymentXml(emission.PaymentMethod, totalProducts) +
+            FiscalPaymentXml.Build(emission.PaymentDetails, emission.Totals.InvoiceTotalCents) +
             Wrap("infAdic", Tag("infCpl", "Documento emitido pelo Caixa Agil PDV.")),
             new Dictionary<string, string>
             {
@@ -2499,6 +2741,8 @@ internal static class Program
                 Tag("uTrib", "UN") +
                 Tag("qTrib", FormatDecimal(line.Quantity, 4)) +
                 Tag("vUnTrib", FormatDecimal(line.UnitPrice, 4)) +
+                (line.DiscountCents > 0 ? Tag("vDesc", FormatDecimal(MoneyFromCents(line.DiscountCents), 2)) : string.Empty) +
+                (line.OtherCents > 0 ? Tag("vOutro", FormatDecimal(MoneyFromCents(line.OtherCents), 2)) : string.Empty) +
                 Tag("indTot", "1")) +
             Wrap("imposto",
                 Tag("vTotTrib", "0.00") +
@@ -2612,8 +2856,9 @@ internal static class Program
             Tag("vICMS", FormatDecimal(icmsValue, 2)));
     }
 
-    private static string BuildTotalXml(decimal totalProducts, List<NfceLine> lines, string? crt, string ambiente)
+    private static string BuildTotalXml(FiscalDocumentTotals totals, List<NfceLine> lines, string? crt, string ambiente)
     {
+        var totalProducts = MoneyFromCents(totals.ProductsTotalCents);
         var icmsBase = 0m;
         var icmsValue = 0m;
 
@@ -2646,14 +2891,14 @@ internal static class Program
             Tag("vProd", FormatDecimal(totalProducts, 2)) +
             Tag("vFrete", "0.00") +
             Tag("vSeg", "0.00") +
-            Tag("vDesc", "0.00") +
+            Tag("vDesc", FormatDecimal(MoneyFromCents(totals.DiscountCents), 2)) +
             Tag("vII", "0.00") +
             Tag("vIPI", "0.00") +
             Tag("vIPIDevol", "0.00") +
             Tag("vPIS", "0.00") +
             Tag("vCOFINS", "0.00") +
-            Tag("vOutro", "0.00") +
-            Tag("vNF", FormatDecimal(totalProducts, 2)) +
+            Tag("vOutro", FormatDecimal(MoneyFromCents(totals.OtherCents), 2)) +
+            Tag("vNF", FormatDecimal(MoneyFromCents(totals.InvoiceTotalCents), 2)) +
             Tag("vTotTrib", "0.00")) +
             BuildHomologationIbsCbsTotalXml(totalProducts, ambiente));
     }
@@ -2702,21 +2947,64 @@ internal static class Program
         return string.Equals(ambiente, "homologacao", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string BuildPaymentXml(string paymentMethod, decimal total)
+    private static List<FiscalPaymentDetail> BuildFiscalPaymentDetails(
+        JsonArray? explicitPaymentDetails,
+        string legacyPaymentMethod,
+        int invoiceTotalCents)
     {
-        var method = paymentMethod.Trim().ToLowerInvariant();
-        var code = method switch
+        if (invoiceTotalCents <= 0)
         {
-            "pix" => "17",
-            "cartao" => "03",
-            "convenio" => "05",
-            _ => "01"
-        };
-        var card = method == "pix" || method == "cartao"
-            ? Wrap("card", Tag("tpIntegra", "2") + (method == "cartao" ? Tag("tBand", "99") : ""))
-            : "";
+            throw new InvalidOperationException("O total fiscal deve ser maior que zero para detalhar os pagamentos.");
+        }
 
-        return Wrap("pag", Wrap("detPag", Tag("tPag", code) + Tag("vPag", FormatDecimal(total, 2)) + card));
+        if (explicitPaymentDetails is null)
+        {
+            return new List<FiscalPaymentDetail>
+            {
+                new(FiscalPaymentXml.NormalizePaymentMethod(legacyPaymentMethod, allowLegacyFallback: true), invoiceTotalCents)
+            };
+        }
+
+        if (explicitPaymentDetails.Count is < 1 or > 100)
+        {
+            throw new InvalidOperationException("O documento fiscal deve conter entre 1 e 100 detalhes de pagamento.");
+        }
+
+        var details = new List<FiscalPaymentDetail>();
+        long totalPaymentCents = 0;
+
+        foreach (var node in explicitPaymentDetails)
+        {
+            if (node is not JsonObject detail)
+            {
+                throw new InvalidOperationException("O detalhe de pagamento fiscal é inválido.");
+            }
+
+            var paymentMethod = FirstNonBlank(
+                GetString(detail, "paymentMethod"),
+                GetString(detail, "method"),
+                GetString(detail, "metodo_pagamento"));
+            var amountCents = FirstInt(
+                GetInt(detail, "amountCents"),
+                GetInt(detail, "valorCentavos"),
+                GetInt(detail, "valor_centavos"));
+
+            if (!amountCents.HasValue || amountCents.Value <= 0)
+            {
+                throw new InvalidOperationException("O valor de cada pagamento fiscal deve ser informado em centavos positivos.");
+            }
+
+            var normalizedPaymentMethod = FiscalPaymentXml.NormalizePaymentMethod(paymentMethod, allowLegacyFallback: false);
+            totalPaymentCents = checked(totalPaymentCents + amountCents.Value);
+            details.Add(new FiscalPaymentDetail(normalizedPaymentMethod, amountCents.Value));
+        }
+
+        if (totalPaymentCents != invoiceTotalCents)
+        {
+            throw new InvalidOperationException("A soma dos pagamentos fiscais diverge do total da nota.");
+        }
+
+        return details;
     }
 
     private sealed record AuthorizationExecution(
@@ -3234,6 +3522,18 @@ internal static class Program
         return Math.Round(Math.Max(0, cents) / 100m, 2);
     }
 
+    private static int MoneyToCents(decimal value)
+    {
+        var cents = Math.Round(value * 100m, 0, MidpointRounding.AwayFromZero);
+
+        if (cents < 0 || cents > int.MaxValue)
+        {
+            throw new InvalidOperationException("Valor monetário fiscal fora do limite de centavos inteiros.");
+        }
+
+        return decimal.ToInt32(cents);
+    }
+
     private static decimal? GetDecimal(JsonObject? node, string propertyName)
     {
         var value = GetString(node, propertyName);
@@ -3461,10 +3761,22 @@ internal static class Program
         DateTimeOffset? DhCont,
         string? XJust,
         string PaymentMethod,
+        List<FiscalPaymentDetail> PaymentDetails,
         EmitterConfig Emitter,
         RecipientConfig? Recipient,
         string? ConsumerDocument,
-        List<NfceLine> Lines);
+        List<NfceLine> Lines,
+        FiscalDocumentTotals Totals);
+
+    private sealed record FiscalDocumentResult(
+        List<NfceLine> Lines,
+        FiscalDocumentTotals Totals);
+
+    private sealed record FiscalDocumentTotals(
+        int ProductsTotalCents,
+        int DiscountCents,
+        int OtherCents,
+        int InvoiceTotalCents);
 
     private sealed record RecipientConfig(
         string Cnpj,
@@ -3488,6 +3800,10 @@ internal static class Program
         decimal Quantity,
         decimal UnitPrice,
         decimal TotalPrice,
+        int TotalPriceCents,
+        int DiscountCents,
+        int OtherCents,
+        bool HasExplicitFiscalAdjustments,
         string? Barcode,
         string Ncm,
         string Cfop,
@@ -4964,7 +5280,7 @@ internal static class Program
             Protocolo: ReadXmlValue(protocolo, "nProt"),
             QrCode: ReadXmlValue(supl, "qrCode"),
             Total: ReadXmlDecimal(total, "vNF"),
-            Pago: ReadXmlDecimal(pagamento, "vPag"),
+            Pago: FiscalPaymentXml.ReadTotal(pagamento),
             Items: items);
     }
 

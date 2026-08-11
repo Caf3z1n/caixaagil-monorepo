@@ -1,5 +1,6 @@
 ﻿const { randomUUID } = require('crypto');
 const { Op } = require('sequelize');
+const sequelize = require('../../database');
 const {
   ConferenciaCaixa,
   DespesaCaixa,
@@ -7,8 +8,11 @@ const {
   Arquivo,
   CategoriaProduto,
   Produto,
+  RecebimentoVenda,
   Venda,
 } = require('../models');
+const { normalizeInstallmentPlan } = require('../services/installmentPlanService');
+const { sanitizeReceiptLedgerEntry } = require('../services/receiptLedgerService');
 
 const comparablePaymentKeys = ['dinheiro', 'cartao', 'pix', 'parcelamento'];
 const paymentKeys = [...comparablePaymentKeys, 'convenio'];
@@ -20,6 +24,42 @@ const paymentLabels = {
   parcelamento: 'Parcelamento',
   convenio: 'Convênio',
 };
+
+const installmentEntriesSql = `COALESCE(
+  "Venda"."parcelamento"->'entries',
+  "Venda"."parcelamento"->'parcelasDetalhes',
+  "Venda"."parcelamento"->'parcelas_detalhes',
+  '[]'::jsonb
+)`;
+
+function buildInstallmentReceivedInSessionsCondition(sessionIds) {
+  const normalizedIds = [...new Set(
+    (Array.isArray(sessionIds) ? sessionIds : [sessionIds])
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+  )];
+
+  if (normalizedIds.length === 0) {
+    return sequelize.literal('FALSE');
+  }
+
+  const escapedIds = normalizedIds.map(sessionId => sequelize.escape(sessionId)).join(', ');
+
+  return sequelize.literal(`EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(${installmentEntriesSql}) = 'array' THEN ${installmentEntriesSql}
+        ELSE '[]'::jsonb
+      END
+    ) AS parcela(item)
+    WHERE COALESCE(
+      parcela.item->>'receivedSessionId',
+      parcela.item->>'caixa_recebimento_id',
+      parcela.item->>'sessionId'
+    ) IN (${escapedIds})
+  )`);
+}
 
 function createId(prefix) {
   return `${prefix}-${randomUUID()}`;
@@ -194,6 +234,10 @@ function isConvenioSale(sale) {
   const status = normalizeKey(sale.situacao);
   const receiptStatus = normalizeKey(sale.situacao_recebimento);
 
+  if (sale.parcelamento || resolvePaymentMethod(sale.metodo_pagamento) === 'parcelamento') {
+    return false;
+  }
+
   return (
     status === 'convenio' ||
     status === 'fiado' ||
@@ -215,6 +259,14 @@ function isReceiptReceivedInCashier(sale) {
 function resolveOriginalSalePaymentKey(sale) {
   if (isConvenioSale(sale)) {
     return 'convenio';
+  }
+
+  const installmentPlan = normalizeInstallmentPlan(sale.parcelamento);
+  if (
+    installmentPlan?.schemaVersion >= 2 &&
+    resolvePaymentMethod(sale.metodo_pagamento) === 'parcelamento'
+  ) {
+    return null;
   }
 
   return resolvePaymentMethod(sale.metodo_pagamento);
@@ -384,7 +436,7 @@ function collectSaleProductIds(saleRecords) {
   return [...ids];
 }
 
-function buildSessionSummary(sessionRecord, saleRecords, expenseRecords, conferenceRecord) {
+function buildSessionSummary(sessionRecord, saleRecords, expenseRecords, conferenceRecord, receiptRecords = []) {
   const session = getPlain(sessionRecord);
   const expectedTotals = buildEmptyTotals();
   const salesTotals = buildEmptyTotals();
@@ -395,9 +447,23 @@ function buildSessionSummary(sessionRecord, saleRecords, expenseRecords, confere
   const receiptCounts = buildEmptyCounts();
   let itemsCount = 0;
   let movementCount = 0;
+  const ledgerOperationKeys = new Set(
+    receiptRecords
+      .map(getPlain)
+      .filter(receipt => receipt.status !== 'cancelado')
+      .map(receipt => [
+        receipt.venda_id,
+        receipt.tipo,
+        receipt.tipo === 'parcela' ? Number(receipt.parcela_numero || 0) : 0,
+      ].join(':'))
+  );
 
   saleRecords.forEach(record => {
     const sale = getPlain(record);
+    const legacyInstallmentPlan = normalizeInstallmentPlan(sale.parcelamento);
+    const hasLegacyInstallmentReceipt = Boolean(legacyInstallmentPlan?.entries.some(entry => (
+      entry.receivedSessionId === session.id && (entry.paid || entry.paidAt)
+    )));
 
     if (sale.caixa_id === session.id) {
       const paymentKey = resolveOriginalSalePaymentKey(sale);
@@ -415,17 +481,64 @@ function buildSessionSummary(sessionRecord, saleRecords, expenseRecords, confere
       }
     }
 
-    if (sale.caixa_recebimento_id === session.id) {
-      const paymentKey = resolveReceiptPaymentKey(sale);
-      movementCount += 1;
+    if (sale.caixa_recebimento_id === session.id || hasLegacyInstallmentReceipt) {
+      if (legacyInstallmentPlan) {
+        legacyInstallmentPlan.entries
+          .filter(entry => (
+            entry.receivedSessionId === session.id &&
+            (entry.paid || entry.paidAt) &&
+            normalizeKey(entry.paymentMethod) !== 'parcelamento' &&
+            !ledgerOperationKeys.has(`${sale.id}:parcela:${entry.number}`)
+          ))
+          .forEach(entry => {
+            const paymentKey = resolvePaymentMethod(entry.paymentMethod);
 
-      if (paymentKey) {
-        const totalCents = sanitizeCents(sale.total_centavos);
-        expectedTotals[paymentKey] += totalCents;
-        receiptTotals[paymentKey] += totalCents;
-        receiptCounts[paymentKey] += 1;
+            if (!paymentKey) {
+              return;
+            }
+
+            const amountCents = sanitizeCents(entry.amountCents);
+            expectedTotals[paymentKey] += amountCents;
+            receiptTotals[paymentKey] += amountCents;
+            receiptCounts[paymentKey] += 1;
+            movementCount += 1;
+          });
+      } else {
+        if (ledgerOperationKeys.has(`${sale.id}:convenio:0`)) {
+          return;
+        }
+
+        const paymentKey = resolveReceiptPaymentKey(sale);
+        movementCount += 1;
+
+        if (paymentKey) {
+          const totalCents = sanitizeCents(sale.total_centavos);
+          expectedTotals[paymentKey] += totalCents;
+          receiptTotals[paymentKey] += totalCents;
+          receiptCounts[paymentKey] += 1;
+        }
       }
     }
+  });
+
+  receiptRecords.forEach(record => {
+    const receipt = getPlain(record);
+
+    if (receipt.status === 'cancelado' || receipt.caixa_id !== session.id) {
+      return;
+    }
+
+    const paymentKey = resolvePaymentMethod(receipt.metodo_pagamento);
+
+    if (!paymentKey) {
+      return;
+    }
+
+    const totalCents = sanitizeCents(receipt.valor_centavos);
+    expectedTotals[paymentKey] += totalCents;
+    receiptTotals[paymentKey] += totalCents;
+    receiptCounts[paymentKey] += 1;
+    movementCount += 1;
   });
 
   const totalCashExpenseCents = expenseRecords.reduce(
@@ -489,6 +602,11 @@ function buildSessionSummary(sessionRecord, saleRecords, expenseRecords, confere
       diferenca_total_centavos: totalConfirmedCents === null ? null : totalConfirmedCents - totalExpectedCents,
       status_geral: conferenceIsActive ? resolveOverallStatus(paymentSummaries) : null,
       formas_pagamento: paymentSummaries,
+      recebimentos_count: receiptRecords.filter(record => getPlain(record).status !== 'cancelado').length,
+      total_recebimentos_centavos: receiptRecords.reduce((total, record) => {
+        const receipt = getPlain(record);
+        return receipt.status === 'cancelado' ? total : total + sanitizeCents(receipt.valor_centavos);
+      }, 0),
     },
     totais_esperados: expectedTotals,
     totais_confirmados: confirmedTotals,
@@ -568,7 +686,7 @@ async function resolveClosedSession(usuarioId, sessionId) {
 
 async function loadSessionDetails(usuarioId, sessionId) {
   const sessao = await resolveClosedSession(usuarioId, sessionId);
-  const [conferencia, vendas, despesas] = await Promise.all([
+  const [conferencia, vendas, despesas, recebimentos] = await Promise.all([
     ConferenciaCaixa.findOne({
       where: {
         usuario_id: usuarioId,
@@ -584,6 +702,7 @@ async function loadSessionDetails(usuarioId, sessionId) {
         [Op.or]: [
           { caixa_id: sessao.id },
           { caixa_recebimento_id: sessao.id },
+          buildInstallmentReceivedInSessionsCondition([sessao.id]),
         ],
       },
       order: [
@@ -601,8 +720,27 @@ async function loadSessionDetails(usuarioId, sessionId) {
         ['created_at', 'DESC'],
       ],
     }),
+    RecebimentoVenda.findAll({
+      where: {
+        usuario_id: usuarioId,
+        caixa_id: sessao.id,
+        status: 'confirmado',
+      },
+      order: [
+        ['recebido_em', 'DESC'],
+        ['created_at', 'DESC'],
+      ],
+    }),
   ]);
-  const productIds = collectSaleProductIds(vendas);
+  const vendasRelevantes = vendas.filter(record => {
+    const sale = getPlain(record);
+    const installmentPlan = normalizeInstallmentPlan(sale.parcelamento);
+
+    return sale.caixa_id === sessao.id ||
+      sale.caixa_recebimento_id === sessao.id ||
+      Boolean(installmentPlan?.entries.some(entry => entry.receivedSessionId === sessao.id));
+  });
+  const productIds = collectSaleProductIds(vendasRelevantes);
   const products = productIds.length > 0
     ? await Produto.findAll({
         where: {
@@ -623,11 +761,12 @@ async function loadSessionDetails(usuarioId, sessionId) {
   }));
   const { resumo, totais_esperados, totais_confirmados } = buildSessionSummary(
     sessao,
-    vendas,
+    vendasRelevantes,
     despesas,
-    conferencia
+    conferencia,
+    recebimentos
   );
-  const vendasMapeadas = vendas
+  const vendasMapeadas = vendasRelevantes
     .flatMap(record => {
       const sale = getPlain(record);
       const mapped = [];
@@ -648,6 +787,7 @@ async function loadSessionDetails(usuarioId, sessionId) {
     resumo,
     vendas: vendasMapeadas,
     despesas_caixa: despesas.map(mapExpense),
+    recebimentos: recebimentos.map(sanitizeReceiptLedgerEntry),
     totais_esperados,
     totais_confirmados,
   };
@@ -660,6 +800,7 @@ function parseConfirmedTotals(body) {
     dinheiro: sanitizeCents(source.dinheiro),
     cartao: sanitizeCents(source.cartao),
     pix: sanitizeCents(source.pix),
+    parcelamento: sanitizeCents(source.parcelamento),
     convenio: sanitizeCents(source.convenio),
   };
 }
@@ -704,7 +845,7 @@ module.exports = {
       }
 
       const sessionIds = sessoes.map(sessao => sessao.id);
-      const [conferencias, vendas, despesas] = await Promise.all([
+      const [conferencias, vendas, despesas, recebimentos] = await Promise.all([
         ConferenciaCaixa.findAll({
           where: {
             usuario_id: req.user.id,
@@ -722,6 +863,7 @@ module.exports = {
             [Op.or]: [
               { caixa_id: { [Op.in]: sessionIds } },
               { caixa_recebimento_id: { [Op.in]: sessionIds } },
+              buildInstallmentReceivedInSessionsCondition(sessionIds),
             ],
           },
           order: [
@@ -741,31 +883,45 @@ module.exports = {
             ['created_at', 'DESC'],
           ],
         }),
+        RecebimentoVenda.findAll({
+          where: {
+            usuario_id: req.user.id,
+            caixa_id: {
+              [Op.in]: sessionIds,
+            },
+            status: 'confirmado',
+          },
+          order: [
+            ['recebido_em', 'DESC'],
+            ['created_at', 'DESC'],
+          ],
+        }),
       ]);
       const conferenceBySessionId = new Map(
         conferencias.map(conferencia => [conferencia.caixa_id, conferencia])
       );
       const salesBySessionId = new Map();
       const expensesBySessionId = new Map();
+      const receiptsBySessionId = new Map();
 
       vendas.forEach(record => {
         const sale = getPlain(record);
+        const installmentPlan = normalizeInstallmentPlan(sale.parcelamento);
+        const relatedSessionIds = new Set([
+          sale.caixa_id,
+          sale.caixa_recebimento_id,
+          ...(installmentPlan?.entries.map(entry => entry.receivedSessionId) || []),
+        ]);
 
-        if (sale.caixa_id && sessionIds.includes(sale.caixa_id)) {
-          const sessionSales = salesBySessionId.get(sale.caixa_id) || [];
-          sessionSales.push(record);
-          salesBySessionId.set(sale.caixa_id, sessionSales);
-        }
+        relatedSessionIds.forEach(sessionId => {
+          if (!sessionId || !sessionIds.includes(sessionId)) {
+            return;
+          }
 
-        if (
-          sale.caixa_recebimento_id &&
-          sessionIds.includes(sale.caixa_recebimento_id) &&
-          sale.caixa_recebimento_id !== sale.caixa_id
-        ) {
-          const sessionSales = salesBySessionId.get(sale.caixa_recebimento_id) || [];
+          const sessionSales = salesBySessionId.get(sessionId) || [];
           sessionSales.push(record);
-          salesBySessionId.set(sale.caixa_recebimento_id, sessionSales);
-        }
+          salesBySessionId.set(sessionId, sessionSales);
+        });
       });
 
       despesas.forEach(record => {
@@ -773,6 +929,13 @@ module.exports = {
         const sessionExpenses = expensesBySessionId.get(expense.caixa_id) || [];
         sessionExpenses.push(record);
         expensesBySessionId.set(expense.caixa_id, sessionExpenses);
+      });
+
+      recebimentos.forEach(record => {
+        const receipt = getPlain(record);
+        const sessionReceipts = receiptsBySessionId.get(receipt.caixa_id) || [];
+        sessionReceipts.push(record);
+        receiptsBySessionId.set(receipt.caixa_id, sessionReceipts);
       });
 
       const pendentes = [];
@@ -784,7 +947,8 @@ module.exports = {
           sessao,
           salesBySessionId.get(sessao.id) || [],
           expensesBySessionId.get(sessao.id) || [],
-          conferencia
+          conferencia,
+          receiptsBySessionId.get(sessao.id) || []
         );
 
         if (isActiveConference(conferencia)) {
@@ -898,4 +1062,9 @@ module.exports = {
       return handleCaixaError(res, error, 'Erro ao reabrir conferência de caixa.');
     }
   },
+};
+
+module.exports.__test = {
+  buildInstallmentReceivedInSessionsCondition,
+  buildSessionSummary,
 };
