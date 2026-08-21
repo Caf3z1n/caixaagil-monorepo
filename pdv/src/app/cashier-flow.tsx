@@ -4287,6 +4287,15 @@ export function DesktopCashierFlow({
     const eventId = typeof payload.eventId === "string" && payload.eventId.trim()
       ? payload.eventId
       : `${eventType}-${aggregateId}`;
+    const eventPayload = {
+      ...payload,
+      eventId,
+      pdv: {
+        deviceId,
+        identity: pdvIdentity,
+        sequenceScope: shiftSequenceScope
+      }
+    };
 
     void store
       .enqueueEvent({
@@ -4294,23 +4303,61 @@ export function DesktopCashierFlow({
         eventType,
         aggregateType,
         aggregateId,
-        payload: {
-          ...payload,
-          eventId,
-          pdv: {
-            deviceId,
-            identity: pdvIdentity,
-            sequenceScope: shiftSequenceScope
-          }
-        }
+        payload: eventPayload
       })
       .then((result) => {
         setPendingSyncCount(result.pending);
         void syncPendingOutboundQueues();
       })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : "Não foi possível registrar o evento local.";
-        onSystemMessage(`Operação salva na tela, mas o evento local falhou: ${message}`);
+      .catch(async (error) => {
+        const localMessage = error instanceof Error ? error.message : "Não foi possível registrar o evento local.";
+
+        if (connectivity === "online" && deviceCredential && deviceId) {
+          try {
+            const createdAt = new Date().toISOString();
+            const response = await apiPost<SyncPushResponse>("/pdvs/sync/push", {
+              credencial_dispositivo: deviceCredential,
+              dispositivo_id: deviceId,
+              eventos: [{
+                id: eventId.length > 64 ? eventId.slice(0, 64) : eventId,
+                event_type: eventType,
+                aggregate_type: aggregateType,
+                aggregate_id: aggregateId,
+                idempotency_key: `${localStoreScope}:${eventType}:${aggregateId}:${eventId}`,
+                payload: {
+                  ...eventPayload,
+                  localScope: localStoreScope,
+                  createdAt
+                },
+                created_at: createdAt
+              }]
+            });
+            const accepted = response.eventos.some((event) => (
+              event.status === "processado" || event.status === "duplicado"
+            ));
+
+            if (!accepted) {
+              throw new Error(response.eventos[0]?.message ?? "Evento recusado pela API.");
+            }
+
+            onConnectivityChange("online");
+            updateBillingStatus(response.billing_status ?? null);
+            onSystemMessage("O armazenamento local falhou, mas a operação foi salva diretamente na API.");
+            return;
+          } catch (syncError) {
+            const syncMessage = syncError instanceof Error
+              ? syncError.message
+              : "Não foi possível enviar a operação diretamente para a API.";
+            onSystemMessage(
+              `Falha crítica no armazenamento local (${localMessage}) e na sincronização (${syncMessage}). Interrompa novas vendas e contate o suporte.`
+            );
+            return;
+          }
+        }
+
+        onSystemMessage(
+          `Falha crítica no armazenamento local: ${localMessage}. Interrompa novas vendas e contate o suporte.`
+        );
       });
   }
 
@@ -7577,12 +7624,18 @@ export function DesktopCashierFlow({
       return;
     }
 
-    const snapshot = buildLocalStateSnapshot();
+    const timeoutId = window.setTimeout(() => {
+      const snapshot = buildLocalStateSnapshot();
 
-    void store.saveState({ scope: localStoreScope, state: snapshot }).catch((error) => {
-      const message = error instanceof Error ? error.message : "Não foi possível salvar o estado local do PDV.";
-      onSystemMessage(message);
-    });
+      void store.saveState({ scope: localStoreScope, state: snapshot }).catch((error) => {
+        const message = error instanceof Error ? error.message : "Não foi possível salvar o estado local do PDV.";
+        onSystemMessage(message);
+      });
+    }, 750);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [
     isLocalStateReady,
     localStoreScope,

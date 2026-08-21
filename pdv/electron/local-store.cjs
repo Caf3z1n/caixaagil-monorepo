@@ -15,9 +15,140 @@ function createSqlJsRuntime(app) {
 function createLocalPdvStore(app) {
   const dbDirectory = path.join(app.getPath("userData"), "data");
   const dbPath = path.join(dbDirectory, "caixa-agil-pdv.sqlite");
+  const backupPaths = [1, 2, 3].map((index) => `${dbPath}.backup-${index}`);
   const { initSqlJs, wasmDirectory } = createSqlJsRuntime(app);
   let databasePromise = null;
   let writeQueue = Promise.resolve();
+  let sqlRuntime = null;
+  let lastBackupAt = 0;
+
+  function hasSqliteHeader(buffer) {
+    return Buffer.isBuffer(buffer)
+      && buffer.length >= 100
+      && buffer.subarray(0, 16).equals(Buffer.from("SQLite format 3\0", "binary"));
+  }
+
+  function validateDatabaseBuffer(SQL, buffer, sourcePath) {
+    if (!hasSqliteHeader(buffer)) {
+      throw new Error(`Arquivo SQLite inválido ou vazio: ${sourcePath}`);
+    }
+
+    const candidate = new SQL.Database(buffer);
+
+    try {
+      const result = candidate.exec("PRAGMA quick_check(1)");
+      const value = result[0]?.values?.[0]?.[0];
+
+      if (value !== "ok") {
+        throw new Error(`Falha de integridade no SQLite: ${sourcePath}`);
+      }
+    } finally {
+      candidate.close();
+    }
+  }
+
+  function writeFileDurably(filePath, buffer) {
+    const descriptor = fs.openSync(filePath, "w");
+
+    try {
+      let offset = 0;
+
+      while (offset < buffer.length) {
+        offset += fs.writeSync(descriptor, buffer, offset, buffer.length - offset, offset);
+      }
+
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+
+  function writeValidatedCopy(SQL, destinationPath, buffer) {
+    const temporaryPath = `${destinationPath}.${process.pid}.tmp`;
+
+    try {
+      writeFileDurably(temporaryPath, buffer);
+      const persistedBuffer = fs.readFileSync(temporaryPath);
+      validateDatabaseBuffer(SQL, persistedBuffer, temporaryPath);
+
+      if (!persistedBuffer.equals(buffer)) {
+        throw new Error(`A cópia local não corresponde ao conteúdo original: ${destinationPath}`);
+      }
+
+      fs.renameSync(temporaryPath, destinationPath);
+      validateDatabaseBuffer(SQL, fs.readFileSync(destinationPath), destinationPath);
+    } finally {
+      if (fs.existsSync(temporaryPath)) {
+        fs.rmSync(temporaryPath, { force: true });
+      }
+    }
+  }
+
+  function readValidatedDatabase(SQL, sourcePath) {
+    const buffer = fs.readFileSync(sourcePath);
+    validateDatabaseBuffer(SQL, buffer, sourcePath);
+    return buffer;
+  }
+
+  function timestampForFileName() {
+    return new Date().toISOString().replace(/[:.]/g, "-");
+  }
+
+  function quarantineCorruptedDatabase() {
+    if (!fs.existsSync(dbPath)) {
+      return null;
+    }
+
+    const quarantinePath = path.join(
+      dbDirectory,
+      `caixa-agil-pdv.corrompido-${timestampForFileName()}.sqlite`
+    );
+    try {
+      fs.copyFileSync(dbPath, quarantinePath);
+      return quarantinePath;
+    } catch (error) {
+      console.warn(`Não foi possível preservar uma cópia do SQLite corrompido: ${dbPath}`, error);
+      return null;
+    }
+  }
+
+  function restoreNewestValidBackup(SQL) {
+    for (const backupPath of backupPaths) {
+      if (!fs.existsSync(backupPath)) {
+        continue;
+      }
+
+      try {
+        const buffer = readValidatedDatabase(SQL, backupPath);
+        writeFileDurably(dbPath, buffer);
+        validateDatabaseBuffer(SQL, fs.readFileSync(dbPath), dbPath);
+        return buffer;
+      } catch (error) {
+        console.warn(`Backup local inválido ignorado: ${backupPath}`, error);
+      }
+    }
+
+    return null;
+  }
+
+  function rotateBackups(SQL) {
+    for (let index = backupPaths.length - 1; index > 0; index -= 1) {
+      const sourcePath = backupPaths[index - 1];
+
+      if (!fs.existsSync(sourcePath)) {
+        continue;
+      }
+
+      try {
+        const sourceBuffer = readValidatedDatabase(SQL, sourcePath);
+        writeValidatedCopy(SQL, backupPaths[index], sourceBuffer);
+      } catch (error) {
+        console.warn(`Backup local inválido não foi rotacionado: ${sourcePath}`, error);
+      }
+    }
+
+    lastBackupAt = Date.now();
+  }
 
   async function getDatabase() {
     if (!databasePromise) {
@@ -27,7 +158,28 @@ function createLocalPdvStore(app) {
         const SQL = await initSqlJs({
           locateFile: (file) => path.join(wasmDirectory, file)
         });
-        const fileBuffer = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : null;
+        sqlRuntime = SQL;
+        let fileBuffer = null;
+
+        if (fs.existsSync(dbPath)) {
+          try {
+            fileBuffer = readValidatedDatabase(SQL, dbPath);
+          } catch (error) {
+            const quarantinePath = quarantineCorruptedDatabase();
+            fileBuffer = restoreNewestValidBackup(SQL);
+
+            if (!fileBuffer) {
+              const detail = quarantinePath ? ` Cópia preservada em ${quarantinePath}.` : "";
+              throw new Error(
+                `O banco local do PDV está corrompido e não há backup íntegro disponível.${detail}`,
+                { cause: error }
+              );
+            }
+
+            console.warn(`Banco local restaurado automaticamente de backup. Original: ${quarantinePath}`);
+          }
+        }
+
         const database = fileBuffer ? new SQL.Database(fileBuffer) : new SQL.Database();
 
         migrate(database);
@@ -138,11 +290,46 @@ function createLocalPdvStore(app) {
   }
 
   function persist(database) {
-    const exported = database.export();
-    const temporaryPath = `${dbPath}.${process.pid}.tmp`;
+    if (!sqlRuntime) {
+      throw new Error("Runtime SQLite ainda não foi inicializado.");
+    }
 
-    fs.writeFileSync(temporaryPath, Buffer.from(exported));
-    fs.renameSync(temporaryPath, dbPath);
+    const exported = Buffer.from(database.export());
+    const temporaryPath = `${dbPath}.${process.pid}.tmp`;
+    validateDatabaseBuffer(sqlRuntime, exported, "memória");
+
+    writeFileDurably(temporaryPath, exported);
+    const persistedTemporary = fs.readFileSync(temporaryPath);
+    validateDatabaseBuffer(sqlRuntime, persistedTemporary, temporaryPath);
+
+    if (!persistedTemporary.equals(exported)) {
+      throw new Error("A gravação do SQLite local não corresponde ao conteúdo exportado.");
+    }
+
+    const currentBuffer = fs.existsSync(dbPath)
+      ? readValidatedDatabase(sqlRuntime, dbPath)
+      : null;
+
+    if (currentBuffer && (lastBackupAt === 0 || Date.now() - lastBackupAt >= 5 * 60 * 1000)) {
+      rotateBackups(sqlRuntime);
+    }
+
+    try {
+      fs.renameSync(temporaryPath, dbPath);
+      const finalBuffer = fs.readFileSync(dbPath);
+      validateDatabaseBuffer(sqlRuntime, finalBuffer, dbPath);
+      writeValidatedCopy(sqlRuntime, backupPaths[0], finalBuffer);
+    } catch (error) {
+      if (currentBuffer) {
+        writeFileDurably(dbPath, currentBuffer);
+      }
+
+      throw error;
+    } finally {
+      if (fs.existsSync(temporaryPath)) {
+        fs.rmSync(temporaryPath, { force: true });
+      }
+    }
   }
 
   function withWrite(work) {
