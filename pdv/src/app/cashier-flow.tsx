@@ -5426,9 +5426,13 @@ export function DesktopCashierFlow({
     const catalogProductById = new Map(catalogProducts.map((product) => [String(product.id), product]));
     const fiscalItems = sale.items.map((item) => {
       const catalogProduct = catalogProductById.get(String(item.id)) ?? null;
+      const catalogFiscal = asRecord(catalogProduct?.fiscal);
+      const storedFiscal = asRecord(item.fiscal);
       const fiscal = mergeFiscalRecordWithFallback(
-        asRecord(item.fiscal),
-        asRecord(catalogProduct?.fiscal)
+        // Em uma reemissão, o grupo fiscal atual do catálogo deve prevalecer
+        // sobre o snapshot antigo da venda, que pode conter CFOP já corrigido.
+        catalogFiscal,
+        storedFiscal
       );
 
       return {
@@ -5439,8 +5443,8 @@ export function DesktopCashierFlow({
         totalPriceCents: item.priceCents * item.quantity,
         barcode: item.barcode || catalogProduct?.barcode || "",
         ncm:
-          normalizeProductNcm(item.ncm) ||
           normalizeProductNcm(catalogProduct?.ncm) ||
+          normalizeProductNcm(item.ncm) ||
           normalizeProductNcm(fiscal?.ncm),
         fiscal
       };
