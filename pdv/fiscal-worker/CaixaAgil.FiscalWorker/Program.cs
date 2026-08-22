@@ -2151,6 +2151,7 @@ internal static class Program
         var cnpj = OnlyDigits(config.Emitente.CnpjCpf).PadLeft(14, '0');
         var cNf = BuildStableRandomCode(saleId, numero);
         var chave = BuildAccessKey(codigoUf, issueDate, cnpj, modelo, serie, numero, cNf, "1");
+        var recipient = modelo == "55" ? BuildRecipientConfig(payload) : null;
         var lines = BuildNfceLines(items, sale, modelo);
         var requestedInvoiceTotalCents = FirstInt(
             GetInt(payload, "totalCents"),
@@ -2158,7 +2159,6 @@ internal static class Program
             GetInt(sale, "totalCents"),
             GetInt(sale, "total_centavos"),
             GetInt(explicitFiscalTotals, "invoiceTotalCents"));
-        var recipient = modelo == "55" ? BuildRecipientConfig(payload) : null;
         var consumerDocument = modelo == "65"
             ? NormalizeConsumerDocument(FirstNonBlank(
                 GetString(payload, "consumerDocument"),
@@ -2192,6 +2192,16 @@ internal static class Program
                 PisRate: 0m,
                 CofinsCst: "04",
                 CofinsRate: 0m));
+        }
+
+        if (modelo == "55" && recipient is not null)
+        {
+            lines = lines
+                .Select(line => line with
+                {
+                    Cfop = ResolveCfopForDestination(line.Cfop, config.Uf, recipient.Uf)
+                })
+                .ToList();
         }
 
         var fiscalResult = ResolveFiscalDocumentTotals(lines, requestedInvoiceTotalCents, explicitFiscalTotals);
@@ -3196,6 +3206,35 @@ internal static class Program
         return string.Equals(NormalizeUf(emission.Uf), emission.Recipient.Uf, StringComparison.OrdinalIgnoreCase)
             ? "1"
             : "2";
+    }
+
+    private static string ResolveCfopForDestination(string cfop, string? emitterUf, string? recipientUf)
+    {
+        var normalizedCfop = OnlyDigits(cfop);
+        var normalizedEmitterUf = NormalizeUf(emitterUf);
+        var normalizedRecipientUf = NormalizeUf(recipientUf);
+
+        if (string.IsNullOrWhiteSpace(normalizedEmitterUf) ||
+            string.IsNullOrWhiteSpace(normalizedRecipientUf) ||
+            string.Equals(normalizedEmitterUf, normalizedRecipientUf, StringComparison.OrdinalIgnoreCase))
+        {
+            return normalizedCfop.Length == 4 ? normalizedCfop : "5102";
+        }
+
+        if (normalizedCfop.Length != 4)
+        {
+            return "6102";
+        }
+
+        if (normalizedCfop[0] != '5')
+        {
+            return normalizedCfop;
+        }
+
+        // CFOPs beginning with 5xxx describe an internal operation. For an
+        // interstate recipient, the corresponding outbound family is 6xxx.
+        // This prevents a 5102 + idDest=2 mismatch (SEFAZ rejection 733).
+        return $"6{normalizedCfop[1..]}";
     }
 
     private static string GetContingencyEmissionType(NfceEmission emission)

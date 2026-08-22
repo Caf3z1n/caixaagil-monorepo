@@ -104,6 +104,12 @@ Campos esperados pelo worker:
 
 Para emissão local no PDV, o worker ainda espera um `pfxPath` acessível no Windows. A sincronização final entre o certificado privado salvo no backend e o arquivo local consumido pelo worker deve baixar/armazenar esse certificado em área privada do desktop e pode evoluir para DPAPI/keytar no Electron.
 
+## CFOP e inutilização automática
+
+Para NF-e com destinatário em outra UF, o worker ajusta a família de CFOP de operação interna `5xxx` para a família interestadual `6xxx` — por exemplo, `5102` para `6102` — mantendo `idDest=2` coerente com o destinatário. Operações dentro da mesma UF preservam o CFOP cadastrado.
+
+Falhas determinísticas de montagem ou rejeições da SEFAZ podem inutilizar automaticamente o número reservado. Falhas de comunicação, timeout, duplicidade, certificado ou configuração não são inutilizadas automaticamente: nesses casos o PDV deve consultar o protocolo antes de tomar uma decisão, pois a SEFAZ pode ter autorizado a nota sem devolver a resposta.
+
 ## Build e empacotamento
 
 Compilar o worker:

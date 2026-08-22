@@ -721,10 +721,12 @@ function isAutoInutilizationEligible(command, response, payload) {
     return false;
   }
 
-  return status.includes("rejeitada") ||
-    status.includes("erro_emissao") ||
-    status.includes("erro") ||
-    response?.success === false;
+  // Inutilize automaticamente somente falhas determinísticas: rejeição da
+  // SEFAZ ou erro local ao montar/validar o documento. Em timeout, falha de
+  // comunicação ou qualquer status desconhecido, a SEFAZ pode ter autorizado
+  // a nota sem devolver a resposta; nesses casos, consultar o protocolo antes
+  // de inutilizar é obrigatório para não criar uma duplicidade fiscal.
+  return status.includes("rejeitada") || status.includes("erro_emissao");
 }
 
 async function advanceFiscalNumber(localStore, scope, config, command, payload, response) {
