@@ -458,6 +458,10 @@ function normalizeSaleItems(items) {
     const categoryIcon = item.categoryIcon || item.categoria_icone || item.categoria_visual?.icone || item.categoryVisual?.icon || null;
     const categoryColor = item.categoryColor || item.categoria_cor || item.categoria_visual?.cor || item.categoryVisual?.color || null;
     const categoryAccent = item.categoryAccent || item.categoria_accent || item.categoria_visual?.accent || item.categoryVisual?.accent || null;
+    const fiscal = item.fiscal && typeof item.fiscal === 'object' && !Array.isArray(item.fiscal)
+      ? item.fiscal
+      : null;
+    const ncm = String(item.ncm || fiscal?.ncm || '').replace(/\D/g, '').slice(0, 8) || null;
 
     return {
       id: item.id,
@@ -472,6 +476,8 @@ function normalizeSaleItems(items) {
       },
       imagem_url: item.imageUrl || item.imagem_url || item.image_url || item.imagem?.url || null,
       codigo_barras: item.barcode || item.codigo_barras || null,
+      ncm,
+      fiscal,
       quantidade: parsePositiveNumber(item.quantity || item.quantidade),
       preco_unitario_centavos: sanitizeCents(item.priceCents || item.preco_unitario_centavos || item.preco_venda_centavos),
       total_centavos: sanitizeCents(
@@ -2718,13 +2724,16 @@ function sanitizeReopenedSale(venda) {
     name: item.nome || 'Produto',
     category: item.categoria || item.categoria_visual?.nome || 'Produtos',
     barcode: item.codigo_barras || '',
-    ncm: '',
+    ncm: String(item.ncm || item.fiscal?.ncm || '').replace(/\D/g, '').slice(0, 8),
     priceCents: sanitizeCents(item.preco_unitario_centavos),
     stockQuantity: null,
     categoryIcon: item.categoria_visual?.icone || 'package',
     categoryColor: item.categoria_visual?.cor || '#fff0e6',
     categoryAccent: item.categoria_visual?.accent || '#ff5a00',
     imageUrl: item.imagem_url || null,
+    fiscal: item.fiscal && typeof item.fiscal === 'object' && !Array.isArray(item.fiscal)
+      ? item.fiscal
+      : null,
     quantity: Math.max(1, Math.floor(Number(item.quantidade || 1))),
   }));
   const paymentMethod = normalizeKey(data.metodo_pagamento);

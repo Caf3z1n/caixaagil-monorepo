@@ -398,6 +398,85 @@ async function getProdutoRegistrosVinculados(usuarioId, produtoId, options = {})
   return movimentacoes + saldosPositivos + vendas;
 }
 
+async function getProdutosRegistrosVinculadosMap(usuarioId, produtoIds, options = {}) {
+  const ids = [...new Set(
+    (Array.isArray(produtoIds) ? produtoIds : [])
+      .map(id => Number(id))
+      .filter(id => Number.isInteger(id) && id > 0)
+  )];
+
+  if (ids.length === 0) {
+    return new Map();
+  }
+
+  const idTexts = ids.map(String);
+  const queryOptions = {
+    replacements: {
+      usuarioId,
+      produtoIds: ids,
+      produtoIdTexts: idTexts,
+    },
+    type: QueryTypes.SELECT,
+    transaction: options.transaction,
+  };
+  const [movimentacoes, saldosPositivos, vendas] = await Promise.all([
+    sequelize.query(
+      `
+        SELECT produto_id, COUNT(*)::int AS total
+        FROM movimentacoes_estoque
+        WHERE usuario_id = :usuarioId
+          AND produto_id IN (:produtoIds)
+        GROUP BY produto_id
+      `,
+      queryOptions
+    ),
+    sequelize.query(
+      `
+        SELECT produto_id, COUNT(*)::int AS total
+        FROM saldos_estoques_produtos
+        WHERE usuario_id = :usuarioId
+          AND produto_id IN (:produtoIds)
+          AND quantidade > 0
+        GROUP BY produto_id
+      `,
+      queryOptions
+    ),
+    sequelize.query(
+      `
+        SELECT produto_id, COUNT(DISTINCT venda_id)::int AS total
+        FROM (
+          SELECT
+            venda.id AS venda_id,
+            COALESCE(
+              NULLIF(item->>'produto_id', ''),
+              NULLIF(item->>'productId', ''),
+              NULLIF(item->>'id', '')
+            ) AS produto_id
+          FROM vendas AS venda
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(venda.itens, '[]'::jsonb)) AS item
+          WHERE venda.usuario_id = :usuarioId
+        ) AS vendas_produtos
+        WHERE produto_id IN (:produtoIdTexts)
+        GROUP BY produto_id
+      `,
+      queryOptions
+    ),
+  ]);
+  const registrosByProduto = new Map(ids.map(id => [id, 0]));
+
+  for (const rows of [movimentacoes, saldosPositivos, vendas]) {
+    for (const row of rows) {
+      const produtoId = Number(row.produto_id);
+
+      if (registrosByProduto.has(produtoId)) {
+        registrosByProduto.set(produtoId, registrosByProduto.get(produtoId) + Number(row.total || 0));
+      }
+    }
+  }
+
+  return registrosByProduto;
+}
+
 function buildCategoriaPayload(body) {
   const icone = iconesPermitidos.has(body?.icone) ? body.icone : 'package';
   const cor = coresPermitidas.has(body?.cor) ? body.cor : 'laranja';
@@ -596,6 +675,10 @@ async function loadSnapshot(usuarioId, options = {}) {
   ]);
 
   const countByCategoria = new Map();
+  const registrosVinculadosByProduto = await getProdutosRegistrosVinculadosMap(
+    usuarioId,
+    produtos.map(produto => produto.id)
+  );
 
   produtos.forEach(produto => {
     const categoriaId = produto.categoria_id;
@@ -607,13 +690,11 @@ async function loadSnapshot(usuarioId, options = {}) {
     categorias: categorias.map(categoria =>
       sanitizeCategoria(categoria, countByCategoria.get(categoria.id) ?? 0)
     ),
-    produtos: await Promise.all(
-      produtos.map(async produto =>
-        sanitizeProduto(produto, {
-          registros_vinculados: await getProdutoRegistrosVinculados(usuarioId, produto.id),
-          fiscalTaxRegime,
-        })
-      )
+    produtos: produtos.map(produto =>
+      sanitizeProduto(produto, {
+        registros_vinculados: registrosVinculadosByProduto.get(Number(produto.id)) ?? 0,
+        fiscalTaxRegime,
+      })
     ),
     grupos_fiscais: gruposFiscais.map(grupoFiscal => sanitizeGrupoFiscalResumo(grupoFiscal, fiscalTaxRegime)),
     estoques: estoques.map(sanitizeEstoque),

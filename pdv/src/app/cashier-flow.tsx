@@ -5423,16 +5423,28 @@ export function DesktopCashierFlow({
     const modelConfig = getFiscalModelConfig(config, fiscalModel);
     const serieFiscal = Number(modelConfig.serie) || getPdvFiscalSeriesValue(config) || null;
     const fiscalIssuedAt = new Date().toISOString();
-    const fiscalItems = sale.items.map((item) => ({
-      id: item.id,
-      name: item.name,
-      quantity: item.quantity,
-      priceCents: item.priceCents,
-      totalPriceCents: item.priceCents * item.quantity,
-      barcode: item.barcode,
-      ncm: normalizeProductNcm(item.ncm),
-      fiscal: item.fiscal ?? null
-    }));
+    const catalogProductById = new Map(catalogProducts.map((product) => [String(product.id), product]));
+    const fiscalItems = sale.items.map((item) => {
+      const catalogProduct = catalogProductById.get(String(item.id)) ?? null;
+      const fiscal = mergeFiscalRecordWithFallback(
+        asRecord(item.fiscal),
+        asRecord(catalogProduct?.fiscal)
+      );
+
+      return {
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        priceCents: item.priceCents,
+        totalPriceCents: item.priceCents * item.quantity,
+        barcode: item.barcode || catalogProduct?.barcode || "",
+        ncm:
+          normalizeProductNcm(item.ncm) ||
+          normalizeProductNcm(catalogProduct?.ncm) ||
+          normalizeProductNcm(fiscal?.ncm),
+        fiscal
+      };
+    });
     const { itemAdjustments, ...fiscalTotals } = buildFiscalDocumentTotals(fiscalItems, sale.totalCents);
     const fiscalPaymentDetails = buildFiscalPaymentDetails({
       paymentMethod: sale.paymentMethod,
